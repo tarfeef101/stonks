@@ -1,0 +1,5 @@
+# Toolchain pins — these drive the Docker image tags in the Makefile
+# (Docker-only toolchain, plan §0: nothing is installed on the host,
+# nothing lands on the host PATH).
+go 1.27.3
+nodejs 26.13.0
