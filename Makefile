@@ -9,6 +9,10 @@
 #   golang:1.27.3          backend build/test/lint/fmt
 #   node:26.13.0           frontend build/lint/fmt (exact 26.x minor recorded in docs/TECH-DECISIONS.md)
 #   hashicorp/terraform    tf-validate (exact version verified + pinned at step 1.1)
+#
+# NOTE: every guarded target uses a single-shell `if [ ... ]; then ...; else ...; fi`
+# recipe line — a bare `test ... || exit 0` line would NOT stop subsequent recipe
+# lines (each line runs in its own shell).
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -40,13 +44,19 @@ build: backend-build frontend-build ## Build everything (backend + frontend)
 
 .PHONY: backend-build
 backend-build: ## Build Go module + cmd/api and cmd/worker (golang:1.27.3)
-	@test -f backend/go.mod || { echo "skip: backend lands in step 0.2"; exit 0; }
-	$(DOCKER_GO) sh -c 'go build ./... && go build -o bin/api ./cmd/api && go build -o bin/worker ./cmd/worker'
+	@if [ -f backend/go.mod ]; then \
+	  $(DOCKER_GO) sh -c 'go build ./... && go build -o bin/api ./cmd/api && go build -o bin/worker ./cmd/worker'; \
+	else \
+	  echo "skip: backend lands in step 0.2"; \
+	fi
 
 .PHONY: frontend-build
 frontend-build: ## Build frontend SPA bundle (node:26)
-	@test -f frontend/package.json || { echo "skip: frontend lands in step 0.3"; exit 0; }
-	$(DOCKER_NODE) sh -c 'npm ci && npm run build'
+	@if [ -f frontend/package.json ]; then \
+	  $(DOCKER_NODE) sh -c 'npm ci && npm run build'; \
+	else \
+	  echo "skip: frontend lands in step 0.3"; \
+	fi
 
 # ---------- test ----------
 
@@ -55,8 +65,11 @@ test: backend-test ## Run all tests
 
 .PHONY: backend-test
 backend-test: ## Backend unit + testcontainers integration tests (golang:1.27.3)
-	@test -f backend/go.mod || { echo "skip: backend lands in step 0.2"; exit 0; }
-	$(DOCKER_GO_TC) sh -c 'go test ./...'
+	@if [ -f backend/go.mod ]; then \
+	  $(DOCKER_GO_TC) sh -c 'go test ./...'; \
+	else \
+	  echo "skip: backend lands in step 0.2"; \
+	fi
 
 # ---------- lint / fmt ----------
 
@@ -65,77 +78,116 @@ lint: backend-lint frontend-lint ## Lint everything
 
 .PHONY: backend-lint
 backend-lint: ## go vet + gofmt check (golang:1.27.3)
-	@test -f backend/go.mod || { echo "skip: backend lands in step 0.2"; exit 0; }
-	$(DOCKER_GO) sh -c 'set -e; go vet ./...; bad=$$(gofmt -l .); [ -z "$$bad" ] || { echo "gofmt needed on:"; echo "$$bad"; exit 1; }'
+	@if [ -f backend/go.mod ]; then \
+	  $(DOCKER_GO) sh -c 'set -e; go vet ./...; bad=$$(gofmt -l .); [ -z "$$bad" ] || { echo "gofmt needed on:"; echo "$$bad"; exit 1; }'; \
+	else \
+	  echo "skip: backend lands in step 0.2"; \
+	fi
 
 .PHONY: frontend-lint
 frontend-lint: ## svelte-check + eslint (node:26)
-	@test -f frontend/package.json || { echo "skip: frontend lands in step 0.3"; exit 0; }
-	$(DOCKER_NODE) sh -c 'npm ci && npm run check && npm run lint'
+	@if [ -f frontend/package.json ]; then \
+	  $(DOCKER_NODE) sh -c 'npm ci && npm run check && npm run lint'; \
+	else \
+	  echo "skip: frontend lands in step 0.3"; \
+	fi
 
 .PHONY: fmt
 fmt: backend-fmt frontend-fmt ## Format everything
 
 .PHONY: backend-fmt
 backend-fmt: ## gofmt -w (golang:1.27.3)
-	@test -f backend/go.mod || { echo "skip: backend lands in step 0.2"; exit 0; }
-	$(DOCKER_GO) sh -c 'gofmt -w .'
+	@if [ -f backend/go.mod ]; then \
+	  $(DOCKER_GO) sh -c 'gofmt -w .'; \
+	else \
+	  echo "skip: backend lands in step 0.2"; \
+	fi
 
 .PHONY: frontend-fmt
 frontend-fmt: ## prettier --write (node:26)
-	@test -f frontend/package.json || { echo "skip: frontend lands in step 0.3"; exit 0; }
-	$(DOCKER_NODE) sh -c 'npm ci && npm run format'
+	@if [ -f frontend/package.json ]; then \
+	  $(DOCKER_NODE) sh -c 'npm ci && npm run format'; \
+	else \
+	  echo "skip: frontend lands in step 0.3"; \
+	fi
 
 # ---------- migrations ----------
 
 .PHONY: migrate
 migrate: ## Apply DB migrations (goose up) via the compose migrate service
-	@test -f docker-compose.dev.yml || { echo "skip: compose stack lands in step 0.4"; exit 0; }
-	$(COMPOSE) -f docker-compose.dev.yml run --rm migrate up
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate up; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
 
 .PHONY: migrate-down
 migrate-down: ## Roll back DB migrations (goose down)
-	@test -f docker-compose.dev.yml || { echo "skip: compose stack lands in step 0.4"; exit 0; }
-	$(COMPOSE) -f docker-compose.dev.yml run --rm migrate down
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate down; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
 
 # ---------- dev stack ----------
 
 .PHONY: dev
 dev: ## Boot full local stack (postgres, backend, frontend, Keycloak, Mailpit)
-	@test -f docker-compose.dev.yml || { echo "skip: compose stack lands in step 0.4"; exit 0; }
-	$(COMPOSE) -f docker-compose.dev.yml up --build -d
-	@$(COMPOSE) -f docker-compose.dev.yml ps
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml up --build -d; \
+	  $(COMPOSE) -f docker-compose.dev.yml ps; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
 
 .PHONY: dev-ps
 dev-ps: ## Show local stack status
-	@test -f docker-compose.dev.yml || { echo "skip: compose stack lands in step 0.4"; exit 0; }
-	$(COMPOSE) -f docker-compose.dev.yml ps
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml ps; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
 
 .PHONY: dev-logs
 dev-logs: ## Tail local stack logs
-	@test -f docker-compose.dev.yml || { echo "skip: compose stack lands in step 0.4"; exit 0; }
-	$(COMPOSE) -f docker-compose.dev.yml logs -f --tail=100
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml logs -f --tail=100; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
 
 .PHONY: dev-down
 dev-down: ## Stop the local stack
-	@test -f docker-compose.dev.yml || { echo "skip: compose stack lands in step 0.4"; exit 0; }
-	$(COMPOSE) -f docker-compose.dev.yml down
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml down; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
 
 # ---------- images ----------
 
 .PHONY: images
 images: ## Build production container images locally (no push)
-	@test -f backend/Dockerfile || { echo "skip: backend Dockerfile lands in step 0.2"; exit 0; }
-	docker build -t finance-tracker/backend:local backend/
-	@test -f frontend/Dockerfile || { echo "skip: frontend Dockerfile lands in step 0.3"; exit 0; }
-	docker build -t finance-tracker/frontend:local frontend/
+	@if [ -f backend/Dockerfile ]; then \
+	  docker build -t finance-tracker/backend:local backend/; \
+	else \
+	  echo "skip: backend Dockerfile lands in step 0.2"; \
+	fi
+	@if [ -f frontend/Dockerfile ]; then \
+	  docker build -t finance-tracker/frontend:local frontend/; \
+	else \
+	  echo "skip: frontend Dockerfile lands in step 0.3"; \
+	fi
 
 .PHONY: images-push
 images-push: ## Push images to $(REGISTRY) — MANUAL / OPERATOR-GATED (iteration 1 never pushes)
 	@test -n "$(REGISTRY)" || { echo "refusing: REGISTRY unset (iteration 1 must not push images)"; exit 1; }
-	@test -f backend/Dockerfile && test -f frontend/Dockerfile || { echo "skip: needs both Dockerfiles (steps 0.2/0.3)"; exit 0; }
-	docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-backend:local --push backend/
-	docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-frontend:local --push frontend/
+	@if [ -f backend/Dockerfile ] && [ -f frontend/Dockerfile ]; then \
+	  docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-backend:local --push backend/; \
+	  docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-frontend:local --push frontend/; \
+	else \
+	  echo "skip: needs both Dockerfiles (steps 0.2/0.3)"; \
+	fi
 
 # ---------- terraform (templates only — never applied) ----------
 
@@ -143,17 +195,23 @@ TF_DIRS := $(shell find infra -name '*.tf' -not -path '*/.terraform/*' 2>/dev/nu
 
 .PHONY: tf-validate
 tf-validate: ## Validate Terraform templates (init -backend=false, validate, fmt -check per module)
-	@test -n "$(TF_DIRS)" || { echo "skip: terraform modules land in step 1.1"; exit 0; }
-	@for d in $(TF_DIRS); do \
-		echo "== $$d"; \
-		docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) init -backend=false -input=false && \
-		docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) validate && \
-		docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) fmt -check; \
-	done
+	@if [ -n "$(TF_DIRS)" ]; then \
+	  for d in $(TF_DIRS); do \
+	    echo "== $$d"; \
+	    docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) init -backend=false -input=false && \
+	    docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) validate && \
+	    docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) fmt -check; \
+	  done; \
+	else \
+	  echo "skip: terraform modules land in step 1.1"; \
+	fi
 
 # ---------- e2e ----------
 
 .PHONY: e2e
 e2e: ## Run the scripted API-level E2E tour against the running local stack
-	@test -f scripts/e2e.sh || { echo "skip: E2E tour lands in step 4.6"; exit 0; }
-	bash scripts/e2e.sh
+	@if [ -f scripts/e2e.sh ]; then \
+	  bash scripts/e2e.sh; \
+	else \
+	  echo "skip: E2E tour lands in step 4.6"; \
+	fi
