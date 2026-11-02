@@ -1,0 +1,15 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"strict": true,
+		"types": ["$app/types", "node"],
+		// SvelteKit 3 removed the $lib alias; #lib is the package.json
+		// imports mapping (see "imports" in package.json). The explicit
+		// paths entry keeps the extensionless #lib/* imports resolvable.
+		"paths": {
+			"#lib": ["./src/lib/index.ts"],
+			"#lib/*": ["./src/lib/*"]
+		}
+	},
+	"include": ["src", "vite.config.ts", "eslint.config.js", "prettier.config.js"]
+}
