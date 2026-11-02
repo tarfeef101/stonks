@@ -1,0 +1,12 @@
+{
+	"app": {
+		"title": "Personal Finance Tracker"
+	},
+	"nav": {
+		"summary": "Summary"
+	},
+	"home": {
+		"heading": "Personal Finance Tracker",
+		"placeholder": "The app shell is live. Summary, budgets, explore, and dashboards pages land in step 6.x; mortgage tools in step 7.x."
+	}
+}

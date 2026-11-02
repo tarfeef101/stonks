@@ -1,2 +1,8 @@
-<h1>Welcome to SvelteKit</h1>
-<p>Visit <a href="https://svelte.dev/docs/kit">svelte.dev/docs/kit</a> to read the documentation</p>
+<script lang="ts">
+	import { _ } from 'svelte-i18n';
+</script>
+
+<section class="space-y-2">
+	<h1 class="text-2xl font-semibold">{$_('home.heading')}</h1>
+	<p class="text-zinc-600">{$_('home.placeholder')}</p>
+</section>
