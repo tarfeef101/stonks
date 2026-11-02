@@ -11,10 +11,14 @@ implementation plan (operator planning doc; iteration 1 = steps 0.1–9.2, local
 | D-002 | 2026-11-02 | Go module path = `finance-tracker` (single element) | Repo is self-hosted (gogs; no public VCS URL at execution time); a single-element module path is legal for a never-fetched module and avoids inventing a domain. |
 | D-003 | 2026-11-02 | Node pinned to **26.13.0** (Active LTS line 26; latest 26.x as of 2026-11-02 per nodejs.org dist index) | Plan §1 requires the exact 26.x minor be recorded at first use; `node:26.13.0` is the image tag. |
 | D-004 | 2026-11-02 | `hashicorp/terraform` image tag stays `latest` until step 1.1 | Exact version verified + pinned at step 1.1 (first `tf-validate` run); recorded here then. |
+| D-005 | 2026-11-02 | New Relic `go-agent/v3` pinned **v3.45.0**; init is `app, err := newrelic.NewApplication(opts...)` (returns an error on bad config), options use the `Config*` prefix (`ConfigAppName`, `ConfigLicense`, `ConfigEnabled`, …); HTTP instrumentation is the nil-safe `_, handler := newrelic.WrapHandle(app, pattern, handler)` (returns `(string, http.Handler)`); with no license the agent is disabled explicitly via `ConfigEnabled(false)` | Verified in module source: `Config.validate()` rejects an empty license while `Enabled` is true (default) with `errLicenseLen`, so no-license runs must pass `ConfigEnabled(false)`; `AppHTTPHandler` and `NewLogLogger` no longer exist in v3.45.x. |
+| D-006 | 2026-11-02 | `prometheus/client_golang` pinned **v1.25.0**; process collector is `prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{})` | Type renamed from `ProcessOpts` (v1.25); verified in module source before wiring into `/metrics`. |
+| D-007 | 2026-11-02 | Backend dependency set at first `go get`: chi **v5.5.0**, pgx/v5 **v5.12.0**, prometheus/client_golang **v1.25.0** (D-006), newrelic/go-agent/v3 **v3.45.0** (D-005) | All latest as of 2026-11-02; minor bumps may land with later `go get`s (goose, cron, testcontainers-go at their first-use steps). |
 
 ## Change log
 
 - 2026-11-02: seeded (step 0.1). Verified stack table below re-checked at implementation time per plan §1.
+- 2026-11-02: step 0.2 — added D-005…D-007 (NR v3.45.0 API + no-license no-op, client_golang v1.25.0 process collector, first backend dep set).
 
 ## Verified stack (plan §1, Nov 2026)
 
@@ -36,5 +40,5 @@ implementation plan (operator planning doc; iteration 1 = steps 0.1–9.2, local
 | Monitoring | **New Relic free: 100 GB ingest/month**, 1 full user; `newrelic/go-agent/v3`; `@newrelic/browser-agent` 1.324.1 | NR agent no-ops without license in iteration 1 |
 | Email | **Generic SMTP** (no vendor): `jhillyerd/enmime` + stdlib `net/smtp` | config via `SMTP_*` env; Mailpit sink in iteration 1 |
 | Secrets (optional) | **AWS SSM Parameter Store, standard tier: free** (10k params, ≤4 KB each, 100k API calls/mo free) | only if operator wants more than k3s SE (Phase 10 — not iteration 1) |
-| Go libs | chi v5, pgx v5 (pool), prometheus/client_golang, goose, robfig/cron v3, testcontainers-go | all current majors; verify minor bumps at first `go get` |
+| Go libs | chi v5, pgx v5 (pool), prometheus/client_golang, goose, robfig/cron v3, testcontainers-go | resolved at step 0.2: chi v5.5.0, pgx/v5 v5.12.0, client_golang v1.25.0, go-agent v3.45.0 (D-005/D-006/D-007); remaining libs at first use |
 | FE libs | `@tanstack/svelte-query`, `svelte-i18n` (en only), `@auth0/auth0-spa-js`, ECharts (via thin wrapper), Tailwind v4 | verify `svelte-echarts` maintenance at 6.4; roll own ~30-line wrapper if stale |

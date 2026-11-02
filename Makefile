@@ -29,8 +29,10 @@ GO_MOD_VOL    := ftrk-go-modcache
 NPM_CACHE_VOL := ftrk-npm-cache
 
 DOCKER_GO = docker run --rm -v $(ROOT)/backend:/src -w /src -v $(GO_BUILD_VOL):/root/.cache/go-build -v $(GO_MOD_VOL):/go/pkg/mod $(GO_IMG)
-# testcontainers tests spawn ephemeral containers via the host daemon (standard CI pattern)
-DOCKER_GO_TC = $(DOCKER_GO) -v /var/run/docker.sock:/var/run/docker.sock
+# testcontainers tests spawn ephemeral containers via the host daemon (standard CI
+# pattern). NOTE: the extra mount must stay BEFORE the image name — appending it after
+# $(DOCKER_GO) would make docker parse it as a command argument.
+DOCKER_GO_TC = docker run --rm -v $(ROOT)/backend:/src -w /src -v $(GO_BUILD_VOL):/root/.cache/go-build -v $(GO_MOD_VOL):/go/pkg/mod -v /var/run/docker.sock:/var/run/docker.sock $(GO_IMG)
 DOCKER_NODE = docker run --rm -v $(ROOT)/frontend:/app -w /app -v $(NPM_CACHE_VOL):/root/.npm $(NODE_IMG)
 
 .PHONY: help

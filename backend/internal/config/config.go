@@ -1,0 +1,116 @@
+// Package config loads application configuration from environment
+// variables. Canonical secret names follow plan §6; non-secret settings
+// (PORT) use local defaults suitable for the dev stack.
+package config
+
+import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strconv"
+)
+
+// SMTP holds generic SMTP configuration (iteration 1: Mailpit sink).
+type SMTP struct {
+	Host      string
+	Port      int
+	User      string
+	Pass      string
+	From      string
+	TLSPolicy string // starttls | implicit | none
+}
+
+// LLM holds OpenAI-compatible LLM server configuration.
+type LLM struct {
+	BaseURL string
+	APIKey  string
+	Model   string
+}
+
+// Config is the full application configuration shared by cmd/api and
+// cmd/worker.
+type Config struct {
+	// Port is the HTTP listen port for cmd/api.
+	Port int
+
+	// DatabaseURL is the Postgres DSN (pgx format). Empty = no database
+	// configured: the API still serves /healthz and /metrics, and /readyz
+	// reports not-ready.
+	DatabaseURL string
+
+	// Auth0Issuer / Auth0ClientID / Auth0ClientSecret identify the OIDC
+	// issuer (Keycloak dev realm in iteration 1, an Auth0 tenant later —
+	// same variable names, plan §6).
+	Auth0Issuer       string
+	Auth0ClientID     string
+	Auth0ClientSecret string
+
+	// NRLicenseKey enables the New Relic agent; empty = agent no-ops.
+	NRLicenseKey string
+
+	// KEK wraps per-user DEKs: 32 bytes, hex-encoded (64 chars).
+	KEK string
+
+	SMTP SMTP
+	LLM  LLM
+}
+
+// Load reads configuration from the process environment.
+func Load() (*Config, error) {
+	return load(os.Getenv)
+}
+
+func load(getenv func(string) string) (*Config, error) {
+	cfg := &Config{
+		Port:              8080,
+		DatabaseURL:       getenv("DATABASE_URL"),
+		Auth0Issuer:       getenv("AUTH0_ISSUER"),
+		Auth0ClientID:     getenv("AUTH0_CLIENT_ID"),
+		Auth0ClientSecret: getenv("AUTH0_CLIENT_SECRET"),
+		NRLicenseKey:      getenv("NR_LICENSE_KEY"),
+		KEK:               getenv("KEK"),
+		SMTP: SMTP{
+			Host:      getenv("SMTP_HOST"),
+			User:      getenv("SMTP_USER"),
+			Pass:      getenv("SMTP_PASS"),
+			From:      getenv("SMTP_FROM"),
+			TLSPolicy: getenv("SMTP_TLS_POLICY"),
+		},
+		LLM: LLM{
+			BaseURL: getenv("LLM_BASE_URL"),
+			APIKey:  getenv("LLM_API_KEY"),
+			Model:   getenv("LLM_MODEL"),
+		},
+	}
+	if v := getenv("PORT"); v != "" {
+		p, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("PORT: %w", err)
+		}
+		cfg.Port = p
+	}
+	if v := getenv("SMTP_PORT"); v != "" {
+		p, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("SMTP_PORT: %w", err)
+		}
+		cfg.SMTP.Port = p
+	}
+	if cfg.SMTP.TLSPolicy == "" {
+		cfg.SMTP.TLSPolicy = "starttls"
+	}
+	switch cfg.SMTP.TLSPolicy {
+	case "starttls", "implicit", "none":
+	default:
+		return nil, fmt.Errorf("SMTP_TLS_POLICY: unsupported %q (want starttls, implicit or none)", cfg.SMTP.TLSPolicy)
+	}
+	if cfg.KEK != "" {
+		if len(cfg.KEK) != 64 {
+			return nil, fmt.Errorf("KEK: want 64 hex chars (32 bytes), got %d chars", len(cfg.KEK))
+		}
+		if _, err := hex.DecodeString(cfg.KEK); err != nil {
+			return nil, fmt.Errorf("KEK: not valid hex: %w", err)
+		}
+	}
+	return cfg, nil
+}
