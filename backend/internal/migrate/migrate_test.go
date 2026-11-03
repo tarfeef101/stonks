@@ -2,7 +2,8 @@
 // against a disposable postgres:18 container (testcontainers) and pins the
 // schema invariants the data layer relies on: identity uniqueness,
 // encrypted-name uniqueness, builtin/custom schema shape, account type
-// vocabulary, the transaction dedup key, FK cascades.
+// vocabulary, the transaction dedup key, the shared period vocabulary,
+// per-user LLM-provider uniqueness, FK cascades.
 //
 // Runs via `make backend-test` (golang:1.27.3 container with the host
 // docker.sock mounted — Makefile DOCKER_GO_TC, D-001). Reuses the local
@@ -130,8 +131,8 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 2 (all six tables present), a second `up` is a no-op, and `down`
-// rolls back exactly one step (0002 leaves 0001 in place).
+// version 3 (all eight tables present), a second `up` is a no-op, and
+// `down` rolls back exactly one step (0003 leaves 0001+0002 in place).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -139,12 +140,12 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 2 {
-		t.Fatalf("version after up = %d, want 2", ver)
+	if ver != 3 {
+		t.Fatalf("version after up = %d, want 3", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
-		"accounts", "transactions",
+		"accounts", "transactions", "budgets", "llm_credentials",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -158,29 +159,30 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 2 {
-		t.Fatalf("version after re-up = %d (err %v), want 2", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 3 {
+		t.Fatalf("version after re-up = %d (err %v), want 3", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0002) only;
-	// 0001's tables stay.
+	// One-step down: goose rolls back the latest migration (0003) only;
+	// 0001+0002's tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 1 {
-		t.Fatalf("version after down = %d (err %v), want 1", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 2 {
+		t.Fatalf("version after down = %d (err %v), want 2", ver, err)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name IN ('accounts', 'transactions')`); n != 0 {
-		t.Fatalf("0002 tables remaining after one-step down = %d, want 0", n)
+		  WHERE table_schema = 'public' AND table_name IN ('budgets', 'llm_credentials')`); n != 0 {
+		t.Fatalf("0003 tables remaining after one-step down = %d, want 0", n)
 	}
 	n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public'
-		    AND table_name IN ('users', 'user_categories', 'import_schemas', 'notifications')`)
-	if n != 4 {
-		t.Fatalf("0001 tables remaining after one-step down = %d, want 4", n)
+		    AND table_name IN ('users', 'user_categories', 'import_schemas', 'notifications',
+		                       'accounts', 'transactions')`)
+	if n != 6 {
+		t.Fatalf("0001+0002 tables remaining after one-step down = %d, want 6", n)
 	}
 }
 
@@ -587,5 +589,109 @@ func TestAccountTransactionConstraints(t *testing.T) {
 	}
 	if n := countRows(t, db, ctx, `SELECT count(*) FROM accounts WHERE user_id = $1`, otherUserID); n != 1 {
 		t.Fatalf("other user's account present = %d, want 1", n)
+	}
+}
+
+// TestBudgetCredentialConstraints pins the 0003 invariants: the shared
+// period vocabulary on budgets and the per-user provider uniqueness +
+// vocabulary on llm_credentials, plus the user-delete cascade.
+func TestBudgetCredentialConstraints(t *testing.T) {
+	db, ctx := migratedDB(t)
+
+	var userID, otherUserID string
+	err := db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-budget', 'a@example.com', 'A', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack")).Scan(&userID)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-budget2', 'b@example.com', 'B', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack2")).Scan(&otherUserID)
+	if err != nil {
+		t.Fatalf("insert second user: %v", err)
+	}
+	ghost := "22222222-2222-3333-4444-555555555555"
+
+	// --- budgets -----------------------------------------------------------
+
+	// name + the whole targets jsonb ride as one encrypted blob each.
+	var budgetID string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO budgets (user_id, period, name_encrypted, targets_encrypted)
+		VALUES ($1, 'month', $2, $3) RETURNING id`,
+		userID, []byte("name-pack"), []byte("targets-pack")).Scan(&budgetID)
+	if err != nil {
+		t.Fatalf("insert budget: %v", err)
+	}
+
+	// Period shares the vocabulary pinned in 0001 (week is deliberately
+	// outside the set, however DESIGN.md phrases it).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO budgets (user_id, period, name_encrypted, targets_encrypted)
+		VALUES ($1, 'week', $2, $3)`, userID, []byte("name-pack"), []byte("targets-pack"))
+	assertViolation(t, err, codeCheckViolation, "budget period outside vocabulary")
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO budgets (user_id, period, name_encrypted, targets_encrypted)
+		VALUES ($1, 'month', $2, $3)`, ghost, []byte("name-pack"), []byte("targets-pack"))
+	assertViolation(t, err, codeForeignKeyViolation, "budget without user")
+
+	// --- llm_credentials ------------------------------------------------------
+
+	// The default case: self-hosted llama.cpp takes no api_key.
+	var credID string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO llm_credentials (user_id, provider, endpoint_encrypted, api_key_encrypted)
+		VALUES ($1, 'self_hosted', $2, NULL) RETURNING id`,
+		userID, []byte("endpoint-pack")).Scan(&credID)
+	if err != nil {
+		t.Fatalf("insert self-hosted credential (no key): %v", err)
+	}
+
+	// The unique key: one row per (user, provider).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO llm_credentials (user_id, provider, endpoint_encrypted)
+		VALUES ($1, 'self_hosted', $2)`, userID, []byte("endpoint-pack"))
+	assertViolation(t, err, codeUniqueViolation, "duplicate (user_id, provider)")
+
+	// Same provider under another user, and a second provider for this
+	// user, are both fine.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO llm_credentials (user_id, provider, endpoint_encrypted, api_key_encrypted)
+		VALUES ($1, 'self_hosted', $2, NULL)`, otherUserID, []byte("endpoint-pack")); err != nil {
+		t.Fatalf("same provider under another user: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO llm_credentials (user_id, provider, endpoint_encrypted, api_key_encrypted)
+		VALUES ($1, 'openai', $2, $3)`, userID, []byte("endpoint-pack"), []byte("key-pack")); err != nil {
+		t.Fatalf("second provider for the same user: %v", err)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO llm_credentials (user_id, provider, endpoint_encrypted)
+		VALUES ($1, 'anthropic', $2)`, userID, []byte("endpoint-pack"))
+	assertViolation(t, err, codeCheckViolation, "provider outside vocabulary")
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO llm_credentials (user_id, provider, endpoint_encrypted)
+		VALUES ($1, 'openai', $2)`, ghost, []byte("endpoint-pack"))
+	assertViolation(t, err, codeForeignKeyViolation, "credential without user")
+
+	// --- cascade ---------------------------------------------------------------
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM budgets WHERE id = $1`, budgetID); n != 0 {
+		t.Fatalf("budget surviving user delete = %d, want 0", n)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM llm_credentials WHERE id = $1`, credID); n != 0 {
+		t.Fatalf("credential surviving user delete = %d, want 0", n)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM llm_credentials WHERE user_id = $1`, otherUserID); n != 1 {
+		t.Fatalf("other user's credential present = %d, want 1", n)
 	}
 }
