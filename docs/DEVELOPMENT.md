@@ -26,6 +26,14 @@ make dev-down          # stop (volumes are kept — realm + DB survive)
 First boot ≈ 3–4 min (image pulls + `npm ci` + Keycloak import/start ≈ 60–90 s).
 Later boots ≈ 1 min.
 
+The `migrate` service runs `goose up` before the backend on every `make dev`
+(an idempotent no-op when the schema is current). Standalone: `make migrate`,
+`make migrate-down`, `make migrate-status`.
+
+The backend needs a real `KEK` (32 bytes, 64 hex chars) in the git-ignored
+`.env` before it can bootstrap a user's DEK — generate one with `make gen-kek`
+(the `.env.example` value is a placeholder).
+
 ## Services and ports
 
 | Service    | Image                    | Host port(s)      | Notes                                              |
@@ -46,13 +54,16 @@ llama.cpp (18090) is defined but commented out until step 5.3.
 | Test user (realm `finance`) | `test` / `test1234` (`.env`: `FTRK_TEST_USER_PASSWORD`) |
 | SPA client | `finance-spa` (public, code + PKCE, `directAccessGrantsEnabled`) |
 | Audience client | `finance-api` (tokens carry `aud: ["finance-api"]`) |
-| Issuer (browser-side) | `http://localhost:18081/realms/finance` |
+| Issuer (browser-side = token `iss`) | `http://localhost:18081/realms/finance` |
+| Discovery horizon (backend) | `http://keycloak:8080/realms/finance` (`OIDC_DISCOVERY_URL`) |
 
-Get a token (password grant, as the frontend's PKCE flow would):
+Get a token (password grant, as the frontend's PKCE flow would). The
+`audience=finance-api` parameter selects the access-token `aud` (the realm's
+audience mapper) — the backend verifier requires it (step 1.3):
 
 ```sh
 curl -s -X POST http://localhost:18081/realms/finance/protocol/openid-connect/token \
-  -d "grant_type=password&client_id=finance-spa&username=test&password=test1234"
+  -d "grant_type=password&client_id=finance-spa&username=test&password=test1234&audience=finance-api"
 ```
 
 Test user's account console: `http://localhost:18081/realms/finance/account`.

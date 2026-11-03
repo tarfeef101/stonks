@@ -69,9 +69,16 @@ services:
     environment:
       PORT: "8080"
       DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
+      # OIDC (step 1.3): AUTH0_ISSUER is the token's `iss` (browser horizon).
+      # The verifier discovers JWKS against OIDC_DISCOVERY_URL — the container
+      # horizon in dev (D-021); empty = AUTH0_ISSUER for one-horizon IdPs
+      # (Auth0). AUTH0_AUDIENCE is the required access-token `aud` (the
+      # audience-mapper value, not the client id — D-013).
       AUTH0_ISSUER: ${AUTH0_ISSUER:-http://localhost:18081/realms/finance}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-finance-api}
       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-finance-spa}
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
+      OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-http://keycloak:8080/realms/finance}
       NR_LICENSE_KEY: ${NR_LICENSE_KEY:-}
       KEK: ${KEK:-}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
@@ -105,10 +112,10 @@ services:
       # OIDC (step 1.2) — build-time vars read by the vite dev server at
       # boot (restart the container after changing .env). PUBLIC_ names
       # are the frontend-specific spelling of the plan §6 canonical vars.
-      # NOTE: PUBLIC_AUTH0_ISSUER is the BROWSER horizon (D-016 split
-      # horizon): the browser reaches Keycloak on the host port, while the
-      # backend verifier (inside the compose network, step 1.3) uses
-      # AUTH0_ISSUER pointing at the service name.
+      # NOTE (D-016, refined by D-021): PUBLIC_AUTH0_ISSUER is the BROWSER
+      # horizon and equals the token's `iss`; the backend verifier validates
+      # `iss` against AUTH0_ISSUER (same value) but discovers JWKS against
+      # OIDC_DISCOVERY_URL (container horizon).
       PUBLIC_AUTH0_ISSUER: ${PUBLIC_AUTH0_ISSUER:-http://localhost:18081/realms/finance}
       PUBLIC_AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-finance-spa}
       PUBLIC_AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-finance-api}

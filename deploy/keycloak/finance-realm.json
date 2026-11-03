@@ -38,7 +38,8 @@
         "profile",
         "roles",
         "email",
-        "openid"
+        "openid",
+        "basic"
       ],
       "protocolMappers": [
         {
