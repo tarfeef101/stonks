@@ -1,7 +1,8 @@
 // Package migrate_test runs the goose migrations in backend/migrations
 // against a disposable postgres:18 container (testcontainers) and pins the
 // schema invariants the data layer relies on: identity uniqueness,
-// encrypted-name uniqueness, builtin/custom schema shape, FK cascades.
+// encrypted-name uniqueness, builtin/custom schema shape, account type
+// vocabulary, the transaction dedup key, FK cascades.
 //
 // Runs via `make backend-test` (golang:1.27.3 container with the host
 // docker.sock mounted — Makefile DOCKER_GO_TC, D-001). Reuses the local
@@ -129,8 +130,8 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 1 (all four tables present), a second `up` is a no-op, and `down`
-// rolls everything back.
+// version 2 (all six tables present), a second `up` is a no-op, and `down`
+// rolls back exactly one step (0002 leaves 0001 in place).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -138,10 +139,13 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 1 {
-		t.Fatalf("version after up = %d, want 1", ver)
+	if ver != 2 {
+		t.Fatalf("version after up = %d, want 2", ver)
 	}
-	for _, table := range []string{"users", "user_categories", "import_schemas", "notifications"} {
+	for _, table := range []string{
+		"users", "user_categories", "import_schemas", "notifications",
+		"accounts", "transactions",
+	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
 			  WHERE table_schema = 'public' AND table_name = $1`, table)
@@ -154,22 +158,29 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 1 {
-		t.Fatalf("version after re-up = %d (err %v), want 1", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 2 {
+		t.Fatalf("version after re-up = %d (err %v), want 2", ver, err)
 	}
 
+	// One-step down: goose rolls back the latest migration (0002) only;
+	// 0001's tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 0 {
-		t.Fatalf("version after down = %d (err %v), want 0", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 1 {
+		t.Fatalf("version after down = %d (err %v), want 1", ver, err)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name IN ('accounts', 'transactions')`); n != 0 {
+		t.Fatalf("0002 tables remaining after one-step down = %d, want 0", n)
 	}
 	n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public'
 		    AND table_name IN ('users', 'user_categories', 'import_schemas', 'notifications')`)
-	if n != 0 {
-		t.Fatalf("tables remaining after down = %d, want 0", n)
+	if n != 4 {
+		t.Fatalf("0001 tables remaining after one-step down = %d, want 4", n)
 	}
 }
 
@@ -365,4 +376,216 @@ func TestSchemaConstraints(t *testing.T) {
 		t.Fatalf("first user's category should survive, present = %d", n)
 	}
 	_ = customID
+}
+
+// TestAccountTransactionConstraints pins the 0002 invariants: account
+// type vocabulary + per-user encrypted-name uniqueness, the transaction
+// dedup key (account_id, date_posted, dedup_hash), the date rule, and
+// cascade semantics (accounts/transactions CASCADE, categories SET NULL).
+func TestAccountTransactionConstraints(t *testing.T) {
+	db, ctx := migratedDB(t)
+
+	var userID, otherUserID, schemaID string
+	err := db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-acc', 'a@example.com', 'A', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack")).Scan(&userID)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-acc2', 'b@example.com', 'B', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack2")).Scan(&otherUserID)
+	if err != nil {
+		t.Fatalf("insert second user: %v", err)
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO import_schemas (name, kind, builtin, spec)
+		VALUES ('Bank CSV', 'csv', true, '{}') RETURNING id`).Scan(&schemaID)
+	if err != nil {
+		t.Fatalf("insert builtin schema: %v", err)
+	}
+
+	// --- accounts ---------------------------------------------------------
+
+	var acctID, acctID2 string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO accounts
+			(user_id, name_encrypted, name_hash, type, subtype, currency, default_schema_id)
+		VALUES ($1, $2, 'hash-a', 'bank', 'chequing', 'CAD', $3) RETURNING id`,
+		userID, []byte("name-pack"), schemaID).Scan(&acctID)
+	if err != nil {
+		t.Fatalf("insert account with schema: %v", err)
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'hash-b', 'credit_card', 'USD') RETURNING id`,
+		userID, []byte("name-pack2")).Scan(&acctID2)
+	if err != nil {
+		t.Fatalf("insert account without schema: %v", err)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'hash-x', 'safe-deposit', 'CAD')`, userID, []byte("name-pack"))
+	assertViolation(t, err, codeCheckViolation, "type outside vocabulary")
+
+	// Same per-user namespace rule as user_categories.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'hash-a', 'bank', 'CAD')`, userID, []byte("name-pack"))
+	assertViolation(t, err, codeUniqueViolation, "duplicate (user_id, name_hash)")
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'hash-a', 'mortgage', 'CAD')`, otherUserID, []byte("name-pack")); err != nil {
+		t.Fatalf("same name_hash under another user: %v", err)
+	}
+
+	ghost := "22222222-2222-3333-4444-555555555555"
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'orphan', 'bank', 'CAD')`, ghost, []byte("name-pack"))
+	assertViolation(t, err, codeForeignKeyViolation, "account without user")
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO accounts
+			(user_id, name_encrypted, name_hash, type, currency, default_schema_id)
+		VALUES ($1, $2, 'ghost-schema', 'bank', 'CAD', $3)`,
+		userID, []byte("name-pack"), ghost)
+	assertViolation(t, err, codeForeignKeyViolation, "account with missing schema")
+
+	// --- transactions -----------------------------------------------------
+
+	// Minimal insert: date_posted + amount + description + dedup_hash are
+	// the only required inputs. amount scans back as its decimal text
+	// (plaintext numeric — the §5 decision under test).
+	var (
+		txID   string
+		amount string
+		review bool
+	)
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-15', 123.45, $3, 'h1')
+		RETURNING id, amount, review_pending`,
+		userID, acctID, []byte("desc-pack")).Scan(&txID, &amount, &review)
+	if err != nil {
+		t.Fatalf("insert minimal transaction: %v", err)
+	}
+	if amount != "123.45" {
+		t.Fatalf("amount = %q, want \"123.45\"", amount)
+	}
+	if review {
+		t.Fatal("review_pending defaulted true, want false")
+	}
+
+	// The dedup key: the same (account_id, date_posted, dedup_hash) is a
+	// re-import and is rejected — even with a different amount, because
+	// the hash already pins amount (it is part of the hash input).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-15', 999.99, $3, 'h1')`, userID, acctID, []byte("desc-pack"))
+	assertViolation(t, err, codeUniqueViolation, "duplicate dedup_hash on (account, posted)")
+
+	// The key is per-account: the same hash on another account is a
+	// different event.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-15', -42.10, $3, 'h1')`, userID, acctID2, []byte("d")); err != nil {
+		t.Fatalf("same dedup_hash on a different account: %v", err)
+	}
+	// ... and a different hash on the same account + date is distinct.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-15', 50.00, $3, 'h2')`, userID, acctID, []byte("d")); err != nil {
+		t.Fatalf("same (account, posted) with different dedup_hash: %v", err)
+	}
+
+	// A transaction may not post before it executed.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_executed, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-20', '2026-09-15', 1, $3, 'h3')`,
+		userID, acctID, []byte("d"))
+	assertViolation(t, err, codeCheckViolation, "date_executed after date_posted")
+
+	// executed == posted is fine (the minimal insert already covered NULL).
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_executed, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-16', '2026-09-16', 1, $3, 'h4')`,
+		userID, acctID, []byte("d")); err != nil {
+		t.Fatalf("date_executed = date_posted: %v", err)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_posted, amount, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-15', 1, $3, 'h5')`, userID, ghost, []byte("d"))
+	assertViolation(t, err, codeForeignKeyViolation, "transaction without account")
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO transactions
+			(user_id, account_id, date_posted, amount, category_id, description_encrypted, dedup_hash)
+		VALUES ($1, $2, '2026-09-15', 1, $3, $4, 'h6')`,
+		userID, acctID, ghost, []byte("d"))
+	assertViolation(t, err, codeForeignKeyViolation, "transaction with missing category")
+
+	// --- cascades -----------------------------------------------------------
+
+	// Category delete: the event survives, uncategorised (SET NULL).
+	var catID string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO user_categories (user_id, name_encrypted, name_hash)
+		VALUES ($1, $2, 'hash-c') RETURNING id`, userID, []byte("name-pack")).Scan(&catID)
+	if err != nil {
+		t.Fatalf("insert category: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE transactions SET category_id = $1 WHERE id = $2`, catID, txID); err != nil {
+		t.Fatalf("assign category: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM user_categories WHERE id = $1`, catID); err != nil {
+		t.Fatalf("delete category: %v", err)
+	}
+	var catAfter *string
+	if err := db.QueryRowContext(ctx,
+		`SELECT category_id FROM transactions WHERE id = $1`, txID).Scan(&catAfter); err != nil {
+		t.Fatalf("scan category after delete: %v", err)
+	}
+	if catAfter != nil {
+		t.Fatalf("category_id = %v after category delete, want NULL (SET NULL)", *catAfter)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM transactions WHERE id = $1`, txID); n != 1 {
+		t.Fatalf("transaction present after category delete = %d, want 1", n)
+	}
+
+	// Account delete: its events go with it.
+	if _, err := db.ExecContext(ctx, `DELETE FROM accounts WHERE id = $1`, acctID2); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM transactions WHERE account_id = $1`, acctID2); n != 0 {
+		t.Fatalf("transactions surviving account delete = %d, want 0", n)
+	}
+
+	// User delete: accounts and transactions all cascade away; the other
+	// user's account survives.
+	if _, err := db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, userID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM accounts WHERE user_id = $1`, userID); n != 0 {
+		t.Fatalf("accounts surviving user delete = %d, want 0", n)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM transactions WHERE user_id = $1`, userID); n != 0 {
+		t.Fatalf("transactions surviving user delete = %d, want 0", n)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM accounts WHERE user_id = $1`, otherUserID); n != 1 {
+		t.Fatalf("other user's account present = %d, want 1", n)
+	}
 }
