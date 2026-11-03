@@ -139,6 +139,12 @@ migrate-status: ## Show migration status (goose status)
 	  echo "skip: migrations + compose migrate service land in a later step"; \
 	fi
 
+# ---------- secrets ----------
+
+.PHONY: gen-kek
+gen-kek: ## Print a random 64-hex-char (32 B) KEK for .env (D-020; host coreutils only — a dev-credential helper, not a toolchain)
+	@head -c 32 /dev/urandom | od -An -v -tx1 | tr -d " \n"; echo
+
 # ---------- dev stack ----------
 
 .PHONY: dev
