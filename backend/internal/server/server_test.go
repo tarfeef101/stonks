@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"finance-tracker/internal/authn"
+	"finance-tracker/internal/crypto"
 )
 
 type fakeReady struct{ err error }
@@ -43,7 +45,7 @@ func testAuth() *authn.Verifier {
 }
 
 func TestAPINeedsToken(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{}, testAuth())
+	h := New(fakeReady{}, BuildInfo{}, testAuth(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -55,8 +57,76 @@ func TestAPINeedsToken(t *testing.T) {
 	}
 }
 
+// TestMe covers the step 1.3c done-when end to end through the router:
+// a valid token idempotently creates exactly one users row with a
+// KEK-wrapped DEK, and repeat logins return the stored row.
+func TestMe(t *testing.T) {
+	key := mintKey(t)
+	kek := testKEK(t)
+	store := newMemStore()
+	b, err := NewBootstrap(store, kek)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b)
+	token := mintIdentityToken(t, key, "me-sub", "me@localhost", "Me Name", "meuser")
+
+	code, body, _ := do(t, h, "/api/v1/me", map[string]string{"Authorization": "Bearer " + token})
+	if code != http.StatusOK {
+		t.Fatalf("me status = %d, want 200 (body %s)", code, body)
+	}
+	for _, want := range []string{`"sub":"me-sub"`, `"email":"me@localhost"`, `"display_name":"Me Name"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("me body %s missing %s", body, want)
+		}
+	}
+	if store.count() != 1 {
+		t.Fatalf("rows after first login: want 1, got %d", store.count())
+	}
+	row, ok := store.get("me-sub")
+	if !ok {
+		t.Fatal("row for me-sub missing")
+	}
+	if len(row.WrappedDEK) < crypto.PackMinSize {
+		t.Fatalf("stored wrapped DEK too short: %d bytes", len(row.WrappedDEK))
+	}
+	if dek, err := crypto.UnwrapDEK(kek, row.WrappedDEK); err != nil || len(dek) != crypto.DEKSize {
+		t.Fatalf("stored DEK does not unwrap to %d bytes: err=%v len=%d", crypto.DEKSize, err, len(dek))
+	}
+
+	// Repeat login: still one row, same ID, identical stored DEK.
+	code, _, _ = do(t, h, "/api/v1/me", map[string]string{"Authorization": "Bearer " + token})
+	if code != http.StatusOK {
+		t.Fatalf("me repeat status = %d, want 200", code)
+	}
+	if store.count() != 1 {
+		t.Fatalf("rows after repeat login: want 1, got %d", store.count())
+	}
+	again, _ := store.get("me-sub")
+	if again.ID != row.ID || !bytes.Equal(again.WrappedDEK, row.WrappedDEK) {
+		t.Fatal("repeat login changed the stored row")
+	}
+}
+
+// TestMeNoBootstrap: with a valid token but no database configured, /me
+// answers 503 (the API is intentionally operable without a DB for the
+// probes/metrics in steps before 1.3c wiring).
+func TestMeNoBootstrap(t *testing.T) {
+	key := mintKey(t)
+	h := New(nil, BuildInfo{}, liveAuth(t, key), nil)
+	token := mintIdentityToken(t, key, "no-db-sub", "n@localhost", "N", "n")
+
+	code, body, _ := do(t, h, "/api/v1/me", map[string]string{"Authorization": "Bearer " + token})
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("me (no bootstrap) status = %d, want 503 (body %s)", code, body)
+	}
+	if !strings.Contains(body, "database not configured") {
+		t.Errorf("me (no bootstrap) body = %s", body)
+	}
+}
+
 func TestHealthz(t *testing.T) {
-	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth())
+	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth(), nil)
 	code, body, _ := do(t, h, "/healthz", nil)
 	if code != http.StatusOK {
 		t.Fatalf("healthz status = %d, want 200 (body %s)", code, body)
@@ -67,7 +137,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyzNoDatabase(t *testing.T) {
-	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth())
+	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth(), nil)
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 (body %s)", code, body)
@@ -78,7 +148,7 @@ func TestReadyzNoDatabase(t *testing.T) {
 }
 
 func TestReadyzDatabaseUnreachable(t *testing.T) {
-	h := New(fakeReady{err: errors.New("connection refused")}, BuildInfo{}, testAuth())
+	h := New(fakeReady{err: errors.New("connection refused")}, BuildInfo{}, testAuth(), nil)
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 (body %s)", code, body)
@@ -89,7 +159,7 @@ func TestReadyzDatabaseUnreachable(t *testing.T) {
 }
 
 func TestReadyzOK(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{}, testAuth())
+	h := New(fakeReady{}, BuildInfo{}, testAuth(), nil)
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusOK {
 		t.Fatalf("readyz status = %d, want 200 (body %s)", code, body)
@@ -100,7 +170,7 @@ func TestReadyzOK(t *testing.T) {
 }
 
 func TestMetrics(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{Version: "v1", Commit: "c1"}, testAuth())
+	h := New(fakeReady{}, BuildInfo{Version: "v1", Commit: "c1"}, testAuth(), nil)
 
 	// Exercise a request so the request counters exist.
 	if code, body, _ := do(t, h, "/healthz", nil); code != http.StatusOK {

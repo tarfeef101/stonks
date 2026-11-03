@@ -14,6 +14,7 @@ import (
 
 	"finance-tracker/internal/authn"
 	"finance-tracker/internal/config"
+	"finance-tracker/internal/crypto"
 	"finance-tracker/internal/server"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -57,11 +58,16 @@ func main() {
 
 	// Database pool. pgxpool.New does not connect immediately; readiness
 	// is surfaced through /readyz. An empty DATABASE_URL leaves the pool
-	// unset (the API still serves /healthz and /metrics).
-	var ready server.Readiness
+	// unset (the API still serves /healthz and /metrics; /api/v1/me then
+	// answers 503).
+	var (
+		ready     server.Readiness
+		pool      *pgxpool.Pool
+		bootstrap *server.Bootstrap
+	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+		pool, err = pgxpool.New(ctx, cfg.DatabaseURL)
 		cancel()
 		if err != nil {
 			logger.Error("database pool create failed", "error", err)
@@ -73,8 +79,7 @@ func main() {
 
 	// AuthN (step 1.3). The verifier requires an issuer and audience; a
 	// missing value is a configuration error, so fail fast at boot rather
-	// than serving a server that can only ever answer 401. (The KEK
-	// fail-fast lands in 1.3c alongside the user bootstrap.)
+	// than serving a server that can only ever answer 401.
 	if cfg.Auth0Issuer == "" || cfg.Auth0Audience == "" {
 		logger.Error("authn misconfigured",
 			"hint", "AUTH0_ISSUER and AUTH0_AUDIENCE are required (see .env.example)")
@@ -90,7 +95,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier)
+	// User bootstrap (step 1.3c): the first authenticated request creates
+	// the users row and stores the KEK-wrapped per-user DEK. The KEK is
+	// only needed with a database; a missing or malformed value there is
+	// a configuration error, so fail fast at boot (make gen-kek).
+	if pool != nil {
+		if cfg.KEK == "" {
+			logger.Error("kek misconfigured",
+				"hint", "KEK is required with DATABASE_URL: 64 hex chars (make gen-kek, .env)")
+			os.Exit(1)
+		}
+		kek, err := crypto.KEKFromHex(cfg.KEK)
+		if err != nil {
+			logger.Error("kek parse failed", "error", err)
+			os.Exit(1)
+		}
+		bootstrap, err = server.NewBootstrap(server.NewPGUserStore(pool), kek)
+		if err != nil {
+			logger.Error("user bootstrap init failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

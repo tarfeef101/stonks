@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,10 +27,10 @@ const apiPrefix = "/api"
 // prefixAuth returns middleware that requires a valid access token (via v)
 // for requests whose path is prefix or lives under prefix/, and passes all
 // other requests through untouched. It is installed on the root router —
-// not the /api subrouter — because chi skips a subrouter's middleware
-// entirely while the subrouter has no routes (see New); the group is empty
-// in 1.3b and gains its first route in 1.3c, so a subrouter-scoped
-// middleware would answer 404 instead of 401 for unauthenticated requests.
+// not the /api subrouter — so that unauthenticated requests get 401
+// regardless of route matching: a subrouter answers 404 via its own
+// NotFoundHandler for paths with no matching route (verified empirically
+// against chi v5.5.0 in 1.3b, D-023), which would mask the auth failure.
 func prefixAuth(prefix string, v *authn.Verifier) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,20 +91,23 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 type handler struct {
-	ready Readiness
-	m     *httpMetrics
+	ready     Readiness
+	auth      *authn.Verifier
+	bootstrap *Bootstrap
+	m         *httpMetrics
 }
 
 // New assembles the root router with cross-cutting middleware and the
 // probe/metrics endpoints. Each call creates a fresh Prometheus registry
 // (so tests can build independent servers) seeded with the standard
 // Go and process collectors. auth guards every route under /api (step
-// 1.3) and must not be nil.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier) http.Handler {
+// 1.3) and must not be nil. bootstrap performs first-login user creation
+// (step 1.3c) and may be nil, in which case /api/v1/me answers 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
-	h := &handler{ready: ready, m: newHTTPMetrics()}
+	h := &handler{ready: ready, auth: auth, bootstrap: bootstrap, m: newHTTPMetrics()}
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
@@ -120,8 +124,8 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier) http.Handler {
 	r.Use(h.metrics)
 	// Auth (step 1.3): every request under /api requires a valid access
 	// token. Enforced on the root router as a prefix middleware (not on the
-	// /api subrouter) — see prefixAuth for why subrouter scoping fails while
-	// the group is still empty.
+	// /api subrouter) — see prefixAuth for why subrouter scoping would let
+	// 404s mask 401s.
 	r.Use(prefixAuth(apiPrefix, auth))
 
 	r.Get("/healthz", h.healthz)
@@ -131,12 +135,42 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier) http.Handler {
 	}))
 
 	// Business API routes (step 1.3+). Auth is enforced by the prefix
-	// middleware above; this group holds the concrete routes, the first of
-	// which (/api/v1/me) lands in 1.3c.
+	// middleware above; this group holds the concrete routes.
 	r.Route(apiPrefix, func(r chi.Router) {
-		// 1.3c: r.Get("/v1/me", h.me)
+		r.Get("/v1/me", h.me)
 	})
 	return r
+}
+
+// me is the first business route (step 1.3c): it idempotently ensures the
+// caller's users row (creating it with a fresh wrapped DEK on first login)
+// and returns the stored identity. Responses come from the ROW, not the
+// token, so profile-claim fallbacks are applied exactly once.
+func (h *handler) me(w http.ResponseWriter, r *http.Request) {
+	id, err := h.auth.Identity(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+		return
+	}
+	if h.bootstrap == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "database not configured",
+		})
+		return
+	}
+	row, err := h.bootstrap.EnsureUser(r.Context(), id)
+	if err != nil {
+		slog.Error("user bootstrap failed", "sub", id.Sub, "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "user bootstrap failed",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Sub         string `json:"sub"`
+		Email       string `json:"email"`
+		DisplayName string `json:"display_name"`
+	}{row.Sub, row.Email, row.DisplayName})
 }
 
 func (h *handler) metrics(next http.Handler) http.Handler {

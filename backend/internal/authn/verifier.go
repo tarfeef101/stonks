@@ -35,8 +35,34 @@ type Config struct {
 // static key set.
 type KeyFunc func(ctx context.Context) (any, error)
 
+// Identity is the validated identity extracted from an access token: the
+// `sub` claim plus the OIDC profile claims (email, name,
+// preferred_username). Profile claims are empty when the token does not
+// carry them (D-024); callers must treat them as optional.
+type Identity struct {
+	Sub      string
+	Email    string
+	Name     string
+	Username string
+}
+
+// identityClaims is the WithCustomClaims target (D-024): the auth0 v3
+// validator decodes only RFC 7519 registered claims into
+// ValidatedClaims.RegisteredClaims, so the OIDC profile claims are opt-in.
+// The library re-decodes the payload part of the SAME token string that
+// was already signature/iss/aud validated, into a fresh struct per
+// request. Validate is a no-op — the middleware is the only trust
+// boundary.
+type identityClaims struct {
+	Email             string `json:"email"`
+	Name              string `json:"name"`
+	PreferredUsername string `json:"preferred_username"`
+}
+
+func (identityClaims) Validate(context.Context) error { return nil }
+
 // Verifier validates OIDC access tokens and exposes the validated
-// subject claim.
+// identity (subject + profile claims).
 type Verifier struct {
 	middleware *jwtmiddleware.JWTMiddleware
 }
@@ -76,6 +102,11 @@ func NewWithKeyFunc(cfg Config, keyFunc KeyFunc) (*Verifier, error) {
 		validator.WithAlgorithm(validator.RS256),
 		validator.WithIssuer(cfg.Issuer),
 		validator.WithAudience(cfg.Audience),
+		// D-024: the library only decodes RFC 7519 registered claims, so
+		// the OIDC profile claims are opt-in via WithCustomClaims. The
+		// factory runs per request and the library re-decodes the payload
+		// part of the same already-verified token string.
+		validator.WithCustomClaims(func() *identityClaims { return &identityClaims{} }),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("authn: build validator: %w", err)
@@ -94,17 +125,39 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 	return v.middleware.CheckJWT(next)
 }
 
+// Identity extracts the validated identity from a request context that
+// passed through Middleware: the `sub` claim plus the OIDC profile claims
+// (email, name, preferred_username). It errors when the context carries
+// no validated claims or the token has no subject (the dev realm must
+// carry the `basic` client scope for tokens to have `sub`, D-022). Profile
+// claims are empty when the token does not carry them.
+func (v *Verifier) Identity(ctx context.Context) (Identity, error) {
+	claims, err := core.GetClaims[*validator.ValidatedClaims](ctx)
+	if err != nil {
+		return Identity{}, fmt.Errorf("authn: no validated claims in context: %w", err)
+	}
+	if claims.RegisteredClaims.Subject == "" {
+		return Identity{}, errors.New("authn: access token has no subject (sub) claim")
+	}
+	id := Identity{Sub: claims.RegisteredClaims.Subject}
+	// CustomClaims is nil unless the WithCustomClaims option was passed at
+	// construction (always the case via New/NewWithKeyFunc).
+	if ic, ok := claims.CustomClaims.(*identityClaims); ok && ic != nil {
+		id.Email = ic.Email
+		id.Name = ic.Name
+		id.Username = ic.PreferredUsername
+	}
+	return id, nil
+}
+
 // Subject extracts the validated `sub` claim from a request context that
 // passed through Middleware. It errors when the context carries no
 // validated claims or the token has no subject (the dev realm must carry
 // the `basic` client scope for tokens to have `sub`, D-022).
 func (v *Verifier) Subject(ctx context.Context) (string, error) {
-	claims, err := core.GetClaims[*validator.ValidatedClaims](ctx)
+	id, err := v.Identity(ctx)
 	if err != nil {
-		return "", fmt.Errorf("authn: no validated claims in context: %w", err)
+		return "", err
 	}
-	if claims.RegisteredClaims.Subject == "" {
-		return "", errors.New("authn: access token has no subject (sub) claim")
-	}
-	return claims.RegisteredClaims.Subject, nil
+	return id.Sub, nil
 }
