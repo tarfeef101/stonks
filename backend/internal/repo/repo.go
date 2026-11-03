@@ -35,6 +35,10 @@ var (
 	ErrSchemaNotFound   = errors.New("repo: schema not found")
 	ErrNameTaken        = errors.New("repo: name already exists for this user")
 	ErrBuiltinReadOnly  = errors.New("repo: builtin schemas are read-only")
+
+	// 2.6 transactions.
+	ErrTransactionNotFound = errors.New("repo: transaction not found")
+	ErrDedupConflict       = errors.New("repo: a transaction with the same dedup key already exists")
 )
 
 // hashName computes the §5 plaintext name_hash.
