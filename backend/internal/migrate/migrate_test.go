@@ -131,8 +131,9 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 3 (all eight tables present), a second `up` is a no-op, and
-// `down` rolls back exactly one step (0003 leaves 0001+0002 in place).
+// version 4 (all eight tables present plus users.onboarded_at from 0004),
+// a second `up` is a no-op, and `down` rolls back exactly one step (0004
+// drops the column; 0001+0002+0003 stay in place).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -140,8 +141,8 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 3 {
-		t.Fatalf("version after up = %d, want 3", ver)
+	if ver != 4 {
+		t.Fatalf("version after up = %d, want 4", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
@@ -155,34 +156,42 @@ func TestGooseLifecycle(t *testing.T) {
 		}
 	}
 
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'users'
+		    AND column_name = 'onboarded_at'`); n != 1 {
+		t.Fatalf("users.onboarded_at after up = %d, want 1", n)
+	}
+
 	// Idempotency — `make dev` runs the migrate service on every boot.
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 3 {
-		t.Fatalf("version after re-up = %d (err %v), want 3", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 4 {
+		t.Fatalf("version after re-up = %d (err %v), want 4", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0003) only;
-	// 0001+0002's tables stay.
+	// One-step down: goose rolls back the latest migration (0004) only —
+	// the onboarded_at column goes; 0001+0002+0003's tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 2 {
-		t.Fatalf("version after down = %d (err %v), want 2", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 3 {
+		t.Fatalf("version after down = %d (err %v), want 3", ver, err)
 	}
 	if n := countRows(t, db, ctx,
-		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name IN ('budgets', 'llm_credentials')`); n != 0 {
-		t.Fatalf("0003 tables remaining after one-step down = %d, want 0", n)
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'users'
+		    AND column_name = 'onboarded_at'`); n != 0 {
+		t.Fatalf("users.onboarded_at remaining after one-step down = %d, want 0", n)
 	}
 	n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public'
 		    AND table_name IN ('users', 'user_categories', 'import_schemas', 'notifications',
-		                       'accounts', 'transactions')`)
-	if n != 6 {
-		t.Fatalf("0001+0002 tables remaining after one-step down = %d, want 6", n)
+		                       'accounts', 'transactions', 'budgets', 'llm_credentials')`)
+	if n != 8 {
+		t.Fatalf("0001+0002+0003 tables remaining after one-step down = %d, want 8", n)
 	}
 }
 

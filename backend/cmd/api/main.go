@@ -64,6 +64,7 @@ func main() {
 		ready     server.Readiness
 		pool      *pgxpool.Pool
 		bootstrap *server.Bootstrap
+		settings  server.SettingsStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -115,9 +116,12 @@ func main() {
 			logger.Error("user bootstrap init failed", "error", err)
 			os.Exit(1)
 		}
+		// User settings (step 1.4a): same pool, no KEK of its own — the
+		// settings columns are plaintext.
+		settings = server.NewPGSettingsStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

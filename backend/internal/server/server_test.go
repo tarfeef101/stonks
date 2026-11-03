@@ -45,7 +45,7 @@ func testAuth() *authn.Verifier {
 }
 
 func TestAPINeedsToken(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{}, testAuth(), nil)
+	h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -68,7 +68,7 @@ func TestMe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b)
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil)
 	token := mintIdentityToken(t, key, "me-sub", "me@localhost", "Me Name", "meuser")
 
 	code, body, _ := do(t, h, "/api/v1/me", map[string]string{"Authorization": "Bearer " + token})
@@ -113,7 +113,7 @@ func TestMe(t *testing.T) {
 // probes/metrics in steps before 1.3c wiring).
 func TestMeNoBootstrap(t *testing.T) {
 	key := mintKey(t)
-	h := New(nil, BuildInfo{}, liveAuth(t, key), nil)
+	h := New(nil, BuildInfo{}, liveAuth(t, key), nil, nil)
 	token := mintIdentityToken(t, key, "no-db-sub", "n@localhost", "N", "n")
 
 	code, body, _ := do(t, h, "/api/v1/me", map[string]string{"Authorization": "Bearer " + token})
@@ -126,7 +126,7 @@ func TestMeNoBootstrap(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth(), nil)
+	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth(), nil, nil)
 	code, body, _ := do(t, h, "/healthz", nil)
 	if code != http.StatusOK {
 		t.Fatalf("healthz status = %d, want 200 (body %s)", code, body)
@@ -137,7 +137,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyzNoDatabase(t *testing.T) {
-	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth(), nil)
+	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth(), nil, nil)
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 (body %s)", code, body)
@@ -148,7 +148,7 @@ func TestReadyzNoDatabase(t *testing.T) {
 }
 
 func TestReadyzDatabaseUnreachable(t *testing.T) {
-	h := New(fakeReady{err: errors.New("connection refused")}, BuildInfo{}, testAuth(), nil)
+	h := New(fakeReady{err: errors.New("connection refused")}, BuildInfo{}, testAuth(), nil, nil)
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 (body %s)", code, body)
@@ -159,7 +159,7 @@ func TestReadyzDatabaseUnreachable(t *testing.T) {
 }
 
 func TestReadyzOK(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{}, testAuth(), nil)
+	h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil)
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusOK {
 		t.Fatalf("readyz status = %d, want 200 (body %s)", code, body)
@@ -170,7 +170,7 @@ func TestReadyzOK(t *testing.T) {
 }
 
 func TestMetrics(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{Version: "v1", Commit: "c1"}, testAuth(), nil)
+	h := New(fakeReady{}, BuildInfo{Version: "v1", Commit: "c1"}, testAuth(), nil, nil)
 
 	// Exercise a request so the request counters exist.
 	if code, body, _ := do(t, h, "/healthz", nil); code != http.StatusOK {

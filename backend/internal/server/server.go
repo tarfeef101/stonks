@@ -94,6 +94,7 @@ type handler struct {
 	ready     Readiness
 	auth      *authn.Verifier
 	bootstrap *Bootstrap
+	settings  SettingsStore
 	m         *httpMetrics
 }
 
@@ -103,11 +104,13 @@ type handler struct {
 // Go and process collectors. auth guards every route under /api (step
 // 1.3) and must not be nil. bootstrap performs first-login user creation
 // (step 1.3c) and may be nil, in which case /api/v1/me answers 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap) http.Handler {
+// settings serves GET/PATCH /api/v1/settings (step 1.4a) and may be nil,
+// in which case the settings routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
-	h := &handler{ready: ready, auth: auth, bootstrap: bootstrap, m: newHTTPMetrics()}
+	h := &handler{ready: ready, auth: auth, bootstrap: bootstrap, settings: settings, m: newHTTPMetrics()}
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
@@ -138,6 +141,12 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 	// middleware above; this group holds the concrete routes.
 	r.Route(apiPrefix, func(r chi.Router) {
 		r.Get("/v1/me", h.me)
+		// User settings (step 1.4a). The users-row settings columns are
+		// the onboarding state; PATCH carries the one-way `onboarded`
+		// completion flag. The error envelope ({error: {code, message}})
+		// is plan 3.1's shape, adopted here early.
+		r.Get("/v1/settings", h.getSettings)
+		r.Patch("/v1/settings", h.patchSettings)
 	})
 	return r
 }
