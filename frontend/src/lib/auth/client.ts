@@ -81,14 +81,6 @@ export async function initSession(): Promise<void> {
 }
 
 /**
- * Claim-based onboarding gate: the profile counts as complete once it has
- * an email. Step 1.4 replaces this with the backend settings state.
- */
-export function profileComplete(u: User | null): boolean {
-	return Boolean(u?.profile?.email);
-}
-
-/**
  * Display name from profile claims (`name` → `email` fallback). Claims are
  * typed `unknown` in oidc-client-ts, so guard the types here — one place.
  */

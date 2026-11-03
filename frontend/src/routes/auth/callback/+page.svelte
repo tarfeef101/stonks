@@ -5,7 +5,8 @@
 	import type { RouteIdWithSearchOrHash } from '$app/types';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
-	import { user, signInCallback, profileComplete } from '#lib/auth/client';
+	import { signInCallback } from '#lib/auth/client';
+	import { loadSettings } from '#lib/settings';
 
 	// OIDC redirect callback (step 1.2): the IdP lands the browser here
 	// with ?code=...&state=... (plus the echoed authorize query params).
@@ -26,15 +27,22 @@
 	onMount(async () => {
 		try {
 			await signInCallback();
-			// Incomplete profile (no email claim) → onboarding (step 1.4
-			// builds the flow; the redirect seam is step 1.2). Both targets
-			// are internal paths — resolve() keeps base-path deployments
-			// working. The cast is safe: return_to only ever carries this
-			// app's own page.url (set by login()), so it is a route id —
-			// the static-segment routes pass any query string through
-			// unchanged.
+			// Onboarding gate (step 1.4): the backend's onboarded_at is the
+			// source of truth (not a profile claim). Fail-open: loadSettings
+			// never throws — if the GET fails we cannot positively know the
+			// onboarding state, so send the user home rather than trap them
+			// in the onboarding loop; the UserChip prompt still offers the
+			// flow. (The layout's sub-keyed effect also GETs settings on
+			// identity appearance; this page awaits its own load because it
+			// must decide the redirect target before navigating.)
+			// Both targets are internal paths — resolve() keeps base-path
+			// deployments working. The cast is safe: return_to only ever
+			// carries this app's own page.url (set by login()), so it is a
+			// route id — the static-segment routes pass any query string
+			// through unchanged.
+			const st = await loadSettings();
 			const target = (
-				profileComplete($user) ? (returnTo ?? '/') : '/onboarding'
+				st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')
 			) as RouteIdWithSearchOrHash;
 			goto(resolve(target), { replaceState: true });
 		} catch (e) {

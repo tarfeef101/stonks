@@ -20,7 +20,17 @@
 	"onboarding": {
 		"title": "Onboarding",
 		"sign_in_as": "Signed in as",
-		"placeholder": "The full onboarding flow (default currency, email confirmation, category preview) lands in step 1.4. This page is the redirect target for first-time sign-ins with an incomplete profile.",
+		"already_done": "You've already completed onboarding.",
+		"email_label": "Email",
+		"currency_label": "Default currency",
+		"notifications": "Summary notifications",
+		"notify_monthly": "Monthly summary",
+		"notify_quarterly": "Quarterly summary",
+		"notify_annual": "Annual summary",
+		"categories_heading": "Your default categories",
+		"categories_note": "Preview of the categories applied to your transactions — you can toggle, edit, or add categories later.",
+		"submit": "Save and continue",
+		"submitting": "Saving…",
 		"back_to_summary": "Back to summary"
 	}
 }

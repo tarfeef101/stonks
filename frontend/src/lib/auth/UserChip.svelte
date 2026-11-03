@@ -2,18 +2,23 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { _ } from 'svelte-i18n';
-	import { user, login, logout, profileComplete, displayName } from '#lib/auth/client';
+	import { user, login, logout, displayName } from '#lib/auth/client';
+	import { settings } from '#lib/settings';
 
 	// The chip is the app's auth surface (AppShell header, step 1.2c):
 	// signed out → sign-in button; signed in → name/email + sign-out, and
-	// an onboarding prompt while the profile is incomplete (until step 1.4
-	// replaces the claim-based gate with the backend settings state).
+	// an onboarding prompt while the backend says onboarding is incomplete
+	// (step 1.4: onboarded_at is the gate, not a profile claim). The
+	// prompt is hidden while settings load or the load failed — it appears
+	// only on positive knowledge of incompleteness, so a flaky settings
+	// GET never nags.
 	const name = $derived(displayName($user));
+	const needsOnboarding = $derived(Boolean($user && $settings && $settings.onboarded_at === null));
 </script>
 
 {#if $user}
 	<div class="flex items-center gap-3 text-sm">
-		{#if !profileComplete($user)}
+		{#if needsOnboarding}
 			<a
 				href={resolve('/onboarding')}
 				class="font-medium text-amber-700 hover:underline"

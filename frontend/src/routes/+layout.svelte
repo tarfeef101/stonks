@@ -5,7 +5,8 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import AppShell from '#lib/components/AppShell.svelte';
-	import { initSession } from '#lib/auth/client';
+	import { initSession, user } from '#lib/auth/client';
+	import { clearSettings, loadSettings } from '#lib/settings';
 	import { queryClient } from '#lib/query';
 	import { waitLocale } from '#lib/i18n';
 	import type { LayoutProps } from './$types';
@@ -46,6 +47,23 @@
 	// soft_navigations feature tracks the transitions themselves).
 	$effect(() => {
 		if (newrelic) newrelic.setPageViewName(page.url.pathname);
+	});
+
+	// Settings (step 1.4): load when the identity appears, reload when the
+	// identity changes, clear on sign-out. Keyed on the sub claim with a
+	// last-seen guard: oidc-client-ts re-emits the User object on every
+	// silent token renewal (same sub), and the store read alone would
+	// refetch settings on each one.
+	let lastSub: string | null = null;
+	$effect(() => {
+		const sub = $user?.profile.sub ?? null;
+		if (sub === lastSub) return;
+		lastSub = sub;
+		if (sub) {
+			void loadSettings();
+		} else {
+			clearSettings();
+		}
 	});
 </script>
 
