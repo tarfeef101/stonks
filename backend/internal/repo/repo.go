@@ -1,0 +1,67 @@
+// Data-access repositories (plan step 2.5): categories, accounts,
+// import schemas. Every method is scoped by userID — authorization is
+// structural: no query shape reads or writes another user's rows.
+//
+// Tables with DEK-encrypted columns take the caller's unwrapped DEK
+// (the handler resolves it from the users row: bootstrap +
+// crypto.UnwrapDEK); the repos never see the KEK.
+//
+// name_hash = hex(sha256(TrimSpace(name))). Plan §5 keeps it plaintext
+// for uniqueness/lookup. Exact-case sensitive: "Groceries" and
+// "groceries" are distinct rows — the UI may canonicalize case, the
+// schema does not.
+//
+// The plan's other 2.5 surfaces already exist: settings get/update is
+// the 1.4a SettingsStore in internal/server, and the users row store is
+// the 1.3c bootstrap UserStore (same package). Both operate on the same
+// users table this package shares.
+package repo
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// Sentinel errors the API layer (phase 3) maps to status codes.
+var (
+	ErrCategoryNotFound = errors.New("repo: category not found")
+	ErrParentNotFound   = errors.New("repo: parent category not found")
+	ErrAccountNotFound  = errors.New("repo: account not found")
+	ErrSchemaNotFound   = errors.New("repo: schema not found")
+	ErrNameTaken        = errors.New("repo: name already exists for this user")
+	ErrBuiltinReadOnly  = errors.New("repo: builtin schemas are read-only")
+)
+
+// hashName computes the §5 plaintext name_hash.
+func hashName(name string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(name)))
+	return hex.EncodeToString(sum[:])
+}
+
+// validateName rejects empty (or blank) names and names over 255 runes
+// (the column is text, but the API should 400 before the DB sees them).
+func validateName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("name must not be empty")
+	}
+	if utf8.RuneCountInString(name) > 255 {
+		return errors.New("name must be at most 255 characters")
+	}
+	return nil
+}
+
+// pgErrCode extracts the SQLSTATE from a pgx error, "" when the error is
+// not a postgres one. Classification: 23505 = unique_violation,
+// 23503 = foreign_key_violation (see backend/migrations headers).
+func pgErrCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
