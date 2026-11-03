@@ -38,6 +38,29 @@ services:
       timeout: 5s
       retries: 20
 
+  # goose migration runner (step 2.1): runs the goose CLI shipped in the
+  # backend image (Dockerfile builds it). No profile, so it runs on EVERY
+  # `make dev` with the default command `up` — goose up is an idempotent
+  # no-op when the DB is already current, so a fresh stack auto-migrates.
+  # `docker compose run --rm migrate up|down|status` appends the action
+  # after the entrypoint (the Makefile migrate / migrate-down /
+  # migrate-status targets wrap it). The Phase 10 k8s migration Job
+  # reuses this same image.
+  migrate:
+    build: ./backend
+    entrypoint:
+      - goose
+      - -dir
+      - /migrations
+      - postgres
+      - ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
+    command: [up]
+    volumes:
+      - ./backend/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # The prod image (step 0.2) carries its own HEALTHCHECK (wget /healthz).
   backend:
     build: ./backend

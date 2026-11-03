@@ -131,6 +131,14 @@ migrate-down: ## Roll back DB migrations (goose down)
 	  echo "skip: migrations + compose migrate service land in a later step"; \
 	fi
 
+.PHONY: migrate-status
+migrate-status: ## Show migration status (goose status)
+	@if [ -f docker-compose.dev.yml ] && [ -d backend/migrations ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate status; \
+	else \
+	  echo "skip: migrations + compose migrate service land in a later step"; \
+	fi
+
 # ---------- dev stack ----------
 
 .PHONY: dev
