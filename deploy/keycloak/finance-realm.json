@@ -1,0 +1,86 @@
+{
+  "realm": "finance",
+  "enabled": true,
+  "displayName": "Finance (local dev)",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "sslRequired": "none",
+  "clients": [
+    {
+      "clientId": "finance-spa",
+      "name": "Finance SPA (local dev)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "fullScopeAllowed": true,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:18082/,http://127.0.0.1:18082/"
+      },
+      "redirectUris": [
+        "http://localhost:18082/*",
+        "http://127.0.0.1:18082/*"
+      ],
+      "webOrigins": [
+        "http://localhost:18082",
+        "http://127.0.0.1:18082"
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email",
+        "openid"
+      ],
+      "protocolMappers": [
+        {
+          "name": "finance-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "finance-api",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "finance-api",
+      "name": "Finance API (audience identifier, local dev)",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "protocolMappers": []
+    }
+  ],
+  "users": [
+    {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "username": "test",
+      "enabled": true,
+      "email": "test@localhost",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "User",
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "test1234"
+        }
+      ]
+    }
+  ]
+}

@@ -18,5 +18,18 @@ export default defineConfig({
 			}
 		}),
 		tailwindcss()
-	]
+	],
+	server: {
+		// Dev-only: forward /api to the backend (which serves API routes
+		// under /api/... — plain pass-through, no rewrite). Inside the
+		// compose stack the target is the 'backend' service; a standalone
+		// dev server uses the dev host port (docker-compose.dev.yml sets
+		// VITE_API_PROXY_TARGET=http://backend:8080).
+		proxy: {
+			'/api': {
+				target: process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:18080',
+				changeOrigin: true
+			}
+		}
+	}
 });

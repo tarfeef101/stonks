@@ -117,18 +117,18 @@ frontend-fmt: ## prettier --write (node:26)
 
 .PHONY: migrate
 migrate: ## Apply DB migrations (goose up) via the compose migrate service
-	@if [ -f docker-compose.dev.yml ]; then \
+	@if [ -f docker-compose.dev.yml ] && [ -d backend/migrations ]; then \
 	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate up; \
 	else \
-	  echo "skip: compose stack lands in step 0.4"; \
+	  echo "skip: migrations + compose migrate service land in a later step"; \
 	fi
 
 .PHONY: migrate-down
 migrate-down: ## Roll back DB migrations (goose down)
-	@if [ -f docker-compose.dev.yml ]; then \
+	@if [ -f docker-compose.dev.yml ] && [ -d backend/migrations ]; then \
 	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate down; \
 	else \
-	  echo "skip: compose stack lands in step 0.4"; \
+	  echo "skip: migrations + compose migrate service land in a later step"; \
 	fi
 
 # ---------- dev stack ----------

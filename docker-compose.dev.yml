@@ -1,0 +1,194 @@
+# Personal Finance Tracker — local dev stack (step 0.4).
+#
+#   make dev        boot everything (builds the backend image first)
+#   make dev-ps     status + health
+#   make dev-logs   tail logs
+#   make dev-down   stop (data volumes persist across stops)
+#
+# Configuration lives in ./.env (copy from .env.example). Compose auto-loads
+# it for ${VAR} interpolation; every value below has a dev-safe default, so
+# `make dev` works even with an empty or missing .env.
+#
+# Host ports (host port 8080 is already taken on this machine; the dev stack
+# uses the 18xxx range — see docs/DEVELOPMENT.md):
+#   postgres  15432   backend   18080   keycloak  18081
+#   frontend  18082   mailpit   1025 (SMTP) + 18025 (UI)
+
+services:
+  # postgres:18 — exact minor 18.6, verified 2026-11-02
+  # (`docker run --rm postgres:18 psql --version`); recorded in docs/DEVELOPMENT.md.
+  # postgres:18+ (docker-library/postgres#1259) stores data in a
+  # major-version-specific layout and REFUSES to start with a mount at the
+  # legacy default path — the image's own suggestion is a single mount at
+  # /var/lib/postgresql (data lands in /var/lib/postgresql/18/main inside
+  # the volume), which also keeps pg_upgrade --link possible later.
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: finance
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "15432:5432"
+    volumes:
+      - ftrk-pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d finance"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # The prod image (step 0.2) carries its own HEALTHCHECK (wget /healthz).
+  backend:
+    build: ./backend
+    ports:
+      - "18080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
+      AUTH0_ISSUER: ${AUTH0_ISSUER:-http://localhost:18081/realms/finance}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-finance-spa}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
+      NR_LICENSE_KEY: ${NR_LICENSE_KEY:-}
+      KEK: ${KEK:-}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TLS_POLICY: ${SMTP_TLS_POLICY:-none}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  # Dev server (not the nginx image): SvelteKit PUBLIC_* vars are read at
+  # runtime by the dev server, so .env changes apply on restart without a
+  # rebuild (they are baked in for the static production build).
+  frontend:
+    image: node:26.13.0
+    working_dir: /app
+    command: sh -c "npm ci --no-audit --no-fund && exec npm run dev -- --host 0.0.0.0"
+    ports:
+      - "18082:5173"
+    environment:
+      PUBLIC_API_BASE: /api
+      PUBLIC_NR_LICENSE_KEY: ${NR_LICENSE_KEY:-}
+      PUBLIC_NR_APPLICATION_ID: ${PUBLIC_NR_APPLICATION_ID:-}
+      # Target of the /api vite dev proxy (vite.config.ts) — compose
+      # service name; standalone dev servers default to localhost:18080.
+      VITE_API_PROXY_TARGET: http://backend:8080
+    volumes:
+      - ./frontend:/app
+      - ftrk-npm-cache:/root/.npm
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # node:26 has a global fetch (no curl in the image). The one-liner must
+      # be a quoted YAML scalar: the unquoted form contains `: 1` (colon +
+      # space) inside the ternary, which YAML parses as a mapping.
+      test:
+        - CMD-SHELL
+        - "node -e \"fetch('http://127.0.0.1:5173/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Local OIDC IdP for iteration 1 (plan execution envelope): realm
+  # 'finance', public SPA client 'finance-spa', 'finance-api' audience,
+  # one test user.
+  #
+  # Realm bootstrap (see deploy/keycloak/dev-init.sh): on FIRST boot only
+  # (fresh ftrk-kc-data volume) the committed realm JSON is imported
+  # OFFLINE with `kc.sh import --override false` before the server starts
+  # — which also creates the admin user with the
+  # KC_BOOTSTRAP_ADMIN_PASSWORD value. On a restart the DB is not empty,
+  # so the import is skipped and the realm + admin persist in the volume.
+  # `kcadm.sh import` was REMOVED in Keycloak 26.8 (26.8.1 verified);
+  # `kc.sh import` is the offline 26.x replacement. (KC_BOOTSTRAP_KEYCLOAK_IMPORT
+  # appears in `show-config` but is inert at runtime — verified by test;
+  # and `kc.sh bootstrap-admin user` must NOT run afterwards — its failure
+  # on the existing admin corrupts the admin's password — verified.)
+  #
+  # dev-init.sh then starts `kc.sh start-dev`, waits for readiness,
+  # re-sets the test user's password (idempotent, every boot), and waits
+  # on Keycloak.
+  #
+  # Health checks on Keycloak 26.x: enabled via KC_HEALTH_ENABLED and —
+  # unless KC_HTTP_MANAGEMENT_HEALTH_ENABLED=false — served on the
+  # management port (9000, which we do not expose). We keep them on the
+  # main port 8080 (the dev container exposes that anyway; in prod the
+  # k8s probes use the management interface instead).
+  # The image ships no curl/wget — the healthcheck uses bash /dev/tcp.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    entrypoint: ["bash", "/opt/keycloak/data/dev-init.sh"]
+    command: ["start-dev"]
+    environment:
+      # KC_BOOTSTRAP_ADMIN_USERNAME/PASSWORD are consumed by the first-boot
+      # offline import (dev-init.sh phase 1): the admin user is created
+      # WITH the KC_BOOTSTRAP_ADMIN_PASSWORD value. dev-init.sh then mints
+      # a fresh admin-cli token with those credentials on EVERY boot and
+      # uses it to sync the test user's password via the raw admin API
+      # (not kcadm — kcadm 26.8 caches tokens per (server, realm) and 401s
+      # on cross-realm calls; a master token DOES authorize other realms).
+      # The server does NOT re-sync the admin password from env on later
+      # boots — change KC_ADMIN_PASSWORD => delete ftrk-kc-data (docs).
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "false"
+      FTRK_TEST_USER_PASSWORD: ${FTRK_TEST_USER_PASSWORD:-test1234}
+    ports:
+      - "18081:8080"
+    volumes:
+      - ftrk-kc-data:/opt/keycloak/data
+      - ./deploy/keycloak/dev-init.sh:/opt/keycloak/data/dev-init.sh:ro
+      - ./deploy/keycloak/finance-realm.json:/opt/keycloak/data/import/finance-realm.json:ro
+    healthcheck:
+      # No curl/wget in the image — raw HTTP via bash /dev/tcp. Quoted YAML
+      # scalar: the command contains `Host: localhost` (colon + space), which
+      # an unquoted plain scalar would be misparsed as a mapping.
+      test:
+        - CMD-SHELL
+        - 'bash -c ''exec 3<> /dev/tcp/127.0.0.1/8080 && printf "GET /health/ready HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && head -1 <&3 | grep -q " 200 "'''
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # Mailpit: local SMTP sink (iteration 1 — no external mail, ever).
+  # v1.31.6 ships a built-in HEALTHCHECK baked into the scratch-based image,
+  # so `docker compose ps` reports it (healthy) with no compose healthcheck
+  # needed. Verify mail manually at http://localhost:18025 (API:
+  # /api/v1/messages) — but until the mailer lands in a later step it stays
+  # empty (0.4's "done when" explicitly requires Mailpit to receive nothing).
+  mailpit:
+    image: axllent/mailpit:v1.31.6
+    ports:
+      - "1025:1025"
+      - "18025:8025"
+
+  # llama.cpp — opt-in, lands in step 5.3 (`make dev-llm`; ≈2.5 GB model
+  # pull only when enabled). Commented out until 5.3 per plan 0.4: the
+  # default categorisation test path is the mock provider; the k8s
+  # manifest is deferred to Phase 10. Step 5.3 uncomments this block,
+  # pins the image, and adds the `dev-llm` Makefile target.
+  #
+  # llama:
+  #   image: <pinned in step 5.3>
+  #   profiles: [llm]
+  #   ports:
+  #     - "18090:8080"
+  #   # serves /v1 (OpenAI-compatible); backend LLM_* vars point at it
+
+volumes:
+  ftrk-pg-data:
+  ftrk-kc-data:
+  ftrk-npm-cache:
