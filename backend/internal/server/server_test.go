@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"finance-tracker/internal/authn"
 )
 
 type fakeReady struct{ err error }
@@ -26,8 +28,35 @@ func do(t *testing.T, h http.Handler, path string, hdr map[string]string) (int, 
 	return rec.Code, string(body), rec.Header().Get("Content-Type")
 }
 
+// testAuth builds a verifier whose keyfunc is inert. These tests only
+// exercise the middleware's rejection path, which fails before key
+// resolution, so no RSA key or network access is needed.
+func testAuth() *authn.Verifier {
+	v, err := authn.NewWithKeyFunc(
+		authn.Config{Issuer: "http://issuer.test", Audience: "test-aud"},
+		func(context.Context) (any, error) { return nil, nil },
+	)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func TestAPINeedsToken(t *testing.T) {
+	h := New(fakeReady{}, BuildInfo{}, testAuth())
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /api request status = %d, want 401", rec.Code)
+	}
+	if rec.Header().Get("WWW-Authenticate") == "" {
+		t.Error("unauthenticated /api response is missing WWW-Authenticate")
+	}
+}
+
 func TestHealthz(t *testing.T) {
-	h := New(nil, BuildInfo{Version: "test", Commit: "abc"})
+	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth())
 	code, body, _ := do(t, h, "/healthz", nil)
 	if code != http.StatusOK {
 		t.Fatalf("healthz status = %d, want 200 (body %s)", code, body)
@@ -38,7 +67,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestReadyzNoDatabase(t *testing.T) {
-	h := New(nil, BuildInfo{Version: "test", Commit: "abc"})
+	h := New(nil, BuildInfo{Version: "test", Commit: "abc"}, testAuth())
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 (body %s)", code, body)
@@ -49,7 +78,7 @@ func TestReadyzNoDatabase(t *testing.T) {
 }
 
 func TestReadyzDatabaseUnreachable(t *testing.T) {
-	h := New(fakeReady{err: errors.New("connection refused")}, BuildInfo{})
+	h := New(fakeReady{err: errors.New("connection refused")}, BuildInfo{}, testAuth())
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 (body %s)", code, body)
@@ -60,7 +89,7 @@ func TestReadyzDatabaseUnreachable(t *testing.T) {
 }
 
 func TestReadyzOK(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{})
+	h := New(fakeReady{}, BuildInfo{}, testAuth())
 	code, body, _ := do(t, h, "/readyz", nil)
 	if code != http.StatusOK {
 		t.Fatalf("readyz status = %d, want 200 (body %s)", code, body)
@@ -71,7 +100,7 @@ func TestReadyzOK(t *testing.T) {
 }
 
 func TestMetrics(t *testing.T) {
-	h := New(fakeReady{}, BuildInfo{Version: "v1", Commit: "c1"})
+	h := New(fakeReady{}, BuildInfo{Version: "v1", Commit: "c1"}, testAuth())
 
 	// Exercise a request so the request counters exist.
 	if code, body, _ := do(t, h, "/healthz", nil); code != http.StatusOK {

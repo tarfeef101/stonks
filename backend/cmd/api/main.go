@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"finance-tracker/internal/authn"
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/server"
 
@@ -70,7 +71,26 @@ func main() {
 		ready = pool
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit})
+	// AuthN (step 1.3). The verifier requires an issuer and audience; a
+	// missing value is a configuration error, so fail fast at boot rather
+	// than serving a server that can only ever answer 401. (The KEK
+	// fail-fast lands in 1.3c alongside the user bootstrap.)
+	if cfg.Auth0Issuer == "" || cfg.Auth0Audience == "" {
+		logger.Error("authn misconfigured",
+			"hint", "AUTH0_ISSUER and AUTH0_AUDIENCE are required (see .env.example)")
+		os.Exit(1)
+	}
+	verifier, err := authn.New(authn.Config{
+		Issuer:       cfg.Auth0Issuer,
+		Audience:     cfg.Auth0Audience,
+		DiscoveryURL: cfg.OIDCDiscoveryURL,
+	})
+	if err != nil {
+		logger.Error("authn verifier init failed", "error", err)
+		os.Exit(1)
+	}
+
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

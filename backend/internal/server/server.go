@@ -8,13 +8,40 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+
+	"finance-tracker/internal/authn"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// apiPrefix is the path prefix for all business API routes. Auth (step
+// 1.3) is enforced for exactly this prefix and everything under it.
+const apiPrefix = "/api"
+
+// prefixAuth returns middleware that requires a valid access token (via v)
+// for requests whose path is prefix or lives under prefix/, and passes all
+// other requests through untouched. It is installed on the root router —
+// not the /api subrouter — because chi skips a subrouter's middleware
+// entirely while the subrouter has no routes (see New); the group is empty
+// in 1.3b and gains its first route in 1.3c, so a subrouter-scoped
+// middleware would answer 404 instead of 401 for unauthenticated requests.
+func prefixAuth(prefix string, v *authn.Verifier) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			p := r.URL.Path
+			if p != prefix && !strings.HasPrefix(p, prefix+"/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			v.Middleware(next).ServeHTTP(w, r)
+		})
+	}
+}
 
 // Readiness reports whether the API is ready to serve traffic. It is
 // satisfied by *pgxpool.Pool and by test fakes.
@@ -70,8 +97,12 @@ type handler struct {
 // New assembles the root router with cross-cutting middleware and the
 // probe/metrics endpoints. Each call creates a fresh Prometheus registry
 // (so tests can build independent servers) seeded with the standard
-// Go and process collectors.
-func New(ready Readiness, info BuildInfo) http.Handler {
+// Go and process collectors. auth guards every route under /api (step
+// 1.3) and must not be nil.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier) http.Handler {
+	if auth == nil {
+		panic("server.New: auth verifier is required (step 1.3)")
+	}
 	h := &handler{ready: ready, m: newHTTPMetrics()}
 
 	reg := prometheus.NewRegistry()
@@ -87,12 +118,24 @@ func New(ready Readiness, info BuildInfo) http.Handler {
 	r.Use(chimw.RequestID)
 	r.Use(chimw.Recoverer)
 	r.Use(h.metrics)
+	// Auth (step 1.3): every request under /api requires a valid access
+	// token. Enforced on the root router as a prefix middleware (not on the
+	// /api subrouter) — see prefixAuth for why subrouter scoping fails while
+	// the group is still empty.
+	r.Use(prefixAuth(apiPrefix, auth))
 
 	r.Get("/healthz", h.healthz)
 	r.Get("/readyz", h.readyz)
 	r.Mount("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{
 		EnableOpenMetrics: true,
 	}))
+
+	// Business API routes (step 1.3+). Auth is enforced by the prefix
+	// middleware above; this group holds the concrete routes, the first of
+	// which (/api/v1/me) lands in 1.3c.
+	r.Route(apiPrefix, func(r chi.Router) {
+		// 1.3c: r.Get("/v1/me", h.me)
+	})
 	return r
 }
 
