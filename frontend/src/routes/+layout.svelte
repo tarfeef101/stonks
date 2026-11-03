@@ -5,6 +5,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import AppShell from '#lib/components/AppShell.svelte';
+	import { initSession } from '#lib/auth/client';
 	import { queryClient } from '#lib/query';
 	import { waitLocale } from '#lib/i18n';
 	import type { LayoutProps } from './$types';
@@ -32,6 +33,11 @@
 	// dynamic import) so strings never flash untranslated.
 	let ready = $state(false);
 	onMount(async () => {
+		// Restore the persisted OIDC session (fire-and-forget: the user
+		// store updates reactively when it resolves, so first paint never
+		// waits on it). Importing #lib/auth/client also wires the API
+		// client's access-token provider (setTokenProvider at module load).
+		void initSession();
 		await waitLocale();
 		ready = true;
 	});

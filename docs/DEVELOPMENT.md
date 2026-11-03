@@ -57,6 +57,40 @@ curl -s -X POST http://localhost:18081/realms/finance/protocol/openid-connect/to
 
 Test user's account console: `http://localhost:18081/realms/finance/account`.
 
+## Manual auth E2E (browser)
+
+The scripted proof of the OIDC flow is `scripts/verify-oidc.sh` (run from
+the repo root after `make dev`): discovery, PKCE S256 authorize, login-form
+POST, state round-trip, token exchange, and `id_token`/`access_token`
+claim assertions — 16 checks, all passing. The click-through equivalent:
+
+1. Open `http://localhost:18082/`. Signed out, the header (top right)
+   shows a **Sign in** button.
+2. Click it — Keycloak's login screen for realm `finance` opens. The app
+   carried the current URL as `return_to`; Keycloak echoes it back on the
+   callback so you land where you started.
+3. Log in as the test user: `test` / `test1234`.
+4. The browser passes through `http://localhost:18082/auth/callback` (the
+   PKCE code exchange happens there) and returns to your page. The header
+   now shows the user's name and a **Sign out** button. The test user has
+   an `email` claim, so the claim-based onboarding gate counts the profile
+   complete and no "Complete onboarding" prompt appears; the placeholder
+   route is still directly reachable at `http://localhost:18082/onboarding`.
+5. Reload — the session survives (persisted in `localStorage`; restored by
+   `initSession()` in the root layout on every page load) and
+   `automaticSilentRenew` refreshes the access token in the background
+   while the page is open.
+6. Click **Sign out** — the local session is cleared, the IdP logout
+   endpoint ends the Keycloak session, and you land back on `/` signed out.
+7. Failure path: a bad password, stale pending state, or an unreachable
+   issuer shows the callback page's "Sign-in failed" state (with a
+   **Go home** button) instead of redirecting.
+
+Env gotcha: `PUBLIC_AUTH0_*` are read by the vite dev server at boot (and
+baked into production builds at build time). After changing them, do
+`make dev-down && make dev` — a bare `docker compose restart` does not
+re-read `.env`.
+
 ## Keycloak bootstrap semantics (verified 2026-11-03 on 26.8.1)
 
 Realm bootstrap is `deploy/keycloak/dev-init.sh` (the container entrypoint) +

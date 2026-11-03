@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { _ } from 'svelte-i18n';
+	import UserChip from '#lib/auth/UserChip.svelte';
 	import type { Snippet } from 'svelte';
 
 	let { children }: { children: Snippet } = $props();
@@ -15,13 +16,19 @@
 			<a href={resolve('/')} class="font-semibold">
 				{$_('app.title')}
 			</a>
-			<nav class="flex gap-4 text-sm">
-				{#each navItems as item (item.href)}
-					<a href={resolve(item.href)} class="text-zinc-600 hover:text-zinc-900">
-						{$_(item.key)}
-					</a>
-				{/each}
-			</nav>
+			<!-- The app's auth surface: sign-in button when signed out,
+			     name + sign-out when signed in (plus an onboarding prompt
+			     while the profile is incomplete, until step 1.4). -->
+			<div class="flex items-center gap-4">
+				<nav class="flex gap-4 text-sm">
+					{#each navItems as item (item.href)}
+						<a href={resolve(item.href)} class="text-zinc-600 hover:text-zinc-900">
+							{$_(item.key)}
+						</a>
+					{/each}
+				</nav>
+				<UserChip />
+			</div>
 		</div>
 	</header>
 
