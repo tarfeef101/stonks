@@ -2,9 +2,10 @@
 //
 // - Base URL from PUBLIC_API_BASE (build-time; default '/api' — the vite dev
 //   server and nginx both proxy /api to the backend).
-// - Bearer token injection via a pluggable provider. Until step 1.2 wires
-//   the OIDC session (Keycloak dev realm locally, Auth0 in prod) the
-//   provider is a stub that returns null — unauthenticated requests.
+// - Bearer token injection via a pluggable provider. Step 1.2 wires the
+//   OIDC session's access token here: src/lib/auth/client.ts calls
+//   setTokenProvider on module load. Until the user has signed in the
+//   provider returns null — unauthenticated requests.
 
 const API_BASE = import.meta.env.PUBLIC_API_BASE ?? '/api';
 
@@ -12,7 +13,8 @@ type TokenProvider = () => string | null;
 
 let getToken: TokenProvider = () => null;
 
-/** Step 1.2: replace with the OIDC session's access-token provider. */
+/** Installs the OIDC session's access-token provider (called by
+ * src/lib/auth/client.ts on module load). */
 export function setTokenProvider(provider: TokenProvider): void {
 	getToken = provider;
 }
