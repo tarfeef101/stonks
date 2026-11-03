@@ -8,5 +8,19 @@
 	"home": {
 		"heading": "Personal Finance Tracker",
 		"placeholder": "The app shell is live. Summary, budgets, explore, and dashboards pages land in step 6.x; mortgage tools in step 7.x."
+	},
+	"auth": {
+		"sign_in": "Sign in",
+		"sign_out": "Sign out",
+		"signing_in": "Signing in…",
+		"error_title": "Sign-in failed",
+		"go_home": "Go home",
+		"complete_onboarding": "Complete onboarding"
+	},
+	"onboarding": {
+		"title": "Onboarding",
+		"sign_in_as": "Signed in as",
+		"placeholder": "The full onboarding flow (default currency, email confirmation, category preview) lands in step 1.4. This page is the redirect target for first-time sign-ins with an incomplete profile.",
+		"back_to_summary": "Back to summary"
 	}
 }

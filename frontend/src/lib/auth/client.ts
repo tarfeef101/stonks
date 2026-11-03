@@ -89,6 +89,17 @@ export function profileComplete(u: User | null): boolean {
 }
 
 /**
+ * Display name from profile claims (`name` → `email` fallback). Claims are
+ * typed `unknown` in oidc-client-ts, so guard the types here — one place.
+ */
+export function displayName(u: User | null): string {
+	if (!u) return '';
+	const name = u.profile.name;
+	const email = u.profile.email;
+	return (typeof name === 'string' && name) || (typeof email === 'string' && email) || '';
+}
+
+/**
  * Redirect to the IdP login screen. `returnTo` (a same-origin relative
  * path) is sent as an authorize query param — Keycloak echoes it back on
  * the callback URL so the app can return the user to where they came from.
