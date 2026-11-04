@@ -173,7 +173,7 @@ func newBudgetServer(t *testing.T, store BudgetStore) (http.Handler, jwk.Key) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, store, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, store, nil, nil, nil), key
 }
 
 // TestBudgetsCRUD covers the happy path end to end: create (201, trimmed
@@ -616,7 +616,7 @@ func TestBudgetsForeignTargets(t *testing.T) {
 func TestBudgetsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, &memBudgetStore{}, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, &memBudgetStore{}, nil, nil, nil)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/budgets", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

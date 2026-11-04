@@ -131,9 +131,10 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 4 (all eight tables present plus users.onboarded_at from 0004),
-// a second `up` is a no-op, and `down` rolls back exactly one step (0004
-// drops the column; 0001+0002+0003 stay in place).
+// version 5 (all nine tables present, import_jobs from 0005),
+// a second `up` is a no-op, and `down` rolls back exactly one step (0005
+// drops the table; 0001+0002+0003+0004 stay in place, users keeps its
+// 0004 onboarded_at column).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -141,12 +142,13 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 4 {
-		t.Fatalf("version after up = %d, want 4", ver)
+	if ver != 5 {
+		t.Fatalf("version after up = %d, want 5", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
 		"accounts", "transactions", "budgets", "llm_credentials",
+		"import_jobs",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -167,23 +169,22 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 4 {
-		t.Fatalf("version after re-up = %d (err %v), want 4", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 5 {
+		t.Fatalf("version after re-up = %d (err %v), want 5", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0004) only —
-	// the onboarded_at column goes; 0001+0002+0003's tables stay.
+	// One-step down: goose rolls back the latest migration (0005) only —
+	// the import_jobs table goes; 0001+0002+0003+0004's tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 3 {
-		t.Fatalf("version after down = %d (err %v), want 3", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 4 {
+		t.Fatalf("version after down = %d (err %v), want 4", ver, err)
 	}
 	if n := countRows(t, db, ctx,
-		`SELECT count(*) FROM information_schema.columns
-		  WHERE table_schema = 'public' AND table_name = 'users'
-		    AND column_name = 'onboarded_at'`); n != 0 {
-		t.Fatalf("users.onboarded_at remaining after one-step down = %d, want 0", n)
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'import_jobs'`); n != 0 {
+		t.Fatalf("import_jobs remaining after one-step down = %d, want 0", n)
 	}
 	n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
@@ -191,7 +192,7 @@ func TestGooseLifecycle(t *testing.T) {
 		    AND table_name IN ('users', 'user_categories', 'import_schemas', 'notifications',
 		                       'accounts', 'transactions', 'budgets', 'llm_credentials')`)
 	if n != 8 {
-		t.Fatalf("0001+0002+0003 tables remaining after one-step down = %d, want 8", n)
+		t.Fatalf("0001+0002+0003+0004 tables remaining after one-step down = %d, want 8", n)
 	}
 }
 
@@ -702,5 +703,105 @@ func TestBudgetCredentialConstraints(t *testing.T) {
 	}
 	if n := countRows(t, db, ctx, `SELECT count(*) FROM llm_credentials WHERE user_id = $1`, otherUserID); n != 1 {
 		t.Fatalf("other user's credential present = %d, want 1", n)
+	}
+}
+
+// TestImportJobsConstraints pins the 0005 invariants: the status
+// vocabulary, the user/account FKs, the NULL-ability of result and
+// error on a fresh job, and the cascade semantics (account delete and
+// user delete both CASCADE the jobs, like the account's transactions).
+func TestImportJobsConstraints(t *testing.T) {
+	db, ctx := migratedDB(t)
+
+	var userID, otherUserID, acctID string
+	err := db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-import', 'a@example.com', 'A', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack")).Scan(&userID)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-import2', 'b@example.com', 'B', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack2")).Scan(&otherUserID)
+	if err != nil {
+		t.Fatalf("insert second user: %v", err)
+	}
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'hash-a', 'bank', 'USD') RETURNING id`,
+		userID, []byte("name-pack")).Scan(&acctID)
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+	ghost := "22222222-2222-3333-4444-555555555555"
+
+	// --- status vocabulary -------------------------------------------------
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO import_jobs (user_id, account_id, status, file_encrypted, file_name_encrypted)
+		VALUES ($1, $2, 'bogus', $3, $4)`, userID, acctID, []byte("file-pack"), []byte("name-pack"))
+	assertViolation(t, err, codeCheckViolation, "status outside vocabulary")
+
+	// --- FKs -----------------------------------------------------------------
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO import_jobs (user_id, account_id, status, file_encrypted, file_name_encrypted)
+		VALUES ($1, $2, 'uploaded', $3, $4)`, ghost, acctID, []byte("file-pack"), []byte("name-pack"))
+	assertViolation(t, err, codeForeignKeyViolation, "import job without user")
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO import_jobs (user_id, account_id, status, file_encrypted, file_name_encrypted)
+		VALUES ($1, $2, 'uploaded', $3, $4)`, userID, ghost, []byte("file-pack"), []byte("name-pack"))
+	assertViolation(t, err, codeForeignKeyViolation, "import job without account")
+
+	// --- nullable terminal columns ---------------------------------------------
+
+	// Minimal insert: result and error stay NULL until a later step
+	// (4.3+) reaches a terminal state.
+	var (
+		jobID string
+		res   sql.NullString
+		er    sql.NullString
+	)
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO import_jobs (user_id, account_id, status, file_encrypted, file_name_encrypted)
+		VALUES ($1, $2, 'uploaded', $3, $4)
+		RETURNING id, result, error`,
+		userID, acctID, []byte("file-pack"), []byte("name-pack")).Scan(&jobID, &res, &er)
+	if err != nil {
+		t.Fatalf("insert minimal import job: %v", err)
+	}
+	if res.Valid || er.Valid {
+		t.Fatalf("result/error on fresh job = (%v, %v), want both NULL", res, er)
+	}
+
+	// A second job under the other user (the schema scopes by user_id in
+	// the queries, not in the FKs, so the shared account is valid here).
+	var jobID2 string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO import_jobs (user_id, account_id, status, file_encrypted, file_name_encrypted)
+		VALUES ($1, $2, 'uploaded', $3, $4)
+		RETURNING id`,
+		otherUserID, acctID, []byte("file-pack"), []byte("name-pack")).Scan(&jobID2)
+	if err != nil {
+		t.Fatalf("insert second import job: %v", err)
+	}
+
+	// --- cascades -------------------------------------------------------------
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, otherUserID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM import_jobs WHERE id = $1`, jobID2); n != 0 {
+		t.Fatalf("import job surviving user delete = %d, want 0", n)
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM accounts WHERE id = $1`, acctID); err != nil {
+		t.Fatalf("delete account: %v", err)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM import_jobs WHERE id = $1`, jobID); n != 0 {
+		t.Fatalf("import job surviving account delete = %d, want 0", n)
 	}
 }

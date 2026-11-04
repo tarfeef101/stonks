@@ -19,11 +19,12 @@ import (
 
 // Error codes carried in the envelope.
 const (
-	codeInvalidRequest = "invalid_request"
-	codeUnauthorized   = "unauthorized"
-	codeNotFound       = "not_found"
-	codeConflict       = "conflict"
-	codeInternal       = "internal"
+	codeInvalidRequest  = "invalid_request"
+	codeUnauthorized    = "unauthorized"
+	codeNotFound        = "not_found"
+	codeConflict        = "conflict"
+	codePayloadTooLarge = "payload_too_large"
+	codeInternal        = "internal"
 )
 
 type errorEnvelope struct {

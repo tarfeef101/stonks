@@ -142,7 +142,7 @@ func newNotificationsServer(t *testing.T, store NotificationStore) (http.Handler
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, store, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, store, nil, nil), key
 }
 
 // listIDs decodes a list body and returns its ids in order (sameIDs, the
@@ -549,7 +549,7 @@ func TestNotificationsUnreadCount(t *testing.T) {
 func TestNotificationsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, &memNotificationStore{}, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, &memNotificationStore{}, nil, nil)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

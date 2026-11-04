@@ -47,6 +47,9 @@ var (
 	ErrBudgetNotFound       = errors.New("repo: budget not found")
 	ErrCredentialNotFound   = errors.New("repo: llm credential not found")
 	ErrNotificationNotFound = errors.New("repo: notification not found")
+
+	// 4.1 import jobs.
+	ErrImportJobNotFound = errors.New("repo: import job not found")
 )
 
 // hashName computes the §5 plaintext name_hash.

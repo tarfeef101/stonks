@@ -101,6 +101,7 @@ type handler struct {
 	budgets       BudgetStore
 	notifications NotificationStore
 	schemas       SchemaStore
+	imports       ImportStore
 	m             *httpMetrics
 }
 
@@ -119,9 +120,10 @@ type handler struct {
 // affected routes answer 503. budgets serves the budget CRUD routes
 // (step 3.3); notifications serves the notification list/mark-read/
 // unread-count routes (step 3.3); schemas serves
-// GET /api/v1/import-schemas (step 3.3) — any nil and the affected
-// routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore) http.Handler {
+// GET /api/v1/import-schemas (step 3.3); imports serves the import
+// job routes (step 4.1: POST /api/v1/imports plus the list and
+// single-GET) — any nil and the affected routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -136,6 +138,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		budgets:       budgets,
 		notifications: notifications,
 		schemas:       schemas,
+		imports:       imports,
 		m:             newHTTPMetrics(),
 	}
 
@@ -210,6 +213,12 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// Import schemas (step 3.3): the builtin presets plus the
 		// caller's customs, list only (custom CRUD is step 4.x).
 		r.Get("/v1/import-schemas", h.schemasList)
+		// Import jobs (step 4.1): multipart statement upload (10 MB
+		// cap) plus the job list and single-GET; the mapping/import
+		// pipeline routes land with step 4.3+.
+		r.Post("/v1/imports", h.postImport)
+		r.Get("/v1/imports", h.importsList)
+		r.Get("/v1/imports/{id}", h.importGet)
 	})
 	return r
 }

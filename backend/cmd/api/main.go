@@ -72,6 +72,7 @@ func main() {
 		budgets       server.BudgetStore
 		notifications server.NotificationStore
 		schemas       server.SchemaStore
+		imports       server.ImportStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -140,9 +141,13 @@ func main() {
 		// configured.
 		notifications = repo.NewNotificationStore(pool)
 		schemas = repo.NewSchemaStore(pool)
+		// Import jobs (step 4.1): same pool; the statement file and
+		// filename are DEK-encrypted by the repo layer (the per-user
+		// DEK comes from bootstrap, like every other encrypted column).
+		imports = repo.NewImportJobStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.
