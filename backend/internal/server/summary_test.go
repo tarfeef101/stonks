@@ -8,7 +8,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,27 +17,6 @@ import (
 
 	"finance-tracker/internal/repo"
 )
-
-// memBudgetStore is the in-memory BudgetStore the summary tests run
-// against: rows for one owner (the repo scopes by user id) and a list
-// error for the 500 path.
-type memBudgetStore struct {
-	userID  string
-	rows    []repo.Budget
-	listErr error
-}
-
-func (m *memBudgetStore) List(_ context.Context, userID string, _ []byte) ([]repo.Budget, error) {
-	if m.listErr != nil {
-		return nil, m.listErr
-	}
-	if userID != m.userID {
-		return []repo.Budget{}, nil
-	}
-	out := make([]repo.Budget, len(m.rows))
-	copy(out, m.rows)
-	return out, nil
-}
 
 // TestSummary covers the month rollup: the group union (tx groups, a
 // target-only category, a dangling target key, uncategorized), target
@@ -50,19 +28,16 @@ func TestSummary(t *testing.T) {
 	c1, c2, c3, c4 := nextTestID(), nextTestID(), nextTestID(), nextTestID()
 	user := "id-sum-a"
 	store := &memTxStore{}
-	budgets := &memBudgetStore{
-		userID: user,
-		rows: []repo.Budget{
-			{ID: nextTestID(), Name: "active month", Period: "month", Active: true,
-				Targets: json.RawMessage(`{"` + c1 + `":100,"` + c2 + `":5.55,"dangling":7,"` + c4 + `":3}`)},
-			{ID: nextTestID(), Name: "second month", Period: "month", Active: true,
-				Targets: json.RawMessage(`{"` + c1 + `":25}`)},
-			{ID: nextTestID(), Name: "inactive month", Period: "month", Active: false,
-				Targets: json.RawMessage(`{"` + c1 + `":50}`)},
-			{ID: nextTestID(), Name: "active quarter", Period: "quarter", Active: true,
-				Targets: json.RawMessage(`{"` + c1 + `":50}`)},
-		},
-	}
+	budgets := &memBudgetStore{rows: []memBudgetRow{
+		{userID: user, b: repo.Budget{ID: nextTestID(), Name: "active month", Period: "month", Active: true,
+			Targets: json.RawMessage(`{"` + c1 + `":100,"` + c2 + `":5.55,"dangling":7,"` + c4 + `":3}`)}},
+		{userID: user, b: repo.Budget{ID: nextTestID(), Name: "second month", Period: "month", Active: true,
+			Targets: json.RawMessage(`{"` + c1 + `":25}`)}},
+		{userID: user, b: repo.Budget{ID: nextTestID(), Name: "inactive month", Period: "month", Active: false,
+			Targets: json.RawMessage(`{"` + c1 + `":50}`)}},
+		{userID: user, b: repo.Budget{ID: nextTestID(), Name: "active quarter", Period: "quarter", Active: true,
+			Targets: json.RawMessage(`{"` + c1 + `":50}`)}},
+	}}
 	cats := &memCategoryStore{rows: []memCategoryRow{
 		{userID: user, id: c1, name: "Groceries", active: true},
 		{userID: user, id: c2, name: "Coffee", active: true},
@@ -129,9 +104,8 @@ func TestSummary(t *testing.T) {
 // TestSummaryPeriods covers the quarter and year bounds with an empty
 // period (no tx, no budgets): zeroed totals and an empty group list.
 func TestSummaryPeriods(t *testing.T) {
-	user := "id-sum-p"
 	store := &memTxStore{}
-	budgets := &memBudgetStore{userID: user}
+	budgets := &memBudgetStore{}
 	cats := &memCategoryStore{}
 	h, key := newTxServer(t, store, cats, budgets)
 	tok := mintIdentityToken(t, key, "sum-p", "p@localhost", "P", "p")
@@ -253,13 +227,11 @@ func TestSummaryErrors(t *testing.T) {
 	})
 
 	t.Run("undecodable targets blob", func(t *testing.T) {
-		budgets := &memBudgetStore{
+		budgets := &memBudgetStore{rows: []memBudgetRow{{
 			userID: "id-sum-e",
-			rows: []repo.Budget{
-				{ID: nextTestID(), Name: "bad blob", Period: "month", Active: true,
-					Targets: json.RawMessage(`[1,2]`)},
-			},
-		}
+			b: repo.Budget{ID: nextTestID(), Name: "bad blob", Period: "month", Active: true,
+				Targets: json.RawMessage(`[1,2]`)},
+		}}}
 		h, hdr := valid(&memTxStore{}, &memCategoryStore{}, budgets)
 		code, out := doReq(t, h, http.MethodGet, "/api/v1/summary", "", hdr)
 		if code != http.StatusInternalServerError {

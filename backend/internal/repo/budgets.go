@@ -111,16 +111,35 @@ func uuidOK(s string) bool {
 	return true
 }
 
+// ValidatePeriod checks the period against the BudgetPeriods
+// vocabulary. The 3.3 budget handlers run user-supplied periods through
+// it before any store call, so a bad value is a 400 carrying this exact
+// message; the repo re-runs it (defense-in-depth, as with validateName).
+func ValidatePeriod(period string) error {
+	if !budgetPeriodOK[period] {
+		return fmt.Errorf("period must be one of %s", strings.Join(BudgetPeriods, ", "))
+	}
+	return nil
+}
+
+// ValidateTargets checks a targets document against the shape rules
+// (validateTargetsShape) without a database, for the same 400-before-
+// the-repo reason as ValidatePeriod. Ownership (every key is the
+// user's own category) is NOT checked here — that needs the user's
+// category rows; the repo re-runs the shape rules and then checks
+// ownership.
+func ValidateTargets(targets json.RawMessage) error {
+	_, err := validateTargetsShape(targets)
+	return err
+}
+
 // validateBudgetFields checks the plaintext input fields; the name goes
 // through the shared validateName.
 func validateBudgetFields(name, period string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	if !budgetPeriodOK[period] {
-		return fmt.Errorf("period must be one of %s", strings.Join(BudgetPeriods, ", "))
-	}
-	return nil
+	return ValidatePeriod(period)
 }
 
 // validateTargetsShape checks a targets document WITHOUT a database:

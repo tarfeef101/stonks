@@ -91,15 +91,17 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 type handler struct {
-	ready        Readiness
-	auth         *authn.Verifier
-	bootstrap    *Bootstrap
-	settings     SettingsStore
-	accounts     AccountStore
-	categories   CategoryStore
-	transactions TransactionStore
-	budgets      BudgetStore
-	m            *httpMetrics
+	ready         Readiness
+	auth          *authn.Verifier
+	bootstrap     *Bootstrap
+	settings      SettingsStore
+	accounts      AccountStore
+	categories    CategoryStore
+	transactions  TransactionStore
+	budgets       BudgetStore
+	notifications NotificationStore
+	schemas       SchemaStore
+	m             *httpMetrics
 }
 
 // New assembles the root router with cross-cutting middleware and the
@@ -114,21 +116,27 @@ type handler struct {
 // nil, in which case those routes answer 503. transactions serves the
 // transaction CRUD routes (step 3.2); budgets and transactions together
 // with categories serve GET /api/v1/summary — any one nil and the
-// affected routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore) http.Handler {
+// affected routes answer 503. budgets serves the budget CRUD routes
+// (step 3.3); notifications serves the notification list/mark-read/
+// unread-count routes (step 3.3); schemas serves
+// GET /api/v1/import-schemas (step 3.3) — any nil and the affected
+// routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
 	h := &handler{
-		ready:        ready,
-		auth:         auth,
-		bootstrap:    bootstrap,
-		settings:     settings,
-		accounts:     accounts,
-		categories:   categories,
-		transactions: transactions,
-		budgets:      budgets,
-		m:            newHTTPMetrics(),
+		ready:         ready,
+		auth:          auth,
+		bootstrap:     bootstrap,
+		settings:      settings,
+		accounts:      accounts,
+		categories:    categories,
+		transactions:  transactions,
+		budgets:       budgets,
+		notifications: notifications,
+		schemas:       schemas,
+		m:             newHTTPMetrics(),
 	}
 
 	reg := prometheus.NewRegistry()
@@ -187,6 +195,21 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// Summary (step 3.2): per-period aggregation with the active
 		// budget targets and category names joined in.
 		r.Get("/v1/summary", h.summary)
+		// Budgets (step 3.3). No single-GET route (the List covers it);
+		// period is immutable (absent from the PATCH body).
+		r.Get("/v1/budgets", h.budgetsList)
+		r.Post("/v1/budgets", h.budgetsCreate)
+		r.Patch("/v1/budgets/{id}", h.budgetsUpdate)
+		r.Delete("/v1/budgets/{id}", h.budgetsDelete)
+		// Notifications (step 3.3): list with unread/limit/offset
+		// filters, idempotent mark-read, and the unread count the
+		// browser badge polls.
+		r.Get("/v1/notifications", h.notificationsList)
+		r.Post("/v1/notifications/{id}/read", h.notificationsMarkRead)
+		r.Get("/v1/notifications/unread-count", h.notificationsUnreadCount)
+		// Import schemas (step 3.3): the builtin presets plus the
+		// caller's customs, list only (custom CRUD is step 4.x).
+		r.Get("/v1/import-schemas", h.schemasList)
 	})
 	return r
 }

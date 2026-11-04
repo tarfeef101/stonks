@@ -62,14 +62,16 @@ func main() {
 	// unset (the API still serves /healthz and /metrics; /api/v1/me then
 	// answers 503).
 	var (
-		ready        server.Readiness
-		pool         *pgxpool.Pool
-		bootstrap    *server.Bootstrap
-		settings     server.SettingsStore
-		accounts     server.AccountStore
-		categories   server.CategoryStore
-		transactions server.TransactionStore
-		budgets      server.BudgetStore
+		ready         server.Readiness
+		pool          *pgxpool.Pool
+		bootstrap     *server.Bootstrap
+		settings      server.SettingsStore
+		accounts      server.AccountStore
+		categories    server.CategoryStore
+		transactions  server.TransactionStore
+		budgets       server.BudgetStore
+		notifications server.NotificationStore
+		schemas       server.SchemaStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -133,9 +135,14 @@ func main() {
 		// route needs both (plus categories) configured.
 		transactions = repo.NewTransactionStore(pool)
 		budgets = repo.NewBudgetStore(pool)
+		// Notifications and import schemas (step 3.3): same pool; the
+		// notification routes and the import-schemas list need them
+		// configured.
+		notifications = repo.NewNotificationStore(pool)
+		schemas = repo.NewSchemaStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

@@ -34,14 +34,6 @@ type TransactionStore interface {
 	Aggregate(ctx context.Context, userID string, from, to time.Time) ([]repo.CategorySpend, error)
 }
 
-// BudgetStore is the persistence surface the summary handler needs:
-// the period's active budgets, with their targets blobs, which the
-// handler decrypts in-app (already done by the repo List) and merges
-// into the aggregation. *repo.BudgetStore satisfies it.
-type BudgetStore interface {
-	List(ctx context.Context, userID string, dek []byte) ([]repo.Budget, error)
-}
-
 // Wire DTOs. transactionOut excludes DedupHash (re-import identity) and
 // the audit timestamps (bookkeeping); date columns are "YYYY-MM-DD"
 // strings and unset DateExecuted/CategoryID/Notes/Raw are JSON null.
