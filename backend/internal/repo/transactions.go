@@ -184,6 +184,13 @@ func canonicalAmount(s string) (string, error) {
 	return out, nil
 }
 
+// CanonicalAmount is the exported form of canonicalAmount. The 3.2
+// transaction and summary handlers run user-supplied amounts and filter
+// bounds through it before any store call, so a bad value is a 400
+// carrying this exact message instead of a 500 surfaced from inside a
+// repo method.
+func CanonicalAmount(s string) (string, error) { return canonicalAmount(s) }
+
 func allDigits(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
@@ -246,7 +253,7 @@ func (s *TransactionStore) validateTxIn(ctx context.Context, userID string, in T
 		return "", err
 	}
 	if in.DateExecuted != nil && afterDate(*in.DateExecuted, in.DatePosted) {
-		return "", errors.New("date_executed must not be after date_posted")
+		return "", ErrDateRule
 	}
 	return amount, nil
 }
@@ -609,6 +616,71 @@ func scanTxRows(rows pgx.Rows, dek []byte) ([]Transaction, error) {
 	return out, nil
 }
 
+// CategorySpend is one (category, period) row of Aggregate. Spend and
+// Income are non-negative magnitudes (spend = the absolute sum of the
+// negative amounts, income = the sum of the positive ones); Net is
+// income minus spend (negative when the spend wins). All three are
+// canonical 2-decimal strings. CategoryID "" = the uncategorized group.
+type CategorySpend struct {
+	CategoryID string
+	Spend      string
+	Income     string
+	Net        string
+}
+
+// Aggregate sums the caller's transactions with date_posted in
+// [from, to] (inclusive, date precision) grouped by category. It is the
+// whole-period computation behind GET /api/v1/summary: no account,
+// search, or paging filters apply. The sums are re-canonicalized on the
+// way out — pgx renders numeric without preserving scale (a 0.00 sum
+// comes back as "0") — so the output always matches the 2-decimal form
+// the rest of the API speaks.
+func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, to time.Time) ([]CategorySpend, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT COALESCE(category_id::text, ''),
+		       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount END), 0),
+		       COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0),
+		       COALESCE(SUM(amount), 0)
+		FROM transactions
+		WHERE user_id = $1 AND date_posted >= $2 AND date_posted <= $3
+		GROUP BY category_id
+		ORDER BY category_id NULLS FIRST`, userID, dateStr(from), dateStr(to))
+	if err != nil {
+		return nil, fmt.Errorf("repo: aggregate transactions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]CategorySpend, 0, 4)
+	for rows.Next() {
+		var (
+			g   CategorySpend
+			sp  string
+			in  string
+			net string
+		)
+		if err := rows.Scan(&g.CategoryID, &sp, &in, &net); err != nil {
+			return nil, fmt.Errorf("repo: aggregate transactions: %w", err)
+		}
+		spend, err := canonicalAmount(sp)
+		if err != nil {
+			return nil, err
+		}
+		income, err := canonicalAmount(in)
+		if err != nil {
+			return nil, err
+		}
+		total, err := canonicalAmount(net)
+		if err != nil {
+			return nil, err
+		}
+		g.Spend, g.Income, g.Net = spend, income, total
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: aggregate transactions: %w", err)
+	}
+	return out, nil
+}
+
 // Update applies the non-nil fields of p to one of the user's
 // transactions and returns the updated row. A patch that changes
 // description, amount, or date_posted recomputes dedup_hash; the new
@@ -676,9 +748,11 @@ func (s *TransactionStore) Update(ctx context.Context, userID, id string, p Tran
 		return cur, nil
 	}
 
-	// The 0002 date check, app-side: 400, not a 23514.
+	// The 0002 date check, app-side: 400, not a 23514. ErrDateRule is
+	// user-facing on purpose (no "repo:" prefix) so the handler can map
+	// it to a 400 instead of a 500.
 	if (dateExecChanged || !datePosted.Equal(cur.DatePosted)) && dateExec != nil && afterDate(*dateExec, datePosted) {
-		return Transaction{}, errors.New("date_executed must not be after date_posted")
+		return Transaction{}, ErrDateRule
 	}
 
 	sets := make([]string, 0, 8)

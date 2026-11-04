@@ -91,13 +91,15 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 type handler struct {
-	ready      Readiness
-	auth       *authn.Verifier
-	bootstrap  *Bootstrap
-	settings   SettingsStore
-	accounts   AccountStore
-	categories CategoryStore
-	m          *httpMetrics
+	ready        Readiness
+	auth         *authn.Verifier
+	bootstrap    *Bootstrap
+	settings     SettingsStore
+	accounts     AccountStore
+	categories   CategoryStore
+	transactions TransactionStore
+	budgets      BudgetStore
+	m            *httpMetrics
 }
 
 // New assembles the root router with cross-cutting middleware and the
@@ -109,19 +111,24 @@ type handler struct {
 // routes answer 503. settings serves GET/PATCH /api/v1/settings (step
 // 1.4a) and may be nil, in which case the settings routes answer 503.
 // accounts and categories serve the CRUD routes (step 3.1) and may be
-// nil, in which case those routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore) http.Handler {
+// nil, in which case those routes answer 503. transactions serves the
+// transaction CRUD routes (step 3.2); budgets and transactions together
+// with categories serve GET /api/v1/summary — any one nil and the
+// affected routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
 	h := &handler{
-		ready:      ready,
-		auth:       auth,
-		bootstrap:  bootstrap,
-		settings:   settings,
-		accounts:   accounts,
-		categories: categories,
-		m:          newHTTPMetrics(),
+		ready:        ready,
+		auth:         auth,
+		bootstrap:    bootstrap,
+		settings:     settings,
+		accounts:     accounts,
+		categories:   categories,
+		transactions: transactions,
+		budgets:      budgets,
+		m:            newHTTPMetrics(),
 	}
 
 	reg := prometheus.NewRegistry()
@@ -170,6 +177,16 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/categories", h.categoriesCreate)
 		r.Patch("/v1/categories/{id}", h.categoriesUpdate)
 		r.Delete("/v1/categories/{id}", h.categoriesDelete)
+		// Transactions (step 3.2). POST is manual entry (the 4.7
+		// importer shares the repo's Create); a dedup collision is a
+		// 409. No single-GET route, for the same reason as accounts.
+		r.Get("/v1/transactions", h.transactionsList)
+		r.Post("/v1/transactions", h.transactionsCreate)
+		r.Patch("/v1/transactions/{id}", h.transactionsUpdate)
+		r.Delete("/v1/transactions/{id}", h.transactionsDelete)
+		// Summary (step 3.2): per-period aggregation with the active
+		// budget targets and category names joined in.
+		r.Get("/v1/summary", h.summary)
 	})
 	return r
 }

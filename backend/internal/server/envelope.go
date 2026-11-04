@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -128,6 +129,46 @@ func (t *triStateString) UnmarshalJSON(b []byte) error {
 // toRepo converts the tri-state to the repo's **string idiom: absent →
 // nil (untouched), present → pointer (nil inner = clear).
 func (t triStateString) toRepo() **string {
+	if !t.set {
+		return nil
+	}
+	return &t.value
+}
+
+// triStateDate is the PATCH /api/v1/transactions/{id} (step 3.2)
+// tri-state for date_executed: absent or null = clear to NULL, a
+// "YYYY-MM-DD" string = set. It rides a non-pointer struct with an
+// explicit set flag for the same reason as triStateString — JSON null
+// nils a plain pointer field without calling UnmarshalJSON.
+type triStateDate struct {
+	set   bool
+	value *time.Time
+}
+
+// UnmarshalJSON implements json.Unmarshaler. "null" clears the date;
+// anything else must be a strictly-shaped YYYY-MM-DD string.
+func (t *triStateDate) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		t.set = true
+		t.value = nil
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("must be a date string or null: %w", err)
+	}
+	d, err := parseDateParam("date_executed", s)
+	if err != nil {
+		return err
+	}
+	t.set = true
+	t.value = &d
+	return nil
+}
+
+// toRepo converts the tri-state to the repo's **time.Time idiom:
+// absent → nil (untouched), present → pointer (nil inner = clear).
+func (t triStateDate) toRepo() **time.Time {
 	if !t.set {
 		return nil
 	}

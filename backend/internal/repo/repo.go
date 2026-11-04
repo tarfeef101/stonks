@@ -39,6 +39,9 @@ var (
 	// 2.6 transactions.
 	ErrTransactionNotFound = errors.New("repo: transaction not found")
 	ErrDedupConflict       = errors.New("repo: a transaction with the same dedup key already exists")
+	// ErrDateRule is deliberately user-facing (no "repo:" prefix): the
+	// 3.2 handler maps it to a 400 carrying this exact message.
+	ErrDateRule = errors.New("date_executed must not be after date_posted")
 
 	// 2.6b budgets + notifications + credentials.
 	ErrBudgetNotFound       = errors.New("repo: budget not found")
