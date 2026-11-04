@@ -1,9 +1,11 @@
 // Shared test environment for the repo package (plan step 2.5): one
 // postgres:18 testcontainer with every goose migration applied, plus
-// users rows created through the real 1.3c bootstrap path
-// (server.NewPGUserStore + Bootstrap.EnsureUser). The stores under test
-// then receive exactly what the API hands them: the caller's unwrapped
-// DEK — the repos never see the KEK.
+// users rows seeded directly: a fresh per-user DEK wrapped under a test
+// KEK, the same wrapped_dek the 1.3c bootstrap path stores. (3.1 made
+// the server package depend on repo, so a repo test importing server
+// would be an import cycle — the seed INSERTs that row instead.) The
+// stores under test then receive exactly what the API hands them: the
+// caller's unwrapped DEK — the repos never see the KEK.
 //
 // migratedPool/pingUntilReady/testKEK are copies of the server package's
 // test helpers: test files are package-private, and a shared internal
@@ -18,9 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"finance-tracker/internal/authn"
 	"finance-tracker/internal/crypto"
-	"finance-tracker/internal/server"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -28,9 +28,16 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
+// testUserRow shadows the one field of server.UserRow the repo tests
+// use. server is no longer importable from repo tests: 3.1 made server
+// depend on repo, which would be an import cycle in the test.
+type testUserRow struct {
+	ID string
+}
+
 // testUser is one seeded users row plus its unwrapped DEK.
 type testUser struct {
-	row server.UserRow
+	row testUserRow
 	dek []byte
 }
 
@@ -40,31 +47,35 @@ type testEnv struct {
 	users map[string]testUser // keyed by sub
 }
 
-// newTestEnv starts one migrated database and bootstraps one users row
-// per sub. Every test in the package that needs a database uses a single
-// env (the container is the expensive part, ~7-15 s).
+// newTestEnv starts one migrated database and seeds one users row per
+// sub, storing a fresh per-user DEK wrapped under a test KEK — the same
+// row the 1.3c bootstrap path writes. Every test in the package that
+// needs a database uses a single env (the container is the expensive
+// part, ~7-15 s).
 func newTestEnv(t *testing.T, subs ...string) *testEnv {
 	t.Helper()
 	pool, ctx := migratedPool(t)
 	kek := testKEK(t)
 
-	b, err := server.NewBootstrap(server.NewPGUserStore(pool), kek)
-	if err != nil {
-		t.Fatalf("bootstrap: %v", err)
-	}
 	env := &testEnv{pool: pool, ctx: ctx, users: map[string]testUser{}}
 	for _, sub := range subs {
-		row, err := b.EnsureUser(ctx, authn.Identity{
-			Sub: sub, Email: sub + "@localhost", Name: sub,
-		})
+		dek, err := crypto.NewDEK()
 		if err != nil {
-			t.Fatalf("ensure user %s: %v", sub, err)
+			t.Fatalf("generate DEK for %s: %v", sub, err)
 		}
-		dek, err := crypto.UnwrapDEK(kek, row.WrappedDEK)
+		wrapped, err := crypto.WrapDEK(kek, dek)
 		if err != nil {
-			t.Fatalf("unwrap DEK for %s: %v", sub, err)
+			t.Fatalf("wrap DEK for %s: %v", sub, err)
 		}
-		env.users[sub] = testUser{row: row, dek: dek}
+		var id string
+		err = pool.QueryRow(ctx, `
+			INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id`, sub, sub+"@localhost", sub, wrapped).Scan(&id)
+		if err != nil {
+			t.Fatalf("seed user %s: %v", sub, err)
+		}
+		env.users[sub] = testUser{row: testUserRow{ID: id}, dek: dek}
 	}
 	return env
 }

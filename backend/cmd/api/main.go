@@ -15,6 +15,7 @@ import (
 	"finance-tracker/internal/authn"
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/repo"
 	"finance-tracker/internal/server"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,10 +62,12 @@ func main() {
 	// unset (the API still serves /healthz and /metrics; /api/v1/me then
 	// answers 503).
 	var (
-		ready     server.Readiness
-		pool      *pgxpool.Pool
-		bootstrap *server.Bootstrap
-		settings  server.SettingsStore
+		ready      server.Readiness
+		pool       *pgxpool.Pool
+		bootstrap  *server.Bootstrap
+		settings   server.SettingsStore
+		accounts   server.AccountStore
+		categories server.CategoryStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -119,9 +122,14 @@ func main() {
 		// User settings (step 1.4a): same pool, no KEK of its own — the
 		// settings columns are plaintext.
 		settings = server.NewPGSettingsStore(pool)
+		// Accounts and categories (step 3.1): same pool; names are
+		// DEK-encrypted by the repo layer, the handlers pass the per-user
+		// DEK from bootstrap.
+		accounts = repo.NewAccountStore(pool)
+		categories = repo.NewCategoryStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

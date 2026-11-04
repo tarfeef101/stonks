@@ -9,10 +9,8 @@ package server
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -227,38 +225,21 @@ var (
 	validPeriods = map[string]bool{"month": true, "quarter": true, "year": true}
 )
 
-// The error envelope (plan 3.1: {error: {code, message}}), adopted early
-// for the settings routes; 3.1 standardizes it repo-wide (and converts
-// /v1/me's flat body) later.
-type errorEnvelope struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-func writeAPIError(w http.ResponseWriter, status int, code, message string) {
-	var env errorEnvelope
-	env.Error.Code = code
-	env.Error.Message = message
-	writeJSON(w, status, env)
-}
-
 // settingsPrecheck runs the guards shared by both settings routes and
 // returns the verified identity. It writes the failure response itself.
 func (h *handler) settingsPrecheck(w http.ResponseWriter, r *http.Request) (string, bool) {
 	sub, err := h.auth.Identity(r.Context())
 	if err != nil {
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing access token")
+		writeAPIError(w, http.StatusUnauthorized, codeUnauthorized, "invalid or missing access token")
 		return "", false
 	}
 	if h.bootstrap == nil || h.settings == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "internal", "database not configured")
+		notConfigured(w)
 		return "", false
 	}
 	if _, err := h.bootstrap.EnsureUser(r.Context(), sub); err != nil {
 		slog.Error("user bootstrap failed", "sub", sub.Sub, "error", err)
-		writeAPIError(w, http.StatusServiceUnavailable, "internal", "user bootstrap failed")
+		writeAPIError(w, http.StatusServiceUnavailable, codeInternal, "user bootstrap failed")
 		return "", false
 	}
 	return sub.Sub, true
@@ -283,13 +264,13 @@ func (h *handler) patchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var patch SettingsPatch
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&patch); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request",
+	if err := decodeBody(r, &patch); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest,
 			"body must be a JSON object: "+err.Error())
 		return
 	}
 	if err := validatePatch(patch); err != nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
 	st, err := h.settings.Update(r.Context(), sub, patch)
@@ -305,9 +286,9 @@ func (h *handler) patchSettings(w http.ResponseWriter, r *http.Request) {
 // 500 internal with the details only in the server log.
 func (h *handler) settingsError(w http.ResponseWriter, sub, op string, err error) {
 	if errors.Is(err, ErrSettingsNotFound) {
-		writeAPIError(w, http.StatusNotFound, "not_found", "settings not found")
+		writeAPIError(w, http.StatusNotFound, codeNotFound, "settings not found")
 		return
 	}
 	slog.Error("settings operation failed", "op", op, "sub", sub, "error", err)
-	writeAPIError(w, http.StatusInternalServerError, "internal", "settings operation failed")
+	writeAPIError(w, http.StatusInternalServerError, codeInternal, "settings operation failed")
 }

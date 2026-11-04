@@ -126,3 +126,15 @@ func (b *Bootstrap) EnsureUser(ctx context.Context, id authn.Identity) (UserRow,
 	}
 	return b.store.UpsertUser(ctx, id.Sub, email, displayName, wrapped)
 }
+
+// UnwrapDEK opens the row's wrapped DEK pack with the KEK so handlers can
+// pass the raw key to the repo layer (step 3.1). A pack that does not
+// open means the row was written under a different KEK (or is corrupt):
+// callers 500 it — re-wrapping would lose the data the old key sealed.
+func (b *Bootstrap) UnwrapDEK(row UserRow) ([]byte, error) {
+	dek, err := crypto.UnwrapDEK(b.kek, row.WrappedDEK)
+	if err != nil {
+		return nil, fmt.Errorf("server: unwrap DEK for %s: %w", row.Sub, err)
+	}
+	return dek, nil
+}

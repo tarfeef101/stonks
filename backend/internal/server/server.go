@@ -91,11 +91,13 @@ func (w *statusWriter) WriteHeader(code int) {
 }
 
 type handler struct {
-	ready     Readiness
-	auth      *authn.Verifier
-	bootstrap *Bootstrap
-	settings  SettingsStore
-	m         *httpMetrics
+	ready      Readiness
+	auth       *authn.Verifier
+	bootstrap  *Bootstrap
+	settings   SettingsStore
+	accounts   AccountStore
+	categories CategoryStore
+	m          *httpMetrics
 }
 
 // New assembles the root router with cross-cutting middleware and the
@@ -103,14 +105,24 @@ type handler struct {
 // (so tests can build independent servers) seeded with the standard
 // Go and process collectors. auth guards every route under /api (step
 // 1.3) and must not be nil. bootstrap performs first-login user creation
-// (step 1.3c) and may be nil, in which case /api/v1/me answers 503.
-// settings serves GET/PATCH /api/v1/settings (step 1.4a) and may be nil,
-// in which case the settings routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore) http.Handler {
+// (step 1.3c) and may be nil, in which case /api/v1/me and the CRUD
+// routes answer 503. settings serves GET/PATCH /api/v1/settings (step
+// 1.4a) and may be nil, in which case the settings routes answer 503.
+// accounts and categories serve the CRUD routes (step 3.1) and may be
+// nil, in which case those routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
-	h := &handler{ready: ready, auth: auth, bootstrap: bootstrap, settings: settings, m: newHTTPMetrics()}
+	h := &handler{
+		ready:      ready,
+		auth:       auth,
+		bootstrap:  bootstrap,
+		settings:   settings,
+		accounts:   accounts,
+		categories: categories,
+		m:          newHTTPMetrics(),
+	}
 
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
@@ -147,8 +159,59 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// is plan 3.1's shape, adopted here early.
 		r.Get("/v1/settings", h.getSettings)
 		r.Patch("/v1/settings", h.patchSettings)
+		// Accounts (step 3.1). No single-GET route: the repo surface has
+		// no Get-by-id use case for the API, and a list is the only read.
+		r.Get("/v1/accounts", h.accountsList)
+		r.Post("/v1/accounts", h.accountsCreate)
+		r.Patch("/v1/accounts/{id}", h.accountsUpdate)
+		r.Delete("/v1/accounts/{id}", h.accountsDelete)
+		// Categories (step 3.1), same shape as accounts.
+		r.Get("/v1/categories", h.categoriesList)
+		r.Post("/v1/categories", h.categoriesCreate)
+		r.Patch("/v1/categories/{id}", h.categoriesUpdate)
+		r.Delete("/v1/categories/{id}", h.categoriesDelete)
 	})
 	return r
+}
+
+// caller is the authenticated, bootstrapped user a handler acts for:
+// the users row (its ID scopes every store call) and the DEK the row's
+// wrapped_dek unwraps to (the repo layer encrypts names with it).
+type caller struct {
+	row UserRow
+	dek []byte
+}
+
+// requireUser turns a verified request into a caller, writing the
+// failure response itself. It runs for every authenticated business
+// route (step 3.1): the prefix middleware already proved the token
+// (401s never reach here, the Identity check is defensive), then the
+// user row is ensured and the DEK unwrapped so handlers can call the
+// repo stores without re-doing bootstrap work.
+func (h *handler) requireUser(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	var c caller
+	id, err := h.auth.Identity(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusUnauthorized, codeUnauthorized, "invalid or missing access token")
+		return c, false
+	}
+	if h.bootstrap == nil {
+		notConfigured(w)
+		return c, false
+	}
+	row, err := h.bootstrap.EnsureUser(r.Context(), id)
+	if err != nil {
+		slog.Error("user bootstrap failed", "sub", id.Sub, "error", err)
+		writeAPIError(w, http.StatusServiceUnavailable, codeInternal, "user bootstrap failed")
+		return c, false
+	}
+	dek, err := h.bootstrap.UnwrapDEK(row)
+	if err != nil {
+		slog.Error("user dek unwrap failed", "sub", id.Sub, "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "decryption failed")
+		return c, false
+	}
+	return caller{row: row, dek: dek}, true
 }
 
 // me is the first business route (step 1.3c): it idempotently ensures the
@@ -156,30 +219,15 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 // and returns the stored identity. Responses come from the ROW, not the
 // token, so profile-claim fallbacks are applied exactly once.
 func (h *handler) me(w http.ResponseWriter, r *http.Request) {
-	id, err := h.auth.Identity(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-		return
-	}
-	if h.bootstrap == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "database not configured",
-		})
-		return
-	}
-	row, err := h.bootstrap.EnsureUser(r.Context(), id)
-	if err != nil {
-		slog.Error("user bootstrap failed", "sub", id.Sub, "error", err)
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "user bootstrap failed",
-		})
+	c, ok := h.requireUser(w, r)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Sub         string `json:"sub"`
 		Email       string `json:"email"`
 		DisplayName string `json:"display_name"`
-	}{row.Sub, row.Email, row.DisplayName})
+	}{c.row.Sub, c.row.Email, c.row.DisplayName})
 }
 
 func (h *handler) metrics(next http.Handler) http.Handler {
