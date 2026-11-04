@@ -39,6 +39,11 @@ var (
 	// 2.6 transactions.
 	ErrTransactionNotFound = errors.New("repo: transaction not found")
 	ErrDedupConflict       = errors.New("repo: a transaction with the same dedup key already exists")
+
+	// 2.6b budgets + notifications + credentials.
+	ErrBudgetNotFound       = errors.New("repo: budget not found")
+	ErrCredentialNotFound   = errors.New("repo: llm credential not found")
+	ErrNotificationNotFound = errors.New("repo: notification not found")
 )
 
 // hashName computes the §5 plaintext name_hash.
