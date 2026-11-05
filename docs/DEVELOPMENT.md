@@ -43,8 +43,53 @@ The backend needs a real `KEK` (32 bytes, 64 hex chars) in the git-ignored
 | keycloak   | `quay.io/keycloak/keycloak:26.8.1` | 18081  | realm `finance`; admin console `http://localhost:18081/admin` |
 | frontend   | built from `frontend/`   | 18082             | SvelteKit 3 **dev server** (HMR from source)        |
 | mailpit    | `axllent/mailpit:v1.31.6`| 1025 (SMTP), 18025 (UI) | local SMTP sink; no mail yet in 0.4      |
+| llama      | `ghcr.io/ggml-org/llama.cpp:server-b12124` | 18090 | opt-in: `make dev-llm` (llm profile); OpenAI-compatible `/v1`; see the LLM section |
 
-llama.cpp (18090) is defined but commented out until step 5.3.
+## LLM (opt-in: `make dev-llm`)
+
+A local OpenAI-compatible model (llama.cpp serving Qwen3-4B-Instruct-2507
+Q4_K_M) for LLM categorisation. It is **off** unless you boot it:
+
+```sh
+make dev-llm        # start llama-init + llama (the `llm` compose profile)
+make dev-llm-down   # stop them (the model volume persists)
+make dev-llm-clean  # delete the model volume -- the next dev-llm re-downloads
+```
+
+**First boot is slow**: the llama.cpp image is pulled and the ≈2.5 GB model
+is downloaded (sha256-verified into the named volume `ftrk-llm-model`).
+`llama-init` is a one-shot downloader: once the file is present and valid it
+exits 0 in seconds, so every later boot skips the download; `llama` then
+loads the model (≈10–60 s). `make dev-llm` targets the two services by name,
+so the rest of the dev stack is never restarted.
+
+Pinned artifacts (verified 2026-11-05):
+
+- Image: `ghcr.io/ggml-org/llama.cpp:server-b12124` — the newest published
+  build tag; the CPU variant uses the plain `server` prefix (no `-cpu`
+  suffix). The image ships its own healthcheck on `/health`, so no compose
+  healthcheck is added.
+- Model: `https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf`
+  — 2,497,281,120 bytes, sha256
+  `3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597`.
+
+Manual probes (while `make dev-llm` is up):
+
+```sh
+curl -sf localhost:18090/health   # -> {"status":"ok"}
+curl -sf localhost:18090/v1/models
+curl -s -H 'Content-Type: application/json' \
+  -d '{"model":"/models/qwen3-4b-instruct-2507-q4_k_m.gguf","temperature":0,
+       "max_tokens":1024,
+       "messages":[{"role":"user","content":"Reply with OK."}]}' \
+  localhost:18090/v1/chat/completions
+```
+
+The server reports the model id as the **full path**
+`/models/qwen3-4b-instruct-2507-q4_k_m.gguf` — that exact string is what
+clients (and the step 5.4 worker) pass in `model`. The backend does not call
+this service until step 5.4 (the worker + `LLM_*` env); the default
+categorisation test path stays mock-provider-based.
 
 ## Credentials and OIDC
 

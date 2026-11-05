@@ -183,6 +183,31 @@ dev-down: ## Stop the local stack
 	  echo "skip: compose stack lands in step 0.4"; \
 	fi
 
+.PHONY: dev-llm
+dev-llm: ## Boot opt-in LLM services (llama-init + llama; first boot downloads ~2.5 GB model)
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml --profile llm up -d llama-init llama; \
+	  $(COMPOSE) -f docker-compose.dev.yml ps; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
+
+.PHONY: dev-llm-down
+dev-llm-down: ## Stop the opt-in LLM services (model volume persists)
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml --profile llm down llama llama-init; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
+
+.PHONY: dev-llm-clean
+dev-llm-clean: ## Remove the downloaded LLM model volume (ftrk-llm-model); next dev-llm re-downloads
+	@if [ -f docker-compose.dev.yml ]; then \
+	  $(COMPOSE) -f docker-compose.dev.yml volume rm ftrk-llm-model; \
+	else \
+	  echo "skip: compose stack lands in step 0.4"; \
+	fi
+
 # ---------- images ----------
 
 .PHONY: images

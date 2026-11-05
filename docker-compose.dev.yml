@@ -215,20 +215,75 @@ services:
       - "1025:1025"
       - "18025:8025"
 
-  # llama.cpp — opt-in, lands in step 5.3 (`make dev-llm`; ≈2.5 GB model
-  # pull only when enabled). Commented out until 5.3 per plan 0.4: the
-  # default categorisation test path is the mock provider; the k8s
-  # manifest is deferred to Phase 10. Step 5.3 uncomments this block,
-  # pins the image, and adds the `dev-llm` Makefile target.
-  #
-  # llama:
-  #   image: <pinned in step 5.3>
-  #   profiles: [llm]
-  #   ports:
-  #     - "18090:8080"
-  #   # serves /v1 (OpenAI-compatible); backend LLM_* vars point at it
+  # llama.cpp LLM (opt-in via the `llm` profile — `make dev-llm`). Two services:
+  # llama-init is a one-shot downloader (curlimages/curl) that fetches the pinned
+  # model into the ftrk-llm-model volume, sha256-verifies it, and exits 0 — it
+  # skips the download when the file is already present and valid, so it is fast
+  # on every boot after the first. llama then loads the model and serves the
+  # OpenAI-compatible /v1 API on host port 18090. First boot is slow
+  # (~2.5 GB model download + image pull). The backend does not call this
+  # service until step 5.4; the default categorisation test path is the mock
+  # provider. k8s Deployment of the same spec is deferred to Phase 10 (10.2).
+  llama-init:
+    image: curlimages/curl:8.23.0
+    # The image defaults to the unprivileged `curl_user`, but a fresh named
+    # volume is root-owned, so the downloader cannot write the model
+    # (curl exit 23). A dev-only one-shot service, so run it as root.
+    user: root
+    restart: "no"
+    profiles: [llm]
+    volumes:
+      - ftrk-llm-model:/models
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        URL="https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+        FILE="/models/qwen3-4b-instruct-2507-q4_k_m.gguf"
+        EXPECTED_SHA="3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
+        if [ -f "$$FILE" ] && [ "$$(sha256sum "$$FILE" | cut -d' ' -f1)" = "$$EXPECTED_SHA" ]; then
+          echo "llama-init: model already present and valid, skipping download"
+          exit 0
+        fi
+        echo "llama-init: downloading ~2.5 GB model (first boot only; can take a while)"
+        curl -fL --retry 3 -o "$$FILE.part" "$$URL"
+        GOT_SHA="$$(sha256sum "$$FILE.part" | cut -d' ' -f1)"
+        if [ "$$GOT_SHA" != "$$EXPECTED_SHA" ]; then
+          echo "llama-init: sha256 mismatch: got $$GOT_SHA, want $$EXPECTED_SHA" >&2
+          rm -f "$$FILE.part"
+          exit 1
+        fi
+        mv "$$FILE.part" "$$FILE"
+        echo "llama-init: model verified at $$FILE"
+
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server-b12124
+    profiles: [llm]
+    ports:
+      - "18090:8080"
+    volumes:
+      - ftrk-llm-model:/models
+    depends_on:
+      llama-init:
+        condition: service_completed_successfully
+    # working_dir /models + relative --model path: /v1/models then reports
+    # the model id as the bare filename (the server echoes the --model
+    # argument verbatim), which is what the backend's LLM_* config uses.
+    working_dir: /models
+    command:
+      - --model
+      - qwen3-4b-instruct-2507-q4_k_m.gguf
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "2"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
 
 volumes:
   ftrk-pg-data:
   ftrk-kc-data:
   ftrk-npm-cache:
+  ftrk-llm-model:
