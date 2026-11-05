@@ -885,3 +885,199 @@ func TestTransactionCategoriseWorker(t *testing.T) {
 		}
 	})
 }
+
+// TestTransactionReviewQueue covers the step 5.5 review-queue methods:
+// ReviewPending (scoping, queue predicate, id ordering, decryption),
+// GetReviewPending (queue predicate by id), AcceptReview (success,
+// scoped re-accept, cross-user, foreign category), and AcceptAll
+// (bulk count, empty queue, foreign category).
+func TestTransactionReviewQueue(t *testing.T) {
+	env := newTestEnv(t, "rv-a", "rv-b")
+	tx := NewTransactionStore(env.pool)
+	acct := NewAccountStore(env.pool)
+	cat := NewCategoryStore(env.pool)
+	a := env.user(t, "rv-a")
+	b := env.user(t, "rv-b")
+	ctx := env.ctx
+	aid, bid := a.row.ID, b.row.ID
+
+	aAcct, err := acct.Create(ctx, aid, AccountIn{Name: "RV Bank", Type: "bank", Currency: "USD"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a account: %v", err)
+	}
+	bAcct, err := acct.Create(ctx, bid, AccountIn{Name: "RV Bank B", Type: "bank", Currency: "USD"}, b.dek)
+	if err != nil {
+		t.Fatalf("create b account: %v", err)
+	}
+	aCat, err := cat.Create(ctx, aid, CategoryIn{Name: "RV Groceries"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a category: %v", err)
+	}
+	bCat, err := cat.Create(ctx, bid, CategoryIn{Name: "RV Coffee"}, b.dek)
+	if err != nil {
+		t.Fatalf("create b category: %v", err)
+	}
+
+	newPending := func(user testUser, acctID, date, amount, desc string) (Transaction, error) {
+		in := TransactionIn{AccountID: acctID, DatePosted: dateOf(date), Amount: amount,
+			Description: desc, ReviewPending: true}
+		out, _, err := tx.Upsert(ctx, user.row.ID, in, user.dek)
+		return out, err
+	}
+	p1, err := newPending(a, aAcct.ID, "2026-02-01", "10.00", "Pend One")
+	if err != nil {
+		t.Fatalf("create p1: %v", err)
+	}
+	p2, err := newPending(a, aAcct.ID, "2026-02-02", "-4.20", "Pend Two")
+	if err != nil {
+		t.Fatalf("create p2: %v", err)
+	}
+	// Flagged but given a category: the queue predicate excludes it.
+	catted := TransactionIn{AccountID: aAcct.ID, DatePosted: dateOf("2026-02-03"),
+		Amount: "8.00", Description: "Flagged but Catted", CategoryID: &aCat.ID, ReviewPending: true}
+	cattedRow, _, err := tx.Upsert(ctx, aid, catted, a.dek)
+	if err != nil {
+		t.Fatalf("create flagged+catted row: %v", err)
+	}
+	// Plain uncategorized row: not flagged, not in the queue.
+	if _, _, err := tx.Upsert(ctx, aid,
+		TransactionIn{AccountID: aAcct.ID, DatePosted: dateOf("2026-02-04"), Amount: "1.00", Description: "Not Flagged"},
+		a.dek); err != nil {
+		t.Fatalf("create unflagged row: %v", err)
+	}
+	bp, err := newPending(b, bAcct.ID, "2026-02-01", "2.00", "B Pending")
+	if err != nil {
+		t.Fatalf("create b pending row: %v", err)
+	}
+
+	t.Run("list", func(t *testing.T) {
+		got, err := tx.ReviewPending(ctx, aid, a.dek)
+		if err != nil {
+			t.Fatalf("review pending: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 queue rows, got %d: %+v", len(got), got)
+		}
+		// Pinned ORDER BY id: byte order over the uuid text.
+		want := []string{p1.ID, p2.ID}
+		sort.Strings(want)
+		for i, row := range got {
+			if row.ID != want[i] {
+				t.Fatalf("row %d: want id %s, got %s", i, want[i], row.ID)
+			}
+		}
+		byID := map[string]Transaction{}
+		for _, row := range got {
+			byID[row.ID] = row
+		}
+		if row := byID[p1.ID]; row.Description != "Pend One" || row.Amount != "10.00" || !row.ReviewPending || row.CategoryID != "" {
+			t.Fatalf("p1 decrypted row: %+v", row)
+		}
+		// b's queue holds only b's own row (no cross-user leak).
+		gotB, err := tx.ReviewPending(ctx, bid, b.dek)
+		if err != nil {
+			t.Fatalf("review pending b: %v", err)
+		}
+		if len(gotB) != 1 || gotB[0].ID != bp.ID || gotB[0].Description != "B Pending" {
+			t.Fatalf("b queue: %+v", gotB)
+		}
+	})
+
+	t.Run("get by id", func(t *testing.T) {
+		got, err := tx.GetReviewPending(ctx, aid, p2.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get p2: %v", err)
+		}
+		if got.ID != p2.ID || got.Description != "Pend Two" || got.Amount != "-4.20" {
+			t.Fatalf("p2: %+v", got)
+		}
+		none := "00000000-0000-0000-0000-000000000000"
+		if _, err := tx.GetReviewPending(ctx, aid, none, a.dek); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("missing row: want ErrTransactionNotFound, got %v", err)
+		}
+		// Flagged but categorized is out of the queue.
+		if _, err := tx.GetReviewPending(ctx, aid, cattedRow.ID, a.dek); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("catted row: want ErrTransactionNotFound, got %v", err)
+		}
+		// Cross-user isolation: each scope only sees its own rows.
+		if _, err := tx.GetReviewPending(ctx, bid, p1.ID, b.dek); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("a's row via b's scope: want ErrTransactionNotFound, got %v", err)
+		}
+		if _, err := tx.GetReviewPending(ctx, aid, bp.ID, a.dek); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("b's row via a's scope: want ErrTransactionNotFound, got %v", err)
+		}
+	})
+
+	t.Run("accept one", func(t *testing.T) {
+		// A foreign category is rejected before any write.
+		if err := tx.AcceptReview(ctx, aid, p2.ID, bCat.ID); !errors.Is(err, ErrCategoryNotFound) {
+			t.Fatalf("foreign category: want ErrCategoryNotFound, got %v", err)
+		}
+		if err := tx.AcceptReview(ctx, aid, p2.ID, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrCategoryNotFound) {
+			t.Fatalf("missing category: want ErrCategoryNotFound, got %v", err)
+		}
+		// Cross-user accept: b cannot touch a's row.
+		if err := tx.AcceptReview(ctx, bid, bp.ID, aCat.ID); !errors.Is(err, ErrCategoryNotFound) {
+			t.Fatalf("b accepts with a's category: want ErrCategoryNotFound, got %v", err)
+		}
+		if err := tx.AcceptReview(ctx, aid, bp.ID, aCat.ID); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("a accepts b's row: want ErrTransactionNotFound, got %v", err)
+		}
+
+		if err := tx.AcceptReview(ctx, aid, p1.ID, aCat.ID); err != nil {
+			t.Fatalf("accept p1: %v", err)
+		}
+		got, err := tx.Get(ctx, aid, p1.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get p1: %v", err)
+		}
+		if got.CategoryID != aCat.ID || got.ReviewPending {
+			t.Fatalf("p1 after accept: %+v", got)
+		}
+		// Already accepted: the scoped update matches 0 rows.
+		if err := tx.AcceptReview(ctx, aid, p1.ID, aCat.ID); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("re-accept: want ErrTransactionNotFound, got %v", err)
+		}
+		if _, err := tx.GetReviewPending(ctx, aid, p1.ID, a.dek); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("p1 still in queue: got %v", err)
+		}
+	})
+
+	t.Run("accept all", func(t *testing.T) {
+		p3, err := newPending(a, aAcct.ID, "2026-02-05", "6.75", "Pend Three")
+		if err != nil {
+			t.Fatalf("create p3: %v", err)
+		}
+		n, err := tx.AcceptAll(ctx, aid, aCat.ID)
+		if err != nil {
+			t.Fatalf("accept all: %v", err)
+		}
+		if n != 2 {
+			t.Fatalf("accept all: want 2 rows applied (p2, p3), got %d", n)
+		}
+		for _, id := range []string{p2.ID, p3.ID} {
+			got, err := tx.Get(ctx, aid, id, a.dek)
+			if err != nil {
+				t.Fatalf("get %s: %v", id, err)
+			}
+			if got.CategoryID != aCat.ID || got.ReviewPending {
+				t.Fatalf("row %s after accept all: %+v", id, got)
+			}
+		}
+		// b's pending row is untouched.
+		if _, err := tx.GetReviewPending(ctx, bid, bp.ID, b.dek); err != nil {
+			t.Fatalf("b's row must survive a's accept all: %v", err)
+		}
+		// Empty queue: 0 applied, no error.
+		n, err = tx.AcceptAll(ctx, aid, aCat.ID)
+		if err != nil {
+			t.Fatalf("accept all on empty queue: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("accept all on empty queue: want 0, got %d", n)
+		}
+		if _, err := tx.AcceptAll(ctx, aid, bCat.ID); !errors.Is(err, ErrCategoryNotFound) {
+			t.Fatalf("foreign category: want ErrCategoryNotFound, got %v", err)
+		}
+	})
+}

@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"finance-tracker/internal/authn"
+	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/llm"
 	"finance-tracker/internal/repo"
 	"finance-tracker/internal/server"
 
@@ -68,12 +70,14 @@ func main() {
 		settings      server.SettingsStore
 		accounts      server.AccountStore
 		categories    server.CategoryStore
-		transactions  server.TransactionStore
+		transactions  *repo.TransactionStore
 		budgets       server.BudgetStore
 		notifications server.NotificationStore
 		schemas       server.SchemaStore
 		imports       server.ImportStore
 		jobs          *repo.CategoriseJobStore
+		review        server.ReviewStore
+		reprompt      *server.Reprompter
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -150,9 +154,28 @@ func main() {
 		// (cmd/worker) claims and drives the queue, the API only
 		// enqueues (POST) and reads (GET) the caller's jobs.
 		jobs = repo.NewCategoriseJobStore(pool)
+		// Review queue and reprompt (step 5.5): the review routes read
+		// and mutate the review-pending rows the worker flagged (same
+		// *repo.TransactionStore, no extra store of its own); the
+		// reprompt route re-runs the LLM on one transaction, resolving
+		// the provider the same way the worker does (the user's
+		// credential, else the process LLM_* env fallback normalised
+		// to the compose defaults).
+		review = transactions
+		reprompt = &server.Reprompter{
+			Creds: repo.NewCredentialStore(pool),
+			Cats:  repo.NewCategoryStore(pool),
+			Txns:  transactions,
+			Env: categorize.NormalizeEnv(categorize.LLMEnv{
+				BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model,
+			}),
+			LLM: func(baseURL, apiKey, model string) (llm.Categorizer, error) {
+				return llm.New(baseURL, apiKey, model), nil
+			},
+		}
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

@@ -4,7 +4,9 @@
 	},
 	"nav": {
 		"summary": "Summary",
-		"imports": "Imports"
+		"imports": "Imports",
+		"review": "Review",
+		"notifications": "Notifications"
 	},
 	"home": {
 		"heading": "Personal Finance Tracker",
@@ -104,5 +106,40 @@
 		"submitting": "Adding…",
 		"missing": "An account, a posted date, and an amount are required.",
 		"success": "Added {amount} on {date} (id {id})."
+	},
+	"review": {
+		"title": "Review queue",
+		"intro": "Transactions the auto-categoriser wasn't confident about. Pick a category to resolve a row, or ask the model to try the row again.",
+		"sign_in_prompt": "Sign in to review your transactions.",
+		"loading": "Loading the review queue…",
+		"empty": "Nothing to review — the queue is empty.",
+		"col_date": "Posted",
+		"col_description": "Description",
+		"col_amount": "Amount",
+		"col_account": "Account",
+		"col_category": "Category",
+		"col_actions": "Resolve",
+		"category_placeholder": "Choose a category…",
+		"apply": "Apply",
+		"applying": "Applying…",
+		"reprompt": "Ask again",
+		"reprompting": "Asking…",
+		"suggested": "Suggestion",
+		"applied": "Applied — the row is resolved.",
+		"not_applied": "Below the confidence threshold — the row stays in the queue.",
+		"all_category_label": "Category for all rows",
+		"apply_all": "Apply to all",
+		"applying_all": "Applying to all…",
+		"applied_all": "Applied to {n} transactions."
+	},
+	"notifications": {
+		"title": "Notifications",
+		"intro": "Alerts from the app — right now, a reminder when a categorise run finishes and transactions need your review.",
+		"sign_in_prompt": "Sign in to see your notifications.",
+		"loading": "Loading notifications…",
+		"empty": "No notifications yet.",
+		"mark_read": "Mark as read",
+		"unread": "Unread",
+		"read_on": "Read on"
 	}
 }

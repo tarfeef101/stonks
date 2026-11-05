@@ -459,6 +459,131 @@ func TestRunJobStuckGuard(t *testing.T) {
 	}
 }
 
+// TestRunJobReviewNotification pins the plan 5.5 notification: a
+// finished job with a non-empty review queue records exactly one
+// "N transactions need review" notification (kind "review", ref
+// {count, job_id}); a finished job with an empty queue records none,
+// and a failed job records none even when earlier batches already
+// flagged rows.
+func TestRunJobReviewNotification(t *testing.T) {
+	notifications := func(t *testing.T, env *runnerEnv, uid string) []repo.Notification {
+		t.Helper()
+		nots := repo.NewNotificationStore(env.pool)
+		got, err := nots.List(env.ctx, uid, repo.NotificationFilter{})
+		if err != nil {
+			t.Fatalf("list notifications: %v", err)
+		}
+		return got
+	}
+
+	t.Run("finished job with review rows notifies", func(t *testing.T) {
+		env := newRunnerEnv(t, "notif")
+		uid := seedData(t, env, "notif", []string{"Groceries"}, 2)
+		fake := &fakeCategorizer{in: 10, out: 5}
+		r := buildRunner(t, env, func(_, _, _ string) (llm.Categorizer, error) {
+			return fake, nil
+		})
+		r.Nots = repo.NewNotificationStore(env.pool)
+		job, err := r.Jobs.Create(env.ctx, uid, "manual", nil)
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if err := r.RunJob(env.ctx, job.ID, uid); err != nil {
+			t.Fatalf("RunJob: %v", err)
+		}
+		got, err := r.Jobs.Get(env.ctx, uid, job.ID)
+		if err != nil {
+			t.Fatalf("get job: %v", err)
+		}
+		// n=2: item 1 auto (0.9), item 2 review (0.5).
+		if got.Status != "done" || got.ToReview != 1 || got.AutoApplied != 1 {
+			t.Fatalf("job: %+v", got)
+		}
+		nots := notifications(t, env, uid)
+		if len(nots) != 1 {
+			t.Fatalf("notifications = %d, want 1: %+v", len(nots), nots)
+		}
+		n := nots[0]
+		if n.Kind != "review" {
+			t.Errorf("kind = %q, want review", n.Kind)
+		}
+		if n.Title != "1 transactions need review" || n.Body != "1 transactions need review" {
+			t.Errorf("title/body = %q / %q", n.Title, n.Body)
+		}
+		if n.ReadAt != nil {
+			t.Errorf("notification recorded read: %+v", n)
+		}
+		var ref struct {
+			Count int    `json:"count"`
+			JobID string `json:"job_id"`
+		}
+		if err := json.Unmarshal(n.Ref, &ref); err != nil {
+			t.Fatalf("ref %q: %v", n.Ref, err)
+		}
+		if ref.Count != 1 || ref.JobID != job.ID {
+			t.Errorf("ref = count %d job %s, want count 1 job %s", ref.Count, ref.JobID, job.ID)
+		}
+	})
+
+	t.Run("finished job with empty queue does not notify", func(t *testing.T) {
+		env := newRunnerEnv(t, "noqueue")
+		uid := seedData(t, env, "noqueue", []string{"Groceries"}, 1)
+		fake := &fakeCategorizer{in: 10, out: 5}
+		r := buildRunner(t, env, func(_, _, _ string) (llm.Categorizer, error) {
+			return fake, nil
+		})
+		r.Nots = repo.NewNotificationStore(env.pool)
+		job, err := r.Jobs.Create(env.ctx, uid, "manual", nil)
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if err := r.RunJob(env.ctx, job.ID, uid); err != nil {
+			t.Fatalf("RunJob: %v", err)
+		}
+		got, err := r.Jobs.Get(env.ctx, uid, job.ID)
+		if err != nil {
+			t.Fatalf("get job: %v", err)
+		}
+		// n=1: the single item is auto (0.9); the queue stays empty.
+		if got.Status != "done" || got.ToReview != 0 || got.AutoApplied != 1 {
+			t.Fatalf("job: %+v", got)
+		}
+		if nots := notifications(t, env, uid); len(nots) != 0 {
+			t.Fatalf("notifications = %d, want 0: %+v", len(nots), nots)
+		}
+	})
+
+	t.Run("failed job does not notify", func(t *testing.T) {
+		env := newRunnerEnv(t, "failnotify")
+		uid := seedData(t, env, "failnotify", []string{"Groceries"}, 30)
+		fake := &fakeCategorizer{in: 10, out: 5, errAfter: 2, err: errors.New("llm boom")}
+		r := buildRunner(t, env, func(_, _, _ string) (llm.Categorizer, error) {
+			return fake, nil
+		})
+		r.Nots = repo.NewNotificationStore(env.pool)
+		job, err := r.Jobs.Create(env.ctx, uid, "manual", nil)
+		if err != nil {
+			t.Fatalf("create job: %v", err)
+		}
+		if err := r.RunJob(env.ctx, job.ID, uid); err != nil {
+			t.Fatalf("RunJob (terminal state persisted, want nil): %v", err)
+		}
+		got, err := r.Jobs.Get(env.ctx, uid, job.ID)
+		if err != nil {
+			t.Fatalf("get job: %v", err)
+		}
+		// The first batch flagged 12 rows for review before the second
+		// batch's LLM call failed: cumulative review is 12, the job is
+		// 'failed', and the no-notify-on-failed rule still holds.
+		if got.Status != "failed" || got.ToReview != 12 {
+			t.Fatalf("job: %+v", got)
+		}
+		if nots := notifications(t, env, uid); len(nots) != 0 {
+			t.Fatalf("notifications = %d, want 0: %+v", len(nots), nots)
+		}
+	})
+}
+
 // TestRunJobNoCategories pins the fail-fast: a user with zero
 // categories gets a 'failed' job ("user has no categories") before any
 // LLM call and before the total is written.

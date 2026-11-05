@@ -102,12 +102,14 @@ func main() {
 
 	// Runner with the plan defaults (batch 25, threshold 0.75, the
 	// llm.New factory, env fallback normalised to the compose defaults
-	// when LLM_BASE_URL / LLM_MODEL are unset).
+	// when LLM_BASE_URL / LLM_MODEL are unset). Nots records the plan
+	// 5.5 review notification when a job finishes with review rows.
 	r := categorize.NewRunner(
 		jobs,
 		repo.NewCredentialStore(pool),
 		repo.NewCategoryStore(pool),
 		repo.NewTransactionStore(pool),
+		repo.NewNotificationStore(pool),
 		dekForUser,
 		categorize.LLMEnv{BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model},
 	)

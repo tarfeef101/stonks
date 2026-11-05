@@ -13,6 +13,7 @@ package categorize
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,24 +24,41 @@ import (
 )
 
 // LLMEnv is the server-level LLM fallback used when the user has no
-// stored credential: the same source as the backend's LLM_* env vars
-// (NewRunner fills empty values with the compose-network defaults).
+// stored credential: the same source as the backend's LLM_* env vars.
 type LLMEnv struct {
 	BaseURL string // API root, ends in /v1 ("" -> defaultBaseURL)
 	APIKey  string // "" = keyless self-hosted (no Authorization header)
 	Model   string // model id ("" -> defaultModel)
 }
 
+// NormalizeEnv fills an LLMEnv's empty BaseURL/Model with the
+// compose-network defaults (APIKey stays as-is: "" is the legitimate
+// keyless self-hosted value). Both the worker (NewRunner) and the
+// reprompt route (server.Reprompter) normalise through it, so the
+// fallback is one value in one place.
+func NormalizeEnv(env LLMEnv) LLMEnv {
+	if env.BaseURL == "" {
+		env.BaseURL = defaultBaseURL
+	}
+	if env.Model == "" {
+		env.Model = defaultModel
+	}
+	return env
+}
+
 // Runner walks one categorise job. All stores are user-scoped by the
 // job's user_id; DekForUser resolves the per-user DEK (worker: the
 // users row + crypto.UnwrapDEK); LLM builds the provider client from
 // the resolved endpoint/key and the env model (credentials carry no
-// model of their own).
+// model of their own). Nots records the plan 5.5 "N transactions need
+// review" notification when a job finishes with a non-empty review
+// queue; nil skips it (the queue is still reachable via the API).
 type Runner struct {
 	Jobs       *repo.CategoriseJobStore
 	Creds      *repo.CredentialStore
 	Cats       *repo.CategoryStore
 	Txns       *repo.TransactionStore
+	Nots       *repo.NotificationStore
 	DekForUser func(ctx context.Context, userID string) (dek []byte, err error)
 	Env        LLMEnv
 	LLM        func(baseURL, apiKey, model string) (llm.Categorizer, error)
@@ -75,22 +93,17 @@ func defaultLLM(baseURL, apiKey, model string) (llm.Categorizer, error) {
 // threshold 0.75, the llm.New factory, and the env fallback normalised
 // (empty BaseURL/Model -> the compose-network defaults).
 func NewRunner(jobs *repo.CategoriseJobStore, creds *repo.CredentialStore,
-	cats *repo.CategoryStore, txns *repo.TransactionStore,
+	cats *repo.CategoryStore, txns *repo.TransactionStore, nots *repo.NotificationStore,
 	dekForUser func(ctx context.Context, userID string) ([]byte, error),
 	env LLMEnv) *Runner {
-	if env.BaseURL == "" {
-		env.BaseURL = defaultBaseURL
-	}
-	if env.Model == "" {
-		env.Model = defaultModel
-	}
 	return &Runner{
 		Jobs:       jobs,
 		Creds:      creds,
 		Cats:       cats,
 		Txns:       txns,
+		Nots:       nots,
 		DekForUser: dekForUser,
-		Env:        env,
+		Env:        NormalizeEnv(env),
 		LLM:        defaultLLM,
 		BatchSize:  defaultBatch,
 		Threshold:  DefaultThreshold,
@@ -171,6 +184,11 @@ func (r *Runner) RunJob(ctx context.Context, jobID, userID string) error {
 		return r.failJob(ctx, jobID, model, fmt.Errorf("runner: build LLM client: %w", err))
 	}
 
+	// totalReview accumulates the flagged rows across batches; it gates
+	// the plan 5.5 review notification at the terminal 'done' (a failed
+	// job returns before the terminal Finish, so it never notifies —
+	// even with batches already flagged).
+	totalReview := 0
 	for {
 		rows, err := r.Txns.Uncategorized(ctx, userID, r.BatchSize, dek)
 		if err != nil {
@@ -215,6 +233,7 @@ func (r *Runner) RunJob(ctx context.Context, jobID, userID string) error {
 		log.Info("categorise batch", "job", jobID, "items", len(items),
 			"auto_applied", auto, "to_review", review,
 			"tokens_in", usage.PromptTokens, "tokens_out", usage.CompletionTokens)
+		totalReview += review
 		if applied == 0 {
 			log.Warn("categorise batch produced no suggestions; remaining items stay uncategorised",
 				"job", jobID, "items", len(items))
@@ -226,5 +245,34 @@ func (r *Runner) RunJob(ctx context.Context, jobID, userID string) error {
 		return err
 	}
 	log.Info("categorise job done", "job", jobID)
+	if totalReview > 0 {
+		r.notifyReviewNeeded(ctx, jobID, userID, totalReview)
+	}
 	return nil
+}
+
+// notifyReviewNeeded records the plan 5.5 notification for a finished
+// job that left rows in the review queue ("N transactions need review",
+// kind "review", ref {count, job_id}). Failures are logged only: the
+// job is already done, a notification write must not undo that, and
+// the queue stays reachable via GET /v1/review.
+func (r *Runner) notifyReviewNeeded(ctx context.Context, jobID, userID string, count int) {
+	if r.Nots == nil {
+		return
+	}
+	body := fmt.Sprintf("%d transactions need review", count)
+	// encoding/json sorts map keys, so the ref is always
+	// {"count":N,"job_id":"..."}.
+	ref, _ := json.Marshal(map[string]any{"count": count, "job_id": jobID})
+	n, err := r.Nots.Create(ctx, userID, repo.NotificationIn{
+		Kind:  "review",
+		Title: body,
+		Body:  body,
+		Ref:   ref,
+	})
+	if err != nil {
+		r.Log.Error("review notification not recorded", "job", jobID, "count", count, "error", err)
+		return
+	}
+	r.Log.Info("review notification recorded", "job", jobID, "count", count, "notification", n.ID)
 }

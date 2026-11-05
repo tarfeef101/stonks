@@ -929,3 +929,106 @@ func (s *TransactionStore) ApplySuggestion(ctx context.Context, userID, txnID, c
 	}
 	return nil
 }
+
+// ReviewPending returns the user's review queue (step 5.5): every row
+// the categorise worker flagged (review_pending) that still has no
+// category, oldest id first. A row that somehow gained a category
+// while flagged (manual edit) is already resolved and is excluded.
+// Descriptions are decrypted under dek.
+func (s *TransactionStore) ReviewPending(ctx context.Context, userID string, dek []byte) ([]Transaction, error) {
+	rows, err := s.pool.Query(ctx,
+		txSelect+" WHERE user_id = $1 AND review_pending = true AND category_id IS NULL\n\t\tORDER BY id", userID)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list review pending: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Transaction, 0)
+	for rows.Next() {
+		var tx Transaction
+		if err := rows.Scan(txScanFields(&tx)...); err != nil {
+			return nil, fmt.Errorf("repo: scan review pending: %w", err)
+		}
+		if err := tx.decrypt(dek); err != nil {
+			return nil, err
+		}
+		out = append(out, tx)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list review pending: %w", err)
+	}
+	return out, nil
+}
+
+// GetReviewPending loads one review-pending row that belongs to the
+// caller (same queue predicate as ReviewPending, by id). Any other row
+// — foreign, already accepted, or not flagged — is not found.
+func (s *TransactionStore) GetReviewPending(ctx context.Context, userID, id string, dek []byte) (Transaction, error) {
+	var tx Transaction
+	err := s.pool.QueryRow(ctx,
+		txSelect+" WHERE user_id = $1 AND id = $2 AND review_pending = true AND category_id IS NULL",
+		userID, id).Scan(txScanFields(&tx)...)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Transaction{}, ErrTransactionNotFound
+		}
+		return Transaction{}, fmt.Errorf("repo: get review pending: %w", err)
+	}
+	if err := tx.decrypt(dek); err != nil {
+		return Transaction{}, err
+	}
+	return tx, nil
+}
+
+// AcceptReview resolves one review-pending row with one of the user's
+// own categories: it sets category_id and clears review_pending in one
+// scoped update. The category must be owned by the user (the owned()
+// probe, mirroring ApplySuggestion); 0 rows affected means the row is
+// not the caller's pending row (concurrent accept included) —
+// ErrTransactionNotFound, never a cross-user write.
+func (s *TransactionStore) AcceptReview(ctx context.Context, userID, txnID, categoryID string) error {
+	ok, err := s.owned(ctx,
+		`SELECT EXISTS (SELECT 1 FROM user_categories WHERE user_id = $1 AND id = $2)`,
+		userID, categoryID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrCategoryNotFound
+	}
+	cmdTag, err := s.pool.Exec(ctx, `
+		UPDATE transactions
+		SET category_id = $3, review_pending = false, updated_at = now()
+		WHERE user_id = $1 AND id = $2 AND review_pending = true AND category_id IS NULL`,
+		userID, txnID, categoryID)
+	if err != nil {
+		return fmt.Errorf("repo: accept review: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrTransactionNotFound
+	}
+	return nil
+}
+
+// AcceptAll resolves every review-pending row of the user with one
+// category (the accept-all bulk action) and returns how many rows it
+// applied. Same ownership probe and scoped update as AcceptReview.
+func (s *TransactionStore) AcceptAll(ctx context.Context, userID, categoryID string) (int, error) {
+	ok, err := s.owned(ctx,
+		`SELECT EXISTS (SELECT 1 FROM user_categories WHERE user_id = $1 AND id = $2)`,
+		userID, categoryID)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, ErrCategoryNotFound
+	}
+	cmdTag, err := s.pool.Exec(ctx, `
+		UPDATE transactions
+		SET category_id = $2, review_pending = false, updated_at = now()
+		WHERE user_id = $1 AND review_pending = true AND category_id IS NULL`,
+		userID, categoryID)
+	if err != nil {
+		return 0, fmt.Errorf("repo: accept all review: %w", err)
+	}
+	return int(cmdTag.RowsAffected()), nil
+}

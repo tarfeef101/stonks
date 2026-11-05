@@ -104,6 +104,8 @@ type handler struct {
 	schemas       SchemaStore
 	imports       ImportStore
 	jobs          *repo.CategoriseJobStore
+	review        ReviewStore
+	reprompt      *Reprompter
 	m             *httpMetrics
 }
 
@@ -128,8 +130,12 @@ type handler struct {
 // 4.5: the presets/analyze/preview/mapping pipeline) — any nil and
 // the affected routes answer 503. jobs serves the categorise routes
 // (plan 5.4: POST /api/v1/categorise, GET /api/v1/categorise/{id});
-// nil and those routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore) http.Handler {
+// nil and those routes answer 503. review serves the review-queue
+// routes (plan 5.5: GET /api/v1/review, the accept and accept-all
+// writes); nil and those routes answer 503. reprompt serves
+// POST /api/v1/review/{id}/reprompt (re-run the LLM on one row); nil
+// and that route answers 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -146,6 +152,8 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		schemas:       schemas,
 		imports:       imports,
 		jobs:          jobs,
+		review:        review,
+		reprompt:      reprompt,
 		m:             newHTTPMetrics(),
 	}
 
@@ -241,6 +249,14 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// claims and drives the jobs.
 		r.Post("/v1/categorise", h.postCategorise)
 		r.Get("/v1/categorise/{id}", h.getCategorise)
+		// Review queue (plan 5.5): the rows the categorise worker
+		// flagged for review, the per-row accept, the accept-all bulk
+		// action (the static segment, distinct depth from /{id}/accept),
+		// and the single-row reprompt (re-run the LLM on one row).
+		r.Get("/v1/review", h.reviewList)
+		r.Post("/v1/review/accept-all", h.reviewAcceptAll)
+		r.Post("/v1/review/{id}/accept", h.reviewAccept)
+		r.Post("/v1/review/{id}/reprompt", h.reviewReprompt)
 	})
 	return r
 }
