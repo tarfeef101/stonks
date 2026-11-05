@@ -82,5 +82,27 @@
 		"confirmed_title": "Mapping confirmed",
 		"confirmed_note": "The mapping for",
 		"another": "Start another import"
+	},
+	"manual_entry": {
+		"title": "Add a transaction manually",
+		"intro": "Record a transaction that isn't in any statement — it enters the same pipeline as an import.",
+		"account_label": "Account",
+		"account_placeholder": "Choose an account…",
+		"no_accounts": "No accounts yet — add one in the app first.",
+		"category_label": "Category",
+		"category_none": "No category",
+		"date_posted_label": "Date posted",
+		"date_executed_label": "Date executed (optional)",
+		"amount_label": "Amount",
+		"amount_placeholder": "e.g. -25.50",
+		"amount_note": "Plain number, up to two decimal places; a minus sign for debits. No currency symbols or thousands separators.",
+		"description_label": "Description",
+		"description_placeholder": "e.g. COFFEE ROASTERY",
+		"notes_label": "Notes",
+		"notes_placeholder": "Optional notes",
+		"submit": "Add transaction",
+		"submitting": "Adding…",
+		"missing": "An account, a posted date, and an amount are required.",
+		"success": "Added {amount} on {date} (id {id})."
 	}
 }

@@ -19,6 +19,7 @@
 		type ImportPreset,
 		type PreviewResult
 	} from '#lib/api/imports';
+	import ManualEntry from '#lib/components/ManualEntry.svelte';
 
 	// Import mapping (step 4.5): upload a statement file, analyze it
 	// (the backend matches a preset from the filename/headers and
@@ -350,6 +351,9 @@
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
 	{:else}
+		<!-- Manual entry (4.7): its own section above the import flow. -->
+		<ManualEntry />
+
 		<div class="space-y-4 rounded-lg border border-zinc-200 bg-white p-5">
 			<div class="flex flex-wrap items-end gap-4">
 				<label class="block text-sm">
