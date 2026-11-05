@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"finance-tracker/internal/authn"
+	"finance-tracker/internal/repo"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -102,6 +103,7 @@ type handler struct {
 	notifications NotificationStore
 	schemas       SchemaStore
 	imports       ImportStore
+	jobs          *repo.CategoriseJobStore
 	m             *httpMetrics
 }
 
@@ -124,8 +126,10 @@ type handler struct {
 // save a mapping as a preset); imports serves the import job routes
 // (step 4.1: POST /api/v1/imports plus the list and single-GET; step
 // 4.5: the presets/analyze/preview/mapping pipeline) — any nil and
-// the affected routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore) http.Handler {
+// the affected routes answer 503. jobs serves the categorise routes
+// (plan 5.4: POST /api/v1/categorise, GET /api/v1/categorise/{id});
+// nil and those routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -141,6 +145,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		notifications: notifications,
 		schemas:       schemas,
 		imports:       imports,
+		jobs:          jobs,
 		m:             newHTTPMetrics(),
 	}
 
@@ -231,6 +236,11 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/imports/{id}/preview", h.importPreview)
 		r.Post("/v1/imports/{id}/mapping", h.importSetMapping)
 		r.Post("/v1/imports/{id}/run", h.importRun)
+		// Categorise (plan 5.4): the manual trigger (202, the job row)
+		// and the status read the SPA polls; the worker (cmd/worker)
+		// claims and drives the jobs.
+		r.Post("/v1/categorise", h.postCategorise)
+		r.Get("/v1/categorise/{id}", h.getCategorise)
 	})
 	return r
 }

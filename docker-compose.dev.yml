@@ -96,6 +96,39 @@ services:
       keycloak:
         condition: service_healthy
 
+  # Categorisation worker (step 5.4): same image as backend (the Dockerfile
+  # builds both binaries; the compose service selects the entrypoint — the
+  # image ENTRYPOINT is `api`, so the worker service overrides it with
+  # `entrypoint: ["worker"]`; a plain `command` would only be appended to
+  # the entrypoint, i.e. run `api worker`). Always-on, NOT profile-gated:
+  # the categorise job queue is core flow (POST /api/v1/categorise and the
+  # import chain enqueue jobs that only this service drains). The worker
+  # owns the queue with FOR UPDATE SKIP LOCKED and re-queues 'running'
+  # rows at startup, so a single node is correct for dev. Env mirrors the
+  # backend's LLM_* block: unset means the runner defaults apply (base
+  # http://llama:8080/v1, the full-path model id the dev llama.cpp reports
+  # in /v1/models), and a user's stored llm_credentials row always wins
+  # over env. No keycloak dependency: the worker verifies nothing — it
+  # reads users.wrapped_dek + KEK directly.
+  worker:
+    build: ./backend
+    entrypoint: ["worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
+      KEK: ${KEK:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The image HEALTHCHECK is `wget /healthz:8080` (the API's route);
+      # the worker runs no HTTP listener, so it would report unhealthy
+      # forever. Nothing gates on worker health (no depends_on, no
+      # frontend dependency), so disable it rather than fake a route.
+      disable: true
+
   # Dev server (not the nginx image): SvelteKit PUBLIC_* vars are read at
   # runtime by the dev server, so .env changes apply on restart without a
   # rebuild (they are baked in for the static production build).
@@ -221,9 +254,10 @@ services:
   # skips the download when the file is already present and valid, so it is fast
   # on every boot after the first. llama then loads the model and serves the
   # OpenAI-compatible /v1 API on host port 18090. First boot is slow
-  # (~2.5 GB model download + image pull). The backend does not call this
-  # service until step 5.4; the default categorisation test path is the mock
-  # provider. k8s Deployment of the same spec is deferred to Phase 10 (10.2).
+  # (~2.5 GB model download + image pull). The worker (step 5.4) calls
+  # this service when a categorisation job runs; the default
+  # categorisation test path is the mock provider. k8s Deployment of the
+  # same spec is deferred to Phase 10 (10.2).
   llama-init:
     image: curlimages/curl:8.23.0
     # The image defaults to the unprivileged `curl_user`, but a fresh named
@@ -266,13 +300,20 @@ services:
     depends_on:
       llama-init:
         condition: service_completed_successfully
-    # working_dir /models + relative --model path: /v1/models then reports
-    # the model id as the bare filename (the server echoes the --model
-    # argument verbatim), which is what the backend's LLM_* config uses.
-    working_dir: /models
+    # --model is the FULL path: llama-server echoes the --model argument
+    # verbatim, so /v1/models reports that exact string as the model id
+    # and the step 5.4 worker's default LLM_MODEL is the same string
+    # (the server does not validate the request's model field — any
+    # value is accepted — so this is consistency with /v1/models, not
+    # enforcement; verified 2026-11-05). Do NOT override working_dir:
+    # the image resolves llama-server's sibling .so files relative to
+    # the working directory, so pointing it at /models breaks the
+    # loader (exit 127, libllama-server-impl.so — verified 2026-11-05).
+    # The image ships its own /health HEALTHCHECK, so no compose
+    # healthcheck is added.
     command:
       - --model
-      - qwen3-4b-instruct-2507-q4_k_m.gguf
+      - /models/qwen3-4b-instruct-2507-q4_k_m.gguf
       - --ctx-size
       - "8192"
       - --parallel

@@ -14,12 +14,15 @@ import (
 )
 
 // mockCategorizer returns canned JSON (or an error) and records the
-// Request it received, for prompt assertions.
+// Request it received, for prompt assertions. promptTokens /
+// completionTokens are echoed in the response for Usage assertions.
 type mockCategorizer struct {
-	json  json.RawMessage
-	err   error
-	req   llm.Request
-	calls int
+	json             json.RawMessage
+	err              error
+	req              llm.Request
+	calls            int
+	promptTokens     int
+	completionTokens int
 }
 
 func (m *mockCategorizer) Categorize(_ context.Context, req llm.Request) (*llm.Response, error) {
@@ -28,7 +31,11 @@ func (m *mockCategorizer) Categorize(_ context.Context, req llm.Request) (*llm.R
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &llm.Response{JSON: m.json}, nil
+	return &llm.Response{
+		JSON:             m.json,
+		PromptTokens:     m.promptTokens,
+		CompletionTokens: m.completionTokens,
+	}, nil
 }
 
 var testCategories = []Category{
@@ -47,7 +54,7 @@ func TestRunHappy(t *testing.T) {
 			{"i": 1, "category": "Groceries", "confidence": 0.9, "rationale": "grocery store"},
 			{"i": 2, "category": "Transport", "confidence": 0.55, "rationale": "likely fare"}
 		]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -95,7 +102,7 @@ func TestRunUnknownCategory(t *testing.T) {
 			{"i": 1, "category": "Betting", "confidence": 0.9, "rationale": "invented category"},
 			{"i": 2, "category": "Transport", "confidence": 0.6}
 		]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -113,7 +120,7 @@ func TestRunUnknownCategory(t *testing.T) {
 func TestRunMissingEntry(t *testing.T) {
 	mock := &mockCategorizer{json: json.RawMessage(
 		`[{"i": 1, "category": "Groceries", "confidence": 0.9}]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -134,7 +141,7 @@ func TestRunClampsConfidence(t *testing.T) {
 			{"i": 1, "category": "Groceries", "confidence": 1.5},
 			{"i": 2, "category": "Transport", "confidence": -0.2}
 		]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -152,7 +159,7 @@ func TestRunDuplicateI(t *testing.T) {
 			{"i": 1, "category": "Groceries", "confidence": 0.2, "rationale": "first entry"},
 			{"i": 1, "category": "Transport", "confidence": 0.9, "rationale": "second entry"}
 		]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -172,7 +179,7 @@ func TestRunOutOfRangeI(t *testing.T) {
 			{"i": 3, "category": "Groceries", "confidence": 0.9},
 			{"i": 2, "category": "Transport", "confidence": 0.7}
 		]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -187,7 +194,7 @@ func TestRunOutOfRangeI(t *testing.T) {
 func TestRunCaseInsensitive(t *testing.T) {
 	mock := &mockCategorizer{json: json.RawMessage(`
 		[{"i": 1, "category": "groceries", "confidence": 0.9}]`)}
-	got, err := Run(context.Background(), mock, testCategories, testItems)
+	got, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -200,7 +207,7 @@ func TestRunCaseInsensitive(t *testing.T) {
 func TestRunProviderError(t *testing.T) {
 	boom := errors.New("provider exploded")
 	mock := &mockCategorizer{err: boom}
-	_, err := Run(context.Background(), mock, testCategories, testItems)
+	_, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want provider error to propagate unchanged", err)
 	}
@@ -209,7 +216,7 @@ func TestRunProviderError(t *testing.T) {
 func TestRunEmptyInputs(t *testing.T) {
 	t.Run("no categories", func(t *testing.T) {
 		mock := &mockCategorizer{json: json.RawMessage(`[]`)}
-		_, err := Run(context.Background(), mock, nil, testItems)
+		_, _, err := Run(context.Background(), mock, nil, testItems)
 		if !errors.Is(err, errNoCategories) {
 			t.Fatalf("err = %v, want %v", err, errNoCategories)
 		}
@@ -219,7 +226,7 @@ func TestRunEmptyInputs(t *testing.T) {
 	})
 	t.Run("no items", func(t *testing.T) {
 		mock := &mockCategorizer{json: json.RawMessage(`[]`)}
-		_, err := Run(context.Background(), mock, testCategories, nil)
+		_, _, err := Run(context.Background(), mock, testCategories, nil)
 		if !errors.Is(err, errNoItems) {
 			t.Fatalf("err = %v, want %v", err, errNoItems)
 		}
@@ -263,14 +270,30 @@ func TestPrompts(t *testing.T) {
 
 func TestRunMalformedJSON(t *testing.T) {
 	mock := &mockCategorizer{json: json.RawMessage(`not json`)}
-	_, err := Run(context.Background(), mock, testCategories, testItems)
+	_, _, err := Run(context.Background(), mock, testCategories, testItems)
 	if err == nil {
 		t.Fatal("Run should error on a non-array JSON value")
 	}
 	// Defense in depth: an object response gets the pinned error.
 	mockObj := &mockCategorizer{json: json.RawMessage(`{"i": 1}`)}
-	_, err = Run(context.Background(), mockObj, testCategories, testItems)
+	_, _, err = Run(context.Background(), mockObj, testCategories, testItems)
 	if !errors.Is(err, errNotArray) {
 		t.Fatalf("err = %v, want %v", err, errNotArray)
+	}
+}
+
+func TestRunUsage(t *testing.T) {
+	mock := &mockCategorizer{
+		json:             json.RawMessage(`[{"i": 1, "category": "Groceries", "confidence": 0.9}]`),
+		promptTokens:     123,
+		completionTokens: 45,
+	}
+	_, usage, err := Run(context.Background(), mock, testCategories, testItems)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := Usage{PromptTokens: 123, CompletionTokens: 45}
+	if usage != want {
+		t.Errorf("usage = %+v, want %+v", usage, want)
 	}
 }

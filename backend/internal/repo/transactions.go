@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"finance-tracker/internal/crypto"
@@ -825,6 +826,106 @@ func (s *TransactionStore) Delete(ctx context.Context, userID, id string) error 
 	}
 	if cmdTag.RowsAffected() == 0 {
 		return ErrTransactionNotFound
+	}
+	return nil
+}
+
+// UncategorizedItem is one uncategorized transaction for the
+// categorisation worker (step 5.4): the decrypted description and the
+// raw numeric amount (the worker canonicalizes it for the prompt).
+type UncategorizedItem struct {
+	ID          string
+	Description string // decrypted
+	Amount      float64
+}
+
+// Uncategorized returns up to limit of the user's uncategorized,
+// not-yet-review-pending transactions, oldest first (0007 runner
+// batch input; the query is pinned by the step 5.4 design). The
+// descriptions are decrypted under dek.
+func (s *TransactionStore) Uncategorized(ctx context.Context, userID string, limit int, dek []byte) ([]UncategorizedItem, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("repo: uncategorized limit must be positive")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, description_encrypted, amount FROM transactions
+		WHERE user_id = $1 AND category_id IS NULL AND review_pending = false
+		ORDER BY id
+		LIMIT $2`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list uncategorized transactions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]UncategorizedItem, 0, limit)
+	for rows.Next() {
+		var (
+			id       string
+			descPack []byte
+			amount   float64
+		)
+		if err := rows.Scan(&id, &descPack, &amount); err != nil {
+			return nil, fmt.Errorf("repo: scan uncategorized transaction: %w", err)
+		}
+		desc, err := openTxField(id, descPack, dek)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, UncategorizedItem{ID: id, Description: desc, Amount: amount})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list uncategorized transactions: %w", err)
+	}
+	return out, nil
+}
+
+// CountUncategorized returns the count of the user's uncategorized,
+// not-yet-review-pending transactions (the job's total, set once
+// before the batch loop). dek is accepted for signature symmetry with
+// the sibling methods; the count touches no encrypted columns.
+func (s *TransactionStore) CountUncategorized(ctx context.Context, userID string, dek []byte) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM transactions
+		WHERE user_id = $1 AND category_id IS NULL AND review_pending = false`, userID).
+		Scan(&n); err != nil {
+		return 0, fmt.Errorf("repo: count uncategorized transactions: %w", err)
+	}
+	return n, nil
+}
+
+// ApplySuggestion applies one validated suggestion to one of the
+// user's transactions (step 5.4): review=false sets category_id (the
+// category must be the user's own — the Update ownership probe),
+// review=true sets review_pending (category_id stays NULL). Both
+// columns are plaintext — no DEK needed.
+func (s *TransactionStore) ApplySuggestion(ctx context.Context, userID, txnID, categoryID string, review bool) error {
+	var cmdTag pgconn.CommandTag
+	var err error
+	if review {
+		cmdTag, err = s.pool.Exec(ctx, `
+			UPDATE transactions
+			SET review_pending = true, updated_at = now()
+			WHERE user_id = $1 AND id = $2`, userID, txnID)
+	} else {
+		ok, oerr := s.owned(ctx,
+			`SELECT EXISTS (SELECT 1 FROM user_categories WHERE user_id = $1 AND id = $2)`,
+			userID, categoryID)
+		if oerr != nil {
+			return oerr
+		}
+		if !ok {
+			return ErrCategoryNotFound
+		}
+		cmdTag, err = s.pool.Exec(ctx, `
+			UPDATE transactions
+			SET category_id = $3, updated_at = now()
+			WHERE user_id = $1 AND id = $2`, userID, txnID, categoryID)
+	}
+	if err != nil {
+		return fmt.Errorf("repo: apply suggestion: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrTransactionNotFound // not the user's row (or gone)
 	}
 	return nil
 }

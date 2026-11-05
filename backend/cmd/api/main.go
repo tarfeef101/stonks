@@ -73,6 +73,7 @@ func main() {
 		notifications server.NotificationStore
 		schemas       server.SchemaStore
 		imports       server.ImportStore
+		jobs          *repo.CategoriseJobStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -145,9 +146,13 @@ func main() {
 		// filename are DEK-encrypted by the repo layer (the per-user
 		// DEK comes from bootstrap, like every other encrypted column).
 		imports = repo.NewImportJobStore(pool)
+		// Categorise jobs (step 5.4): same pool; the worker
+		// (cmd/worker) claims and drives the queue, the API only
+		// enqueues (POST) and reads (GET) the caller's jobs.
+		jobs = repo.NewCategoriseJobStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

@@ -298,6 +298,17 @@ func (h *handler) importRun(w http.ResponseWriter, r *http.Request) {
 		h.runFatal(w, r, c, job, err)
 		return
 	}
+	// Plan 5.4: chain a categorise job for the newly inserted rows —
+	// best effort: on error the import job stays "done" and the user
+	// can trigger a manual categorise later. Skipped when nothing new
+	// landed (a re-import with every row deduped has nothing to
+	// categorise) or when no jobs store is wired (fake-store tests).
+	if h.jobs != nil && res.Inserted > 0 {
+		if _, cerr := h.jobs.Create(ctx, c.row.ID, "import", &finished.ID); cerr != nil {
+			slog.Warn("create chained categorise job failed",
+				"import_job", finished.ID, "error", cerr)
+		}
+	}
 	writeJSON(w, http.StatusOK, toImportOut(finished))
 }
 

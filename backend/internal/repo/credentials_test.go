@@ -299,3 +299,124 @@ func TestCredentialProvidersVocabulary(t *testing.T) {
 		}
 	}
 }
+
+func TestCredentialResolve(t *testing.T) {
+	env := newTestEnv(t, "res-a", "res-b")
+	store := NewCredentialStore(env.pool)
+	a := env.user(t, "res-a")
+	b := env.user(t, "res-b")
+	ctx := env.ctx
+
+	t.Run("no rows", func(t *testing.T) {
+		if _, err := store.Resolve(ctx, a.row.ID, a.dek); !errors.Is(err, ErrCredentialNotFound) {
+			t.Fatalf("want ErrCredentialNotFound, got %v", err)
+		}
+	})
+
+	t.Run("most recently updated wins", func(t *testing.T) {
+		if _, err := store.Put(ctx, a.row.ID, CredentialIn{
+			Provider: "openai", Endpoint: "https://api.openai.com/v1", APIKey: strPtr("sk-oa-000000000"),
+		}, a.dek); err != nil {
+			t.Fatalf("put openai: %v", err)
+		}
+		if _, err := store.Put(ctx, a.row.ID, CredentialIn{
+			Provider: "custom", Endpoint: "https://custom.example/v1", APIKey: strPtr("sk-cu-111111111"),
+		}, a.dek); err != nil {
+			t.Fatalf("put custom: %v", err)
+		}
+		// custom was updated last, so it beats the older openai row even
+		// though openai has higher priority.
+		got, err := store.Resolve(ctx, a.row.ID, a.dek)
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if got.Provider != "custom" || got.Endpoint != "https://custom.example/v1" ||
+			got.APIKey != "sk-cu-111111111" {
+			t.Fatalf("resolve: %+v", got)
+		}
+		// Re-Put openai: its updated_at moves to now and it wins again.
+		if _, err := store.Put(ctx, a.row.ID, CredentialIn{
+			Provider: "openai", Endpoint: "https://api.openai.com/v1", APIKey: strPtr("sk-oa-000000000"),
+		}, a.dek); err != nil {
+			t.Fatalf("re-put openai: %v", err)
+		}
+		got, err = store.Resolve(ctx, a.row.ID, a.dek)
+		if err != nil {
+			t.Fatalf("resolve after re-put: %v", err)
+		}
+		if got.Provider != "openai" || got.APIKey != "sk-oa-000000000" {
+			t.Fatalf("resolve: %+v", got)
+		}
+	})
+
+	t.Run("tie breaks by provider priority", func(t *testing.T) {
+		if _, err := store.Put(ctx, a.row.ID, CredentialIn{
+			Provider: "self_hosted", Endpoint: "http://llama:8080/v1",
+		}, a.dek); err != nil {
+			t.Fatalf("put self_hosted: %v", err)
+		}
+		// Force an exact updated_at tie across all three rows.
+		if _, err := env.pool.Exec(ctx, `
+			UPDATE llm_credentials
+			SET updated_at = '2026-01-01 00:00:00+00'
+			WHERE user_id = $1`, a.row.ID); err != nil {
+			t.Fatalf("force tie: %v", err)
+		}
+		got, err := store.Resolve(ctx, a.row.ID, a.dek)
+		if err != nil {
+			t.Fatalf("resolve tie: %v", err)
+		}
+		if got.Provider != "openai" {
+			t.Fatalf("tie of all three: want openai, got %+v", got)
+		}
+		if err := store.Delete(ctx, a.row.ID, "openai"); err != nil {
+			t.Fatalf("delete openai: %v", err)
+		}
+		got, err = store.Resolve(ctx, a.row.ID, a.dek)
+		if err != nil {
+			t.Fatalf("resolve tie of two: %v", err)
+		}
+		if got.Provider != "custom" || got.APIKey != "sk-cu-111111111" {
+			t.Fatalf("tie of two: want custom, got %+v", got)
+		}
+		if err := store.Delete(ctx, a.row.ID, "custom"); err != nil {
+			t.Fatalf("delete custom: %v", err)
+		}
+		got, err = store.Resolve(ctx, a.row.ID, a.dek)
+		if err != nil {
+			t.Fatalf("resolve keyless: %v", err)
+		}
+		if got.Provider != "self_hosted" || got.Endpoint != "http://llama:8080/v1" || got.APIKey != "" {
+			t.Fatalf("keyless self_hosted: want empty APIKey, got %+v", got)
+		}
+	})
+
+	t.Run("per-user scoping", func(t *testing.T) {
+		if _, err := store.Put(ctx, b.row.ID, CredentialIn{
+			Provider: "openai", Endpoint: "https://b.example/v1", APIKey: strPtr("sk-bb-222222222"),
+		}, b.dek); err != nil {
+			t.Fatalf("put b: %v", err)
+		}
+		got, err := store.Resolve(ctx, b.row.ID, b.dek)
+		if err != nil {
+			t.Fatalf("resolve b: %v", err)
+		}
+		if got.Provider != "openai" || got.APIKey != "sk-bb-222222222" || got.Endpoint != "https://b.example/v1" {
+			t.Fatalf("resolve b: %+v", got)
+		}
+		// a's resolution is untouched by b's rows (no cross-user leak).
+		got, err = store.Resolve(ctx, a.row.ID, a.dek)
+		if err != nil {
+			t.Fatalf("resolve a: %v", err)
+		}
+		if got.Provider != "self_hosted" || got.Endpoint != "http://llama:8080/v1" {
+			t.Fatalf("a's resolve leaked b's row: %+v", got)
+		}
+		if err := store.Delete(ctx, b.row.ID, "openai"); err != nil {
+			t.Fatalf("cleanup b: %v", err)
+		}
+		if err := store.Delete(ctx, a.row.ID, "self_hosted"); err != nil {
+			t.Fatalf("cleanup a: %v", err)
+		}
+	})
+}

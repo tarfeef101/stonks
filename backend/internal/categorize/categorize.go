@@ -41,6 +41,14 @@ type Suggestion struct {
 	Rationale  string
 }
 
+// Usage is the token accounting for one Run call, summed from the
+// provider response (zero when the server omits usage or the call
+// fails before one).
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+}
+
 // DefaultThreshold is the low-confidence cut-off: a suggestion whose
 // confidence is strictly below it needs review. Exactly 0.75 is NOT
 // review (pinned by TestRunConfidenceBoundary).
@@ -86,29 +94,34 @@ type entry struct {
 //     marks such items for review, plan 5.4).
 //   - Confidence is clamped to [0,1]; duplicate i -> FIRST entry wins.
 //
-// Returns a map keyed by 1-based item index; an absent key means no
-// suggestion for that item.
-func Run(ctx context.Context, c llm.Categorizer, categories []Category, items []Item) (map[int]Suggestion, error) {
+// Returns a map keyed by 1-based item index (an absent key means no
+// suggestion for that item) and the provider token Usage (zero on
+// error returns).
+func Run(ctx context.Context, c llm.Categorizer, categories []Category, items []Item) (map[int]Suggestion, Usage, error) {
 	if len(categories) == 0 {
-		return nil, errNoCategories
+		return nil, Usage{}, errNoCategories
 	}
 	if len(items) == 0 {
-		return nil, errNoItems
+		return nil, Usage{}, errNoItems
 	}
 	resp, err := c.Categorize(ctx, llm.Request{
 		System: SystemPrompt(categories),
 		User:   UserPrompt(items),
 	})
 	if err != nil {
-		return nil, err
+		return nil, Usage{}, err
+	}
+	usage := Usage{
+		PromptTokens:     resp.PromptTokens,
+		CompletionTokens: resp.CompletionTokens,
 	}
 	trimmed := bytes.TrimSpace(resp.JSON)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
-		return nil, errNotArray
+		return nil, Usage{}, errNotArray
 	}
 	var raws []json.RawMessage
 	if err := json.Unmarshal(resp.JSON, &raws); err != nil {
-		return nil, fmt.Errorf("categorize: invalid JSON: %w", err)
+		return nil, Usage{}, fmt.Errorf("categorize: invalid JSON: %w", err)
 	}
 	byName := make(map[string]Category, len(categories))
 	for _, cat := range categories {
@@ -159,5 +172,5 @@ func Run(ctx context.Context, c llm.Categorizer, categories []Category, items []
 			Rationale:  rationale,
 		}
 	}
-	return out, nil
+	return out, usage, nil
 }

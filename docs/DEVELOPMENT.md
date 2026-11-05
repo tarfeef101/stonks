@@ -40,6 +40,7 @@ The backend needs a real `KEK` (32 bytes, 64 hex chars) in the git-ignored
 |------------|--------------------------|-------------------|----------------------------------------------------|
 | postgres   | `postgres:18` (18.6)     | 15432             | db/user/pass `finance`/`postgres`/`postgres`       |
 | backend    | built from `backend/`    | 18080             | Go chi; `GET /healthz`                              |
+| worker     | built from `backend/`    | —                 | step 5.4 categorisation worker (`entrypoint: ["worker"]`, same image); drains `categorise_jobs` (SKIP LOCKED); no HTTP port; image `/healthz` healthcheck disabled |
 | keycloak   | `quay.io/keycloak/keycloak:26.8.1` | 18081  | realm `finance`; admin console `http://localhost:18081/admin` |
 | frontend   | built from `frontend/`   | 18082             | SvelteKit 3 **dev server** (HMR from source)        |
 | mailpit    | `axllent/mailpit:v1.31.6`| 1025 (SMTP), 18025 (UI) | local SMTP sink; no mail yet in 0.4      |
@@ -87,8 +88,10 @@ curl -s -H 'Content-Type: application/json' \
 
 The server reports the model id as the **full path**
 `/models/qwen3-4b-instruct-2507-q4_k_m.gguf` — that exact string is what
-clients (and the step 5.4 worker) pass in `model`. The backend does not call
-this service until step 5.4 (the worker + `LLM_*` env); the default
+clients (and the step 5.4 worker) pass in `model`. The worker (cmd/worker)
+calls this service when a categorisation job runs: provider = the user's
+stored `llm_credentials` row when present, else the `LLM_*` env (default
+`http://llama:8080/v1` in-network, model id as above); the default
 categorisation test path stays mock-provider-based.
 
 ## Credentials and OIDC

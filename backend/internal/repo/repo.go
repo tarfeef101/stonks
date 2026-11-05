@@ -50,6 +50,10 @@ var (
 
 	// 4.1 import jobs.
 	ErrImportJobNotFound = errors.New("repo: import job not found")
+
+	// 5.4 categorise jobs.
+	ErrCategoriseJobNotFound  = errors.New("repo: categorise job not found")
+	ErrNoPendingCategoriseJob = errors.New("repo: no pending categorise job")
 )
 
 // hashName computes the §5 plaintext name_hash.

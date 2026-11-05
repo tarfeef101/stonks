@@ -57,6 +57,19 @@ type CredentialIn struct {
 	APIKey   *string
 }
 
+// providerPriority breaks Resolve's updated_at ties: lower wins
+// (openai > custom > self_hosted).
+var providerPriority = map[string]int{"openai": 0, "custom": 1, "self_hosted": 2}
+
+// ResolvedCredential is the worker's in-memory credential view: the
+// API key in plaintext, for the llm client only. It is never logged
+// and never serialized.
+type ResolvedCredential struct {
+	Provider string
+	Endpoint string
+	APIKey   string // plaintext — never log, never serialize
+}
+
 // CredentialStore persists llm_credentials. One store serves every
 // user; each method takes a userID and scopes its SQL on it.
 type CredentialStore struct {
@@ -252,4 +265,59 @@ func (s *CredentialStore) Delete(ctx context.Context, userID, provider string) e
 		return ErrCredentialNotFound
 	}
 	return nil
+}
+
+// Resolve returns the user's ACTIVE credential with the API key
+// decrypted in memory — the ONLY place the plaintext key ever exists
+// (the llm client request; never logged, never serialized).
+// Selection: the most recently updated row wins; ties break by provider
+// priority openai > custom > self_hosted. ErrCredentialNotFound when
+// the user has no rows (the caller falls back to the server env).
+func (s *CredentialStore) Resolve(ctx context.Context, userID string, dek []byte) (ResolvedCredential, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT provider, endpoint_encrypted, api_key_encrypted, updated_at
+		FROM llm_credentials
+		WHERE user_id = $1`, userID)
+	if err != nil {
+		return ResolvedCredential{}, fmt.Errorf("repo: resolve credential: %w", err)
+	}
+	defer rows.Close()
+
+	type candidate struct {
+		provider string
+		epPack   []byte
+		keyPack  []byte
+		updated  time.Time
+	}
+	var best *candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.provider, &c.epPack, &c.keyPack, &c.updated); err != nil {
+			return ResolvedCredential{}, fmt.Errorf("repo: scan credential: %w", err)
+		}
+		if best == nil || c.updated.After(best.updated) ||
+			(c.updated.Equal(best.updated) && providerPriority[c.provider] < providerPriority[best.provider]) {
+			best = &c
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return ResolvedCredential{}, fmt.Errorf("repo: resolve credential: %w", err)
+	}
+	if best == nil {
+		return ResolvedCredential{}, ErrCredentialNotFound
+	}
+
+	ep, err := crypto.Open(dek, best.epPack)
+	if err != nil {
+		return ResolvedCredential{}, fmt.Errorf("repo: decrypt %s credential endpoint: %w", best.provider, err)
+	}
+	resolved := ResolvedCredential{Provider: best.provider, Endpoint: string(ep)}
+	if len(best.keyPack) > 0 {
+		key, err := crypto.Open(dek, best.keyPack)
+		if err != nil {
+			return ResolvedCredential{}, fmt.Errorf("repo: decrypt %s credential API key: %w", best.provider, err)
+		}
+		resolved.APIKey = string(key)
+	}
+	return resolved, nil
 }

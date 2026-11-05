@@ -31,7 +31,7 @@ func newImportRunServer(t *testing.T, imp ImportStore, txs TransactionStore) (ht
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, txs, nil, nil, nil, imp), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, txs, nil, nil, nil, imp, nil), key
 }
 
 // setJobStatus overwrites a seeded job's status directly (the only
@@ -181,7 +181,7 @@ func TestImportRunGates(t *testing.T) {
 	setJobStatus(store, jobID, "mapping")
 
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, &memTxStore{}, nil, nil, nil, store)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, &memTxStore{}, nil, nil, nil, store, nil)
 		if code, _ := doReq(t, h, http.MethodPost, "/api/v1/imports/"+jobID+"/run", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}
@@ -297,9 +297,38 @@ func TestImportRun(t *testing.T) {
 	if _, err := b.EnsureUser(ctx, authn.Identity{Sub: sub, Email: sub + "@localhost", Name: sub}); err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
+	// The real jobs store is wired in so the run's plan-5.4 chain
+	// (inserts -> pending categorise job) is exercised for real.
 	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil,
-		repo.NewAccountStore(pool), nil, repo.NewTransactionStore(pool), nil, nil, nil, repo.NewImportJobStore(pool))
+		repo.NewAccountStore(pool), nil, repo.NewTransactionStore(pool), nil, nil, nil, repo.NewImportJobStore(pool), repo.NewCategoriseJobStore(pool))
 	hdr := authHdr(mintIdentityToken(t, key, sub, sub+"@localhost", sub, sub))
+
+	// The 5.4 import chain: a run that inserts transactions enqueues
+	// one pending categorise job (source "import", linked to the import
+	// job); an all-deduped or failed run enqueues nothing.
+	var userID string
+	if err := pool.QueryRow(ctx, "SELECT id FROM users WHERE auth0_sub = $1", sub).Scan(&userID); err != nil {
+		t.Fatalf("user id: %v", err)
+	}
+	type cjRow struct{ source, importID, status string }
+	jobRows := func() []cjRow {
+		t.Helper()
+		rows, err := pool.Query(ctx,
+			"SELECT source, import_job_id, status FROM categorise_jobs WHERE user_id = $1 ORDER BY ctid", userID)
+		if err != nil {
+			t.Fatalf("query categorise jobs: %v", err)
+		}
+		defer rows.Close()
+		var out []cjRow
+		for rows.Next() {
+			var r cjRow
+			if err := rows.Scan(&r.source, &r.importID, &r.status); err != nil {
+				t.Fatalf("scan categorise job: %v", err)
+			}
+			out = append(out, r)
+		}
+		return out
+	}
 
 	// The runner's Upsert probes the account's existence, so the
 	// account must be created through the API first.
@@ -341,6 +370,16 @@ func TestImportRun(t *testing.T) {
 		job2 := newJob("plain-again.csv", plainCSV)
 		setMapping(job2, csvMapping)
 		wantRunOutcome(t, h, hdr, job2, 0, 3, nil)
+
+		// job1 inserted 3 rows -> exactly one pending import job,
+		// linked to job1; job2 inserted 0 -> it added no job.
+		r := jobRows()
+		if len(r) != 1 {
+			t.Fatalf("categorise jobs after job1+job2 = %d, want 1: %+v", len(r), r)
+		}
+		if r[0].source != "import" || r[0].importID != job1 || r[0].status != "pending" {
+			t.Fatalf("job row = %+v, want {import %s pending}", r[0], job1)
+		}
 	})
 
 	t.Run("overlapping file", func(t *testing.T) {
@@ -351,6 +390,11 @@ func TestImportRun(t *testing.T) {
 		job := newJob("overlap.csv", over)
 		setMapping(job, csvMapping)
 		wantRunOutcome(t, h, hdr, job, 1, 2, nil)
+
+		r := jobRows()
+		if len(r) != 2 || r[1].importID != job || r[1].status != "pending" {
+			t.Fatalf("jobs after overlap run = %+v, want one more pending job for %s", r, job)
+		}
 	})
 
 	t.Run("row-level errors", func(t *testing.T) {
@@ -364,6 +408,11 @@ func TestImportRun(t *testing.T) {
 			{Row: 1, Field: "date_posted", Message: `not a valid date: "NOT A DATE"`},
 			{Row: 2, Field: "amount", Message: `amount "abc" is not a valid decimal`},
 		})
+
+		// The single good row was inserted -> one more job.
+		if r := jobRows(); len(r) != 3 {
+			t.Fatalf("jobs after bad.csv run = %d, want 3: %+v", len(r), r)
+		}
 	})
 
 	t.Run("failed run", func(t *testing.T) {
@@ -394,5 +443,11 @@ func TestImportRun(t *testing.T) {
 		// A failed job is terminal too.
 		code, body = doReq(t, h, http.MethodPost, "/api/v1/imports/"+job+"/run", "", hdr)
 		wantAPIError(t, code, body, http.StatusConflict, codeConflict, "import job must be in the mapping state to run")
+
+		// A failed run inserted nothing -> it must not enqueue a
+		// categorise job.
+		if r := jobRows(); len(r) != 3 {
+			t.Fatalf("jobs after failed run = %d, want 3: %+v", len(r), r)
+		}
 	})
 }

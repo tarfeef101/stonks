@@ -1,20 +1,32 @@
 // Command worker is the background job runner.
 //
-// In iteration 1 this is a stub: it loads configuration (the same source
-// as the API) and idles until signalled. The actual jobs — categorisation,
-// imports, reports, FI sync, leader election — land in later steps
-// (4.1, 5.4, 8.2, 8.3, 9.2).
+// Plan 5.4: it runs the categorisation queue. At startup it resets any
+// rows left 'running' by a crash (crash recovery), then polls the queue
+// every pollInterval and drives each claimed job to its terminal state
+// through categorize.Runner. Later steps add more job kinds here.
 package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/config"
+	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/repo"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// pollInterval is how often the idle worker polls the categorise queue.
+const pollInterval = 5 * time.Second
 
 // version is injected via -ldflags at build time.
 var version = "dev"
@@ -28,12 +40,134 @@ func main() {
 		logger.Error("config load failed", "error", err)
 		os.Exit(1)
 	}
-	_ = cfg
 
-	logger.Info("worker started (stub)", "version", version)
+	// The worker has nothing to do without a database, so an empty
+	// DATABASE_URL is a configuration error (unlike the API, which still
+	// serves /healthz without one).
+	if cfg.DatabaseURL == "" {
+		logger.Error("worker misconfigured", "hint", "DATABASE_URL is required")
+		os.Exit(1)
+	}
+	ctx0, cancel0 := context.WithTimeout(context.Background(), 5*time.Second)
+	pool, err := pgxpool.New(ctx0, cfg.DatabaseURL)
+	cancel0()
+	if err != nil {
+		logger.Error("database pool create failed", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	// The worker unwraps per-user DEKs, so the KEK is mandatory.
+	if cfg.KEK == "" {
+		logger.Error("kek misconfigured",
+			"hint", "KEK is required: 64 hex chars (make gen-kek, .env)")
+		os.Exit(1)
+	}
+	kek, err := crypto.KEKFromHex(cfg.KEK)
+	if err != nil {
+		logger.Error("kek parse failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Crash recovery: a previous run may have died between the claim and
+	// the terminal Finish, leaving 'running' rows that no worker owns
+	// any more. Reset them to pending so they get re-claimed.
+	jobs := repo.NewCategoriseJobStore(pool)
+	rc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	reset, err := jobs.ResetRunning(rc)
+	cancel()
+	if err != nil {
+		logger.Error("reset running jobs failed", "error", err)
+		os.Exit(1)
+	}
+
+	// DekForUser resolves the per-user DEK the way the API's bootstrap
+	// path stores it: the users row carries the KEK-wrapped pack.
+	dekForUser := func(ctx context.Context, userID string) ([]byte, error) {
+		var wrapped []byte
+		qerr := pool.QueryRow(ctx,
+			`SELECT wrapped_dek FROM users WHERE id = $1`, userID).Scan(&wrapped)
+		if errors.Is(qerr, sql.ErrNoRows) {
+			return nil, fmt.Errorf("worker: user %s not found", userID)
+		}
+		if qerr != nil {
+			return nil, fmt.Errorf("worker: fetch user %s: %w", userID, qerr)
+		}
+		dek, uerr := crypto.UnwrapDEK(kek, wrapped)
+		if uerr != nil {
+			return nil, fmt.Errorf("worker: unwrap DEK for %s: %w", userID, uerr)
+		}
+		return dek, nil
+	}
+
+	// Runner with the plan defaults (batch 25, threshold 0.75, the
+	// llm.New factory, env fallback normalised to the compose defaults
+	// when LLM_BASE_URL / LLM_MODEL are unset).
+	r := categorize.NewRunner(
+		jobs,
+		repo.NewCredentialStore(pool),
+		repo.NewCategoryStore(pool),
+		repo.NewTransactionStore(pool),
+		dekForUser,
+		categorize.LLMEnv{BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model},
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	<-ctx.Done()
+
+	logger.Info("worker started", "version", version,
+		"reset_running", reset, "poll_interval", pollInterval.String())
+
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			break
+		}
+		job, err := jobs.ClaimNext(ctx)
+		if err != nil {
+			if errors.Is(err, repo.ErrNoPendingCategoriseJob) {
+				// Idle: no pending jobs. Debug level so an idle worker
+				// stays quiet; the ticker paces the re-poll.
+				logger.Debug("categorise queue empty", "retry_in", pollInterval.String())
+			} else if ctx.Err() != nil {
+				break // shutting down mid-claim
+			} else {
+				// Transient DB error: back off one tick and retry.
+				logger.Error("claim next failed", "error", err)
+			}
+			select {
+			case <-ctx.Done():
+			case <-ticker.C:
+			}
+			continue
+		}
+
+		logger.Info("categorise job claimed", "job", job.ID,
+			"user", job.UserID, "source", job.Source)
+		runErr := r.RunJob(ctx, job.ID, job.UserID)
+		if ctx.Err() != nil {
+			// Shutdown raced the job: the terminal state was persisted
+			// best-effort with a cancelled context; stop claiming.
+			break
+		}
+		if runErr != nil {
+			// The terminal Finish persist failed, so the row is still
+			// 'running'; the next worker startup re-queues it via
+			// ResetRunning.
+			logger.Error("categorise job terminal persist failed", "job", job.ID, "error", runErr)
+			continue
+		}
+		finished, gerr := jobs.Get(ctx, job.UserID, job.ID)
+		if gerr != nil {
+			logger.Error("fetch finished job failed", "job", job.ID, "error", gerr)
+			continue
+		}
+		logger.Info("categorise job finished", "job", job.ID,
+			"status", finished.Status,
+			"total", finished.Total, "done", finished.Done,
+			"auto_applied", finished.AutoApplied, "to_review", finished.ToReview,
+			"tokens_in", finished.TokensIn, "tokens_out", finished.TokensOut)
+	}
 	logger.Info("worker shutting down")
 }

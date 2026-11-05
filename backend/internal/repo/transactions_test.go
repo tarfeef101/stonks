@@ -9,6 +9,7 @@ package repo
 import (
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -701,4 +702,186 @@ func TestTransactionAggregate(t *testing.T) {
 	if len(other) != 1 || other[0] != (CategorySpend{CategoryID: "", Spend: "100.00", Income: "0.00", Net: "-100.00"}) {
 		t.Errorf("user b aggregation wrong: %+v", other)
 	}
+}
+
+// TestTransactionCategoriseWorker covers the step 5.4 worker methods:
+// the Uncategorized batch (cap, pinned ORDER BY id, exclusion of
+// categorized and review_pending rows, decrypted descriptions),
+// CountUncategorized, and ApplySuggestion (both branches + scoping).
+func TestTransactionCategoriseWorker(t *testing.T) {
+	env := newTestEnv(t, "cw-a", "cw-b")
+	tx := NewTransactionStore(env.pool)
+	acct := NewAccountStore(env.pool)
+	cat := NewCategoryStore(env.pool)
+	a := env.user(t, "cw-a")
+	b := env.user(t, "cw-b")
+	ctx := env.ctx
+	aid, bid := a.row.ID, b.row.ID
+
+	aAcct, err := acct.Create(ctx, aid, AccountIn{Name: "CW Bank", Type: "bank", Currency: "USD"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a account: %v", err)
+	}
+	bAcct, err := acct.Create(ctx, bid, AccountIn{Name: "CW Bank B", Type: "bank", Currency: "USD"}, b.dek)
+	if err != nil {
+		t.Fatalf("create b account: %v", err)
+	}
+	aCat, err := cat.Create(ctx, aid, CategoryIn{Name: "CW Groceries"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a category: %v", err)
+	}
+	bCat, err := cat.Create(ctx, bid, CategoryIn{Name: "CW Coffee"}, b.dek)
+	if err != nil {
+		t.Fatalf("create b category: %v", err)
+	}
+
+	u1, _, err := tx.Upsert(ctx, aid, TransactionIn{
+		AccountID: aAcct.ID, DatePosted: dateOf("2026-01-01"), Amount: "12.34", Description: "Grocer One",
+	}, a.dek)
+	if err != nil {
+		t.Fatalf("create u1: %v", err)
+	}
+	u2, _, err := tx.Upsert(ctx, aid, TransactionIn{
+		AccountID: aAcct.ID, DatePosted: dateOf("2026-01-02"), Amount: "-5.5", Description: "  Mixed  case  ",
+	}, a.dek)
+	if err != nil {
+		t.Fatalf("create u2: %v", err)
+	}
+	u3, _, err := tx.Upsert(ctx, aid, TransactionIn{
+		AccountID: aAcct.ID, DatePosted: dateOf("2026-01-03"), Amount: "0.99", Description: "Snack Bar",
+	}, a.dek)
+	if err != nil {
+		t.Fatalf("create u3: %v", err)
+	}
+	c1, _, err := tx.Upsert(ctx, aid, TransactionIn{
+		AccountID: aAcct.ID, DatePosted: dateOf("2026-01-04"), Amount: "7.00", Description: "Already Catted", CategoryID: &aCat.ID,
+	}, a.dek)
+	if err != nil {
+		t.Fatalf("create c1: %v", err)
+	}
+	r1, _, err := tx.Upsert(ctx, aid, TransactionIn{
+		AccountID: aAcct.ID, DatePosted: dateOf("2026-01-05"), Amount: "3.25", Description: "Review Row", ReviewPending: true,
+	}, a.dek)
+	if err != nil {
+		t.Fatalf("create r1: %v", err)
+	}
+	if _, _, err := tx.Upsert(ctx, bid, TransactionIn{
+		AccountID: bAcct.ID, DatePosted: dateOf("2026-01-01"), Amount: "1.00", Description: "B Only Row",
+	}, b.dek); err != nil {
+		t.Fatalf("create b row: %v", err)
+	}
+
+	t.Run("count", func(t *testing.T) {
+		n, err := tx.CountUncategorized(ctx, aid, a.dek)
+		if err != nil {
+			t.Fatalf("count a: %v", err)
+		}
+		if n != 3 {
+			t.Fatalf("count a: want 3 (categorized + review_pending excluded), got %d", n)
+		}
+		n, err = tx.CountUncategorized(ctx, bid, b.dek)
+		if err != nil {
+			t.Fatalf("count b: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("count b: want 1 (no cross-user leak), got %d", n)
+		}
+	})
+
+	t.Run("batch cap, ordering, exclusion", func(t *testing.T) {
+		got, err := tx.Uncategorized(ctx, aid, 10, a.dek)
+		if err != nil {
+			t.Fatalf("uncategorized: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("want 3 rows, got %d: %+v", len(got), got)
+		}
+		// The pinned ORDER BY id is byte order over the uuid text —
+		// identical to lexicographic order of the canonical ids.
+		want := []string{u1.ID, u2.ID, u3.ID}
+		sort.Strings(want)
+		for i, it := range got {
+			if it.ID != want[i] {
+				t.Fatalf("row %d: want id %s, got %s", i, want[i], it.ID)
+			}
+		}
+		byID := map[string]UncategorizedItem{}
+		for _, it := range got {
+			byID[it.ID] = it
+		}
+		if _, ok := byID[c1.ID]; ok {
+			t.Fatal("categorized row leaked into the batch")
+		}
+		if _, ok := byID[r1.ID]; ok {
+			t.Fatal("review_pending row leaked into the batch")
+		}
+		if got2 := byID[u2.ID]; got2.Description != "  Mixed  case  " || got2.Amount != -5.5 {
+			t.Fatalf("u2 decrypted row: %+v", got2)
+		}
+		if got3 := byID[u1.ID]; got3.Amount != 12.34 {
+			t.Fatalf("u1 amount: %+v", got3)
+		}
+		// The cap trims the batch.
+		capped, err := tx.Uncategorized(ctx, aid, 2, a.dek)
+		if err != nil {
+			t.Fatalf("capped: %v", err)
+		}
+		if len(capped) != 2 {
+			t.Fatalf("cap 2: want 2 rows, got %d", len(capped))
+		}
+		if _, err := tx.Uncategorized(ctx, aid, 0, a.dek); err == nil {
+			t.Fatal("limit 0 must be rejected")
+		}
+	})
+
+	t.Run("apply suggestion, auto branch", func(t *testing.T) {
+		if err := tx.ApplySuggestion(ctx, aid, u1.ID, aCat.ID, false); err != nil {
+			t.Fatalf("apply auto: %v", err)
+		}
+		got, err := tx.Get(ctx, aid, u1.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get u1: %v", err)
+		}
+		if got.CategoryID != aCat.ID || got.ReviewPending {
+			t.Fatalf("u1 after auto apply: %+v", got)
+		}
+		// Another user's category is not applicable (ownership probe).
+		if err := tx.ApplySuggestion(ctx, aid, u2.ID, bCat.ID, false); !errors.Is(err, ErrCategoryNotFound) {
+			t.Fatalf("foreign category: want ErrCategoryNotFound, got %v", err)
+		}
+		// A nonexistent category id is the same error.
+		none := "00000000-0000-0000-0000-000000000000"
+		if err := tx.ApplySuggestion(ctx, aid, u2.ID, none, false); !errors.Is(err, ErrCategoryNotFound) {
+			t.Fatalf("missing category: want ErrCategoryNotFound, got %v", err)
+		}
+		// Cross-user apply: b cannot touch a's row.
+		if err := tx.ApplySuggestion(ctx, bid, u2.ID, bCat.ID, false); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("b applies to a's row: want ErrTransactionNotFound, got %v", err)
+		}
+	})
+
+	t.Run("apply suggestion, review branch", func(t *testing.T) {
+		if err := tx.ApplySuggestion(ctx, aid, u3.ID, "", true); err != nil {
+			t.Fatalf("apply review: %v", err)
+		}
+		got, err := tx.Get(ctx, aid, u3.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get u3: %v", err)
+		}
+		if got.ReviewPending != true || got.CategoryID != "" {
+			t.Fatalf("u3 after review apply: %+v", got)
+		}
+		none := "00000000-0000-0000-0000-000000000000"
+		if err := tx.ApplySuggestion(ctx, aid, none, "", true); !errors.Is(err, ErrTransactionNotFound) {
+			t.Fatalf("missing row: want ErrTransactionNotFound, got %v", err)
+		}
+		// Applied rows leave the uncategorized pool.
+		n, err := tx.CountUncategorized(ctx, aid, a.dek)
+		if err != nil {
+			t.Fatalf("count after applies: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("count after applies: want 1 (only u2), got %d", n)
+		}
+	})
 }
