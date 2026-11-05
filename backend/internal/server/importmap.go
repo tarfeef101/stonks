@@ -245,6 +245,66 @@ func csvMappedRow(resolved map[csvparse.Field]fieldRef, row []string) []string {
 	return out
 }
 
+// mappedFile parses the file and applies the mapping to ALL of its
+// data rows: the preview column names, one mapped row per record in
+// source order, and the total mapped row count. For csv it also
+// returns the parsed file (the 4.6 runner needs the mapped column's
+// inferred DateFormat); json and ofx return nil there. The last return
+// is the kind-specific parse error message ("" when the file parsed) —
+// the same wording the preview has always answered with. Preview and
+// the runner share this one path, so a mapping renders the same rows
+// in both.
+func mappedFile(m Mapping, file []byte) (names []string, rows [][]string, total int, csvFile *csvparse.File, msg string) {
+	names = fieldNames()
+	switch m.Kind {
+	case "csv":
+		f, err := csvparse.Parse(bytes.NewReader(file))
+		if err != nil {
+			return nil, nil, 0, nil, "file could not be parsed as CSV"
+		}
+		resolved := resolveCSV(m, f.Header)
+		total = len(f.Rows)
+		rows = make([][]string, 0, total)
+		for _, row := range f.Rows {
+			rows = append(rows, csvMappedRow(resolved, row))
+		}
+		return names, rows, total, f, ""
+	case "json":
+		spec := m.jsonSpec()
+		names = make([]string, 0, len(spec.Fields))
+		for _, fs := range spec.Fields {
+			names = append(names, fs.Name)
+		}
+		f, err := jsonparse.Parse(bytes.NewReader(file), spec)
+		if err != nil {
+			msg := "file could not be parsed as JSON"
+			if errors.Is(err, jsonparse.ErrEmpty) {
+				msg = "no transactions found at the mapped location"
+			}
+			return nil, nil, 0, nil, msg
+		}
+		return names, f.Rows, len(f.Rows), nil, ""
+	case "ofx":
+		txns, err := ofxparse.Parse(bytes.NewReader(file))
+		if err != nil {
+			msg := "file could not be parsed as OFX"
+			if errors.Is(err, ofxparse.ErrEmpty) {
+				msg = "no transactions found in file"
+			}
+			return nil, nil, 0, nil, msg
+		}
+		// The OFX layout is fixed: the parser already emits the app
+		// fields, so the row is date, amount, name, then the unmapped
+		// canonical columns empty.
+		rows = make([][]string, 0, len(txns))
+		for _, t := range txns {
+			rows = append(rows, []string{t.DatePosted, t.Amount, t.Name, "", "", ""})
+		}
+		return names, rows, len(txns), nil, ""
+	}
+	return nil, nil, 0, nil, ""
+}
+
 // presetDoc is the builtin preset's mapping document, or nil when the
 // preset carries no map (ofx + generic-csv: the pre-fill comes from
 // Suggest, the ofx mapping is the identity).
@@ -672,68 +732,13 @@ func (h *handler) importPreview(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
-	names := fieldNames()
-	var (
-		rows  [][]string
-		total int
-	)
-	switch in.Mapping.Kind {
-	case "csv":
-		f, err := csvparse.Parse(bytes.NewReader(file))
-		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "file could not be parsed as CSV")
-			return
-		}
-		resolved := resolveCSV(in.Mapping, f.Header)
-		total = len(f.Rows)
-		rows = make([][]string, 0, limit)
-		for i, row := range f.Rows {
-			if i >= limit {
-				break
-			}
-			rows = append(rows, csvMappedRow(resolved, row))
-		}
-	case "json":
-		spec := in.Mapping.jsonSpec()
-		names = make([]string, 0, len(spec.Fields))
-		for _, fs := range spec.Fields {
-			names = append(names, fs.Name)
-		}
-		f, err := jsonparse.Parse(bytes.NewReader(file), spec)
-		if err != nil {
-			msg := "file could not be parsed as JSON"
-			if errors.Is(err, jsonparse.ErrEmpty) {
-				msg = "no transactions found at the mapped location"
-			}
-			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, msg)
-			return
-		}
-		total = len(f.Rows)
-		rows = make([][]string, 0, limit)
-		for i, row := range f.Rows {
-			if i >= limit {
-				break
-			}
-			rows = append(rows, row)
-		}
-	case "ofx":
-		txns, err := ofxparse.Parse(bytes.NewReader(file))
-		if err != nil {
-			msg := "file could not be parsed as OFX"
-			if errors.Is(err, ofxparse.ErrEmpty) {
-				msg = "no transactions found in file"
-			}
-			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, msg)
-			return
-		}
-		total = len(txns)
-		rows = make([][]string, 0, limit)
-		for i, t := range txns {
-			if i >= limit {
-				break
-			}
-			rows = append(rows, []string{t.DatePosted, t.Amount, t.Name, "", "", ""})
-		}
+	names, rows, total, _, msg := mappedFile(in.Mapping, file)
+	if msg != "" {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, msg)
+		return
+	}
+	if total > limit {
+		rows = rows[:limit]
 	}
 	writeJSON(w, http.StatusOK, previewOut{Columns: names, Rows: rows, Total: total})
 }

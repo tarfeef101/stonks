@@ -24,11 +24,13 @@ import (
 )
 
 // TransactionStore is the persistence surface the transaction handlers
-// need. *repo.TransactionStore satisfies it (its extra Get/Upsert are
-// unused here); route tests use an in-memory implementation.
+// need. *repo.TransactionStore satisfies it (its extra Get is unused
+// here); route tests use an in-memory implementation. Upsert is the
+// dedup-aware insert the 4.6 import runner calls per row.
 type TransactionStore interface {
 	List(ctx context.Context, userID string, f repo.TransactionFilter, dek []byte) ([]repo.Transaction, error)
 	Create(ctx context.Context, userID string, in repo.TransactionIn, dek []byte) (repo.Transaction, error)
+	Upsert(ctx context.Context, userID string, in repo.TransactionIn, dek []byte) (repo.Transaction, bool, error)
 	Update(ctx context.Context, userID, id string, p repo.TransactionPatch, dek []byte) (repo.Transaction, error)
 	Delete(ctx context.Context, userID, id string) error
 	Aggregate(ctx context.Context, userID string, from, to time.Time) ([]repo.CategorySpend, error)

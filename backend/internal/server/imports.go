@@ -34,6 +34,8 @@ type ImportStore interface {
 	List(ctx context.Context, userID string, f repo.ImportJobFilter, dek []byte) ([]repo.ImportJob, error)
 	SetMapping(ctx context.Context, userID, id string, mapping json.RawMessage, dek []byte) (repo.ImportJob, error)
 	ReadFile(ctx context.Context, userID, id string, dek []byte) ([]byte, error)
+	StartRun(ctx context.Context, userID, id string, dek []byte) (repo.ImportJob, error)
+	FinishRun(ctx context.Context, userID, id string, status string, result *json.RawMessage, runErr *string, dek []byte) (repo.ImportJob, error)
 }
 
 // importOut is the wire row. FileName is the decrypted original

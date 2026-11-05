@@ -310,4 +310,70 @@ func TestImportJobStore(t *testing.T) {
 			t.Fatalf("cross-user read file: err = %v, want ErrImportJobNotFound", err)
 		}
 	})
+
+	// Run finish round trip (step 4.6): StartRun moves a mapped job to
+	// 'importing'; FinishRun writes the terminal status with the raw
+	// jsonb result (done) or the failure message (failed), and the
+	// re-reads agree. The status vocabulary is enforced on finish, and
+	// user B can neither start nor finish user A's job.
+	t.Run("run finish round trip", func(t *testing.T) {
+		in := ImportJobIn{AccountID: acctA.ID, FileName: "run-check.csv", File: fileBytes}
+		job, err := store.Create(ctx, aid, in, a.dek)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		sent := []byte(`{"kind":"csv","map":{"date_posted":{"index":0},"amount":{"index":2}}}`)
+		if _, err := store.SetMapping(ctx, aid, job.ID, sent, a.dek); err != nil {
+			t.Fatalf("set mapping: %v", err)
+		}
+
+		started, err := store.StartRun(ctx, aid, job.ID, a.dek)
+		if err != nil {
+			t.Fatalf("start run: %v", err)
+		}
+		if started.Status != "importing" {
+			t.Fatalf("started status = %q, want importing", started.Status)
+		}
+
+		result := json.RawMessage(`{"inserted":2,"skipped":1,"errors":[]}`)
+		done, err := store.FinishRun(ctx, aid, job.ID, "done", &result, nil, a.dek)
+		if err != nil {
+			t.Fatalf("finish done: %v", err)
+		}
+		if done.Status != "done" || done.Result == nil || done.Error != nil {
+			t.Fatalf("done: %+v", done)
+		}
+		if !sameJSON(*done.Result, result) {
+			t.Fatalf("done result = %s, want %s (semantically)", *done.Result, result)
+		}
+		got, err := store.Get(ctx, aid, job.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got.Status != "done" || got.Result == nil || got.Error != nil || !sameJSON(*got.Result, result) {
+			t.Fatalf("re-read after done: %+v", got)
+		}
+
+		msg := "boom"
+		failed, err := store.FinishRun(ctx, aid, job.ID, "failed", nil, &msg, a.dek)
+		if err != nil {
+			t.Fatalf("finish failed: %v", err)
+		}
+		if failed.Status != "failed" || failed.Result != nil || failed.Error == nil || *failed.Error != msg {
+			t.Fatalf("failed: %+v", failed)
+		}
+
+		// The vocabulary is checked before any SQL runs.
+		if _, err := store.FinishRun(ctx, aid, job.ID, "exploded", nil, nil, a.dek); err == nil ||
+			!strings.Contains(err.Error(), "is not a pipeline state") {
+			t.Fatalf("bad status: err = %v, want the pipeline-state message", err)
+		}
+
+		if _, err := store.StartRun(ctx, bid, job.ID, b.dek); !errors.Is(err, ErrImportJobNotFound) {
+			t.Fatalf("cross-user start run: err = %v, want ErrImportJobNotFound", err)
+		}
+		if _, err := store.FinishRun(ctx, bid, job.ID, "done", nil, nil, b.dek); !errors.Is(err, ErrImportJobNotFound) {
+			t.Fatalf("cross-user finish run: err = %v, want ErrImportJobNotFound", err)
+		}
+	})
 }

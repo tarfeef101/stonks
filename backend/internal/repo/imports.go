@@ -268,6 +268,69 @@ func (s *ImportJobStore) SetMapping(ctx context.Context, userID, id string, mapp
 	return s.Get(ctx, userID, id, dek)
 }
 
+// StartRun moves a job to status 'importing' and returns the re-read
+// row, like the other update methods. The status precondition (the job
+// must be in 'mapping'; terminal jobs are immutable) is the caller's —
+// the API checks it before starting, so a row can never be re-opened
+// from here. A job the caller does not own is ErrImportJobNotFound.
+func (s *ImportJobStore) StartRun(ctx context.Context, userID, id string, dek []byte) (ImportJob, error) {
+	var idOut string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE import_jobs
+		SET status = 'importing', updated_at = now()
+		WHERE user_id = $1 AND id = $2
+		RETURNING id`, userID, id).Scan(&idOut)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImportJob{}, ErrImportJobNotFound
+	}
+	if err != nil {
+		return ImportJob{}, fmt.Errorf("repo: start import job run: %w", err)
+	}
+	return s.Get(ctx, userID, id, dek)
+}
+
+// FinishRun writes the run outcome: status is a terminal vocabulary
+// value ('done' or 'failed'), result the raw jsonb outcome (nil for a
+// failed run) and runErr the failure message (nil for a done run).
+// Both are stored verbatim; the API validates the shapes. The status is
+// checked against the 0005 vocabulary before the SQL (same rule as the
+// package header); a job the caller does not own is ErrImportJobNotFound.
+func (s *ImportJobStore) FinishRun(ctx context.Context, userID, id string, status string, result *json.RawMessage, runErr *string, dek []byte) (ImportJob, error) {
+	ok := false
+	for _, want := range ImportJobStatuses {
+		if want == status {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return ImportJob{}, fmt.Errorf("repo: import job status %q is not a pipeline state", status)
+	}
+	// jsonb binds as string (nil = NULL), mirroring SetMapping; a
+	// []byte / *json.RawMessage binding is rejected by pgx.
+	var res any
+	if result != nil {
+		res = string(*result)
+	}
+	var errArg any
+	if runErr != nil {
+		errArg = *runErr
+	}
+	var idOut string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE import_jobs
+		SET status = $3, result = $4, error = $5, updated_at = now()
+		WHERE user_id = $1 AND id = $2
+		RETURNING id`, userID, id, status, res, errArg).Scan(&idOut)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImportJob{}, ErrImportJobNotFound
+	}
+	if err != nil {
+		return ImportJob{}, fmt.Errorf("repo: finish import job run: %w", err)
+	}
+	return s.Get(ctx, userID, id, dek)
+}
+
 // ReadFile returns the DEK-decrypted statement bytes for one of the
 // user's jobs, or ErrImportJobNotFound when the id is not the user's.
 // The 4.5 preview/analyze endpoints and the 4.6 runner need the raw

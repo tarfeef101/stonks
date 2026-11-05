@@ -217,11 +217,12 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// preset" create (the builtins stay read-only code).
 		r.Get("/v1/import-schemas", h.schemasList)
 		r.Post("/v1/import-schemas", h.schemasCreate)
-		// Import jobs (steps 4.1 + 4.5): multipart statement upload
-		// (10 MB cap), the job list and single-GET, and the mapping
+		// Import jobs (steps 4.1 + 4.5 + 4.6): multipart statement
+		// upload (10 MB cap), the job list and single-GET, the mapping
 		// pipeline: the preset list, the per-job analyze / preview /
-		// set-mapping (the run itself lands with step 4.6). The
-		// static /presets segment wins over /{id} (chi routing).
+		// set-mapping, and the run, which persists the mapped rows to
+		// the ledger with dedup. The static /presets segment wins over
+		// /{id} (chi routing).
 		r.Post("/v1/imports", h.postImport)
 		r.Get("/v1/imports", h.importsList)
 		r.Get("/v1/imports/presets", h.importPresets)
@@ -229,6 +230,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Get("/v1/imports/{id}/analyze", h.importAnalyze)
 		r.Post("/v1/imports/{id}/preview", h.importPreview)
 		r.Post("/v1/imports/{id}/mapping", h.importSetMapping)
+		r.Post("/v1/imports/{id}/run", h.importRun)
 	})
 	return r
 }
