@@ -32,11 +32,14 @@ type ImportStore interface {
 	Create(ctx context.Context, userID string, in repo.ImportJobIn, dek []byte) (repo.ImportJob, error)
 	Get(ctx context.Context, userID, id string, dek []byte) (repo.ImportJob, error)
 	List(ctx context.Context, userID string, f repo.ImportJobFilter, dek []byte) ([]repo.ImportJob, error)
+	SetMapping(ctx context.Context, userID, id string, mapping json.RawMessage, dek []byte) (repo.ImportJob, error)
+	ReadFile(ctx context.Context, userID, id string, dek []byte) ([]byte, error)
 }
 
 // importOut is the wire row. FileName is the decrypted original
-// filename. Result is the raw jsonb outcome (null while unset); Error
-// is the failure message (null when unset). Timestamps are
+// filename. Result is the raw jsonb outcome (null while unset), Mapping
+// the confirmed field mapping (null while unset, step 4.5), and Error
+// the failure message (null when unset). Timestamps are
 // bookkeeping and excluded (3.1 convention); the list order
 // (created_at DESC) carries the freshness signal.
 type importOut struct {
@@ -45,6 +48,7 @@ type importOut struct {
 	FileName  string           `json:"file_name"`
 	Status    string           `json:"status"`
 	Result    *json.RawMessage `json:"result"`
+	Mapping   json.RawMessage  `json:"mapping"`
 	Error     *string          `json:"error"`
 }
 
@@ -55,6 +59,7 @@ func toImportOut(j repo.ImportJob) importOut {
 		FileName:  j.FileName,
 		Status:    j.Status,
 		Result:    j.Result,
+		Mapping:   j.Mapping,
 		Error:     j.Error,
 	}
 }

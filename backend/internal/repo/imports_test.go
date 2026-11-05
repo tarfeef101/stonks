@@ -9,7 +9,9 @@ package repo
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -242,6 +244,70 @@ func TestImportJobStore(t *testing.T) {
 		}
 		if errors.Is(err, ErrImportJobNotFound) {
 			t.Fatalf("wrong-DEK error masquerades as not-found: %v", err)
+		}
+	})
+
+	// sameJSON compares two jsonb payloads semantically: postgres
+	// re-serializes (key order, whitespace, number spelling), so the
+	// bytes are never equal and the maps are.
+	sameJSON := func(a, b []byte) bool {
+		var x, y map[string]any
+		if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+			return false
+		}
+		return reflect.DeepEqual(x, y)
+	}
+
+	t.Run("mapping round trip", func(t *testing.T) {
+		file := []byte("date,description,amount\n2026-10-01,Market,-7.10\n")
+		in := ImportJobIn{AccountID: acctA.ID, FileName: "map-check.csv", File: file}
+		created, err := store.Create(ctx, aid, in, a.dek)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if created.Mapping != nil {
+			t.Fatalf("fresh job carries a mapping: %s", created.Mapping)
+		}
+
+		sent := []byte(`{"kind":"csv","map":{"date_posted":{"headers":["Date"],"index":0},"amount":{"index":2}}}`)
+		updated, err := store.SetMapping(ctx, aid, created.ID, sent, a.dek)
+		if err != nil {
+			t.Fatalf("set mapping: %v", err)
+		}
+		if updated.Status != "mapping" {
+			t.Fatalf("updated status = %q, want mapping", updated.Status)
+		}
+		if !sameJSON(updated.Mapping, sent) {
+			t.Fatalf("updated mapping = %s, want %s (semantically)", updated.Mapping, sent)
+		}
+		if !updated.UpdatedAt.After(created.UpdatedAt) {
+			t.Fatalf("updated_at %s is not after created_at %s", updated.UpdatedAt, created.UpdatedAt)
+		}
+
+		// A re-read must match the stored document semantically.
+		got, err := store.Get(ctx, aid, created.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if !sameJSON(got.Mapping, sent) {
+			t.Fatalf("re-read mapping = %s, want %s (semantically)", got.Mapping, sent)
+		}
+
+		// The file bytes survive the mapping update untouched.
+		back, err := store.ReadFile(ctx, aid, created.ID, a.dek)
+		if err != nil {
+			t.Fatalf("read file: %v", err)
+		}
+		if !bytes.Equal(back, file) {
+			t.Fatalf("file = %q, want %q", back, file)
+		}
+
+		// User B sees neither the mapping nor the file.
+		if _, err := store.SetMapping(ctx, bid, created.ID, sent, b.dek); !errors.Is(err, ErrImportJobNotFound) {
+			t.Fatalf("cross-user set mapping: err = %v, want ErrImportJobNotFound", err)
+		}
+		if _, err := store.ReadFile(ctx, bid, created.ID, b.dek); !errors.Is(err, ErrImportJobNotFound) {
+			t.Fatalf("cross-user read file: err = %v, want ErrImportJobNotFound", err)
 		}
 	})
 }

@@ -119,10 +119,12 @@ type handler struct {
 // with categories serve GET /api/v1/summary — any one nil and the
 // affected routes answer 503. budgets serves the budget CRUD routes
 // (step 3.3); notifications serves the notification list/mark-read/
-// unread-count routes (step 3.3); schemas serves
-// GET /api/v1/import-schemas (step 3.3); imports serves the import
-// job routes (step 4.1: POST /api/v1/imports plus the list and
-// single-GET) — any nil and the affected routes answer 503.
+// unread-count routes (step 3.3); schemas serves the import-schema
+// routes (step 3.3: GET /api/v1/import-schemas; step 4.5: POST —
+// save a mapping as a preset); imports serves the import job routes
+// (step 4.1: POST /api/v1/imports plus the list and single-GET; step
+// 4.5: the presets/analyze/preview/mapping pipeline) — any nil and
+// the affected routes answer 503.
 func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
@@ -210,15 +212,23 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Get("/v1/notifications", h.notificationsList)
 		r.Post("/v1/notifications/{id}/read", h.notificationsMarkRead)
 		r.Get("/v1/notifications/unread-count", h.notificationsUnreadCount)
-		// Import schemas (step 3.3): the builtin presets plus the
-		// caller's customs, list only (custom CRUD is step 4.x).
+		// Import schemas (steps 3.3 + 4.5): the builtin presets plus
+		// the caller's customs (list), and the "save mapping as
+		// preset" create (the builtins stay read-only code).
 		r.Get("/v1/import-schemas", h.schemasList)
-		// Import jobs (step 4.1): multipart statement upload (10 MB
-		// cap) plus the job list and single-GET; the mapping/import
-		// pipeline routes land with step 4.3+.
+		r.Post("/v1/import-schemas", h.schemasCreate)
+		// Import jobs (steps 4.1 + 4.5): multipart statement upload
+		// (10 MB cap), the job list and single-GET, and the mapping
+		// pipeline: the preset list, the per-job analyze / preview /
+		// set-mapping (the run itself lands with step 4.6). The
+		// static /presets segment wins over /{id} (chi routing).
 		r.Post("/v1/imports", h.postImport)
 		r.Get("/v1/imports", h.importsList)
+		r.Get("/v1/imports/presets", h.importPresets)
 		r.Get("/v1/imports/{id}", h.importGet)
+		r.Get("/v1/imports/{id}/analyze", h.importAnalyze)
+		r.Post("/v1/imports/{id}/preview", h.importPreview)
+		r.Post("/v1/imports/{id}/mapping", h.importSetMapping)
 	})
 	return r
 }

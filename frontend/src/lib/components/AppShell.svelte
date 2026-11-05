@@ -7,7 +7,10 @@
 	let { children }: { children: Snippet } = $props();
 
 	// Remaining nav entries land with their pages (steps 6.2–6.5, 7.3).
-	const navItems = [{ href: '/', key: 'nav.summary' }] as const;
+	const navItems = [
+		{ href: '/', key: 'nav.summary' },
+		{ href: '/imports', key: 'nav.imports' }
+	] as const;
 </script>
 
 <div class="flex min-h-screen flex-col bg-zinc-50 text-zinc-900">

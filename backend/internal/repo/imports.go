@@ -8,9 +8,11 @@
 // status walks uploaded -> mapping -> importing -> done|failed; the
 // vocabulary mirrors the 0005 named CHECK (import_jobs_status_check) so
 // a bad value is rejected early, not a 23514 surfacing as a 500.
-// Create starts every job at 'uploaded' (the mapping/importing/done/
-// failed transitions are step 4.3+). result (jsonb) and error (text)
-// are NULL until then.
+// Create starts every job at 'uploaded'; SetMapping (step 4.5) stores
+// the user's field mapping and moves it to 'mapping'; the
+// importing/done/failed transitions are the 4.6 runner. result (jsonb),
+// mapping (jsonb) and error (text) are NULL until a later step sets
+// them.
 package repo
 
 import (
@@ -42,8 +44,9 @@ const (
 )
 
 // ImportJob is one import_jobs row. FileName is the DEK-decrypted
-// original filename. Result is the raw jsonb outcome (nil while unset)
-// and Error the failure message (nil when unset).
+// original filename. Result is the raw jsonb outcome (nil while unset),
+// Error the failure message (nil when unset), and Mapping the raw jsonb
+// field mapping the user confirmed (nil while unset, step 4.5).
 type ImportJob struct {
 	ID        string
 	AccountID string
@@ -51,6 +54,7 @@ type ImportJob struct {
 	Status    string
 	Result    *json.RawMessage
 	Error     *string
+	Mapping   json.RawMessage
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -105,7 +109,7 @@ func ValidateFileName(name string) error {
 // key/data mismatch the API surfaces as 500 (the DEK came from the
 // user's own wrapped_dek, so this is corruption, not a client error) —
 // same rule as the other stores.
-func importJobFrom(id, accountID, status string, namePack, result []byte, erro sql.NullString, createdAt, updatedAt time.Time, dek []byte) (ImportJob, error) {
+func importJobFrom(id, accountID, status string, namePack, result, mapping []byte, erro sql.NullString, createdAt, updatedAt time.Time, dek []byte) (ImportJob, error) {
 	name, err := crypto.Open(dek, namePack)
 	if err != nil {
 		return ImportJob{}, fmt.Errorf("repo: decrypt import job %s file name: %w", id, err)
@@ -121,6 +125,9 @@ func importJobFrom(id, accountID, status string, namePack, result []byte, erro s
 	if result != nil {
 		r := json.RawMessage(result)
 		j.Result = &r
+	}
+	if mapping != nil {
+		j.Mapping = json.RawMessage(mapping)
 	}
 	if erro.Valid {
 		e := erro.String
@@ -170,24 +177,24 @@ func (s *ImportJobStore) Create(ctx context.Context, userID string, in ImportJob
 // users). The filename is decrypted under the caller's DEK.
 func (s *ImportJobStore) Get(ctx context.Context, userID, id string, dek []byte) (ImportJob, error) {
 	var (
-		namePack []byte
-		result   []byte
-		erro     sql.NullString
-		j        ImportJob
+		namePack, mapping []byte
+		result            []byte
+		erro              sql.NullString
+		j                 ImportJob
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT account_id, status, file_name_encrypted, result, error,
+		SELECT account_id, status, file_name_encrypted, result, mapping, error,
 		       created_at, updated_at
 		FROM import_jobs
 		WHERE user_id = $1 AND id = $2`, userID, id).
-		Scan(&j.AccountID, &j.Status, &namePack, &result, &erro, &j.CreatedAt, &j.UpdatedAt)
+		Scan(&j.AccountID, &j.Status, &namePack, &result, &mapping, &erro, &j.CreatedAt, &j.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ImportJob{}, ErrImportJobNotFound
 	}
 	if err != nil {
 		return ImportJob{}, fmt.Errorf("repo: get import job: %w", err)
 	}
-	return importJobFrom(id, j.AccountID, j.Status, namePack, result, erro, j.CreatedAt, j.UpdatedAt, dek)
+	return importJobFrom(id, j.AccountID, j.Status, namePack, result, mapping, erro, j.CreatedAt, j.UpdatedAt, dek)
 }
 
 // List returns a page of the user's import jobs, newest first
@@ -204,7 +211,7 @@ func (s *ImportJobStore) List(ctx context.Context, userID string, f ImportJobFil
 		f.Offset = 0
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, account_id, status, file_name_encrypted, result, error,
+		SELECT id, account_id, status, file_name_encrypted, result, mapping, error,
 		       created_at, updated_at
 		FROM import_jobs
 		WHERE user_id = $1
@@ -218,15 +225,15 @@ func (s *ImportJobStore) List(ctx context.Context, userID string, f ImportJobFil
 	for rows.Next() {
 		var (
 			id, accountID, status string
-			namePack              []byte
+			namePack, mapping     []byte
 			result                []byte
 			erro                  sql.NullString
 			createdAt, updatedAt  time.Time
 		)
-		if err := rows.Scan(&id, &accountID, &status, &namePack, &result, &erro, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&id, &accountID, &status, &namePack, &result, &mapping, &erro, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("repo: scan import job: %w", err)
 		}
-		j, err := importJobFrom(id, accountID, status, namePack, result, erro, createdAt, updatedAt, dek)
+		j, err := importJobFrom(id, accountID, status, namePack, result, mapping, erro, createdAt, updatedAt, dek)
 		if err != nil {
 			return nil, err
 		}
@@ -236,4 +243,50 @@ func (s *ImportJobStore) List(ctx context.Context, userID string, f ImportJobFil
 		return nil, fmt.Errorf("repo: list import jobs: %w", err)
 	}
 	return out, nil
+}
+
+// SetMapping stores the confirmed field mapping (step 4.5: the user
+// chose a column per app field in the UI) and moves the job to status
+// 'mapping'. The mapping is validated by the server before it gets
+// here; the repo just persists it. A job the caller does not own is
+// ErrImportJobNotFound (existence is not disclosed); the returned row
+// is the re-read (with the filename decrypted under dek), like the
+// other Update methods.
+func (s *ImportJobStore) SetMapping(ctx context.Context, userID, id string, mapping json.RawMessage, dek []byte) (ImportJob, error) {
+	var idOut string
+	err := s.pool.QueryRow(ctx, `
+		UPDATE import_jobs
+		SET mapping = $3, status = 'mapping', updated_at = now()
+		WHERE user_id = $1 AND id = $2
+		RETURNING id`, userID, id, string(mapping)).Scan(&idOut)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImportJob{}, ErrImportJobNotFound
+	}
+	if err != nil {
+		return ImportJob{}, fmt.Errorf("repo: set import job mapping: %w", err)
+	}
+	return s.Get(ctx, userID, id, dek)
+}
+
+// ReadFile returns the DEK-decrypted statement bytes for one of the
+// user's jobs, or ErrImportJobNotFound when the id is not the user's.
+// The 4.5 preview/analyze endpoints and the 4.6 runner need the raw
+// file without the caller having to re-upload it.
+func (s *ImportJobStore) ReadFile(ctx context.Context, userID, id string, dek []byte) ([]byte, error) {
+	var pack []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT file_encrypted
+		FROM import_jobs
+		WHERE user_id = $1 AND id = $2`, userID, id).Scan(&pack)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrImportJobNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("repo: read import job file: %w", err)
+	}
+	file, err := crypto.Open(dek, pack)
+	if err != nil {
+		return nil, fmt.Errorf("repo: decrypt import job %s file: %w", id, err)
+	}
+	return file, nil
 }

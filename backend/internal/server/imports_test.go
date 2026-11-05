@@ -1,13 +1,16 @@
-// Route tests for the import job endpoints (plan step 4.1):
+// Route tests for the import job endpoints (plan steps 4.1 + 4.5):
 // POST /api/v1/imports (multipart upload: file + account_id, 10 MB cap),
-// GET /api/v1/imports (limit/offset query params, newest first) and
-// GET /api/v1/imports/{id}. All in-memory: memImportStore mirrors the
+// GET /api/v1/imports (limit/offset query params, newest first),
+// GET /api/v1/imports/{id}, plus the 4.5 mapping endpoints on the
+// seeded jobs (analyze, preview, set-mapping, the preset list in
+// importmap_test.go). All in-memory: memImportStore mirrors the
 // repo.ImportJobStore semantics the handlers depend on (filename
 // validation, the account must belong to the caller, limit 50/100 clamp,
-// offset >= 0, created_at DESC then id DESC order, user-id scoping) and
-// injects per-operation errors for the mapping table. Sealing under the
-// DEK stays with the repo testcontainer tests (2.5a convention); the
-// shared helpers (authHdr, apiErr, idFrom, nextTestID, doReq, listIDs,
+// offset >= 0, created_at DESC then id DESC order, user-id scoping,
+// SetMapping/ReadFile scope by the account's owner) and injects
+// per-operation errors for the mapping table. Sealing under the DEK
+// stays with the repo testcontainer tests (2.5a convention); the shared
+// helpers (authHdr, apiErr, idFrom, nextTestID, doReq, listIDs,
 // sameIDs) live in accounts_test.go, settings_test.go and
 // notifications_test.go.
 package server
@@ -46,10 +49,15 @@ type memImportStore struct {
 	// accounts maps account id -> owner user id.
 	accounts map[string]string
 	rows     []repo.ImportJob
+	// files maps job id -> uploaded file bytes (step 4.5: the mapping
+	// and preview endpoints read the file back through the store).
+	files map[string][]byte
 
-	createErr error
-	getErr    error
-	listErr   error
+	createErr     error
+	getErr        error
+	listErr       error
+	setMappingErr error
+	readFileErr   error
 }
 
 func (m *memImportStore) Create(_ context.Context, userID string, in repo.ImportJobIn, _ []byte) (repo.ImportJob, error) {
@@ -123,6 +131,39 @@ func (m *memImportStore) List(_ context.Context, userID string, f repo.ImportJob
 	return mine[f.Offset:end], nil
 }
 
+func (m *memImportStore) SetMapping(_ context.Context, userID, id string, mapping json.RawMessage, _ []byte) (repo.ImportJob, error) {
+	if m.setMappingErr != nil {
+		return repo.ImportJob{}, m.setMappingErr
+	}
+	for i, j := range m.rows {
+		if j.ID != id || m.accounts[j.AccountID] != userID {
+			continue
+		}
+		m.rows[i].Mapping = mapping
+		m.rows[i].Status = "mapping"
+		m.rows[i].UpdatedAt = time.Now().UTC()
+		return m.rows[i], nil
+	}
+	return repo.ImportJob{}, repo.ErrImportJobNotFound
+}
+
+func (m *memImportStore) ReadFile(_ context.Context, userID, id string, _ []byte) ([]byte, error) {
+	if m.readFileErr != nil {
+		return nil, m.readFileErr
+	}
+	for _, j := range m.rows {
+		if j.ID != id || m.accounts[j.AccountID] != userID {
+			continue
+		}
+		f, ok := m.files[id]
+		if !ok {
+			return nil, repo.ErrImportJobNotFound
+		}
+		return f, nil
+	}
+	return nil, repo.ErrImportJobNotFound
+}
+
 // seedJob appends a row directly to the store (the app-side writers do
 // not exist until step 4.3+) with a pinned created_at and returns its
 // id. The row's account must already be in the store's accounts map;
@@ -139,6 +180,17 @@ func seedJob(store *memImportStore, accountID, fileName string, createdAt time.T
 	}
 	store.rows = append(store.rows, j)
 	return j.ID
+}
+
+// seedJobFile is seedJob plus the uploaded file bytes (the 4.5
+// analyze/preview endpoints read the file back through the store).
+func seedJobFile(store *memImportStore, accountID, fileName string, createdAt time.Time, file []byte) string {
+	id := seedJob(store, accountID, fileName, createdAt)
+	if store.files == nil {
+		store.files = map[string][]byte{}
+	}
+	store.files[id] = file
+	return id
 }
 
 // newImportsServer builds a full router with a live token verifier, an

@@ -1,12 +1,14 @@
-// Route tests for the import-schema endpoint (plan step 3.3):
-// GET /api/v1/import-schemas over the in-memory memSchemaStore, which
-// mirrors the repo.SchemaStore contract the handler depends on:
+// Route tests for the import-schema endpoints (plan steps 3.3 + 4.5):
+// GET /api/v1/import-schemas and POST /api/v1/import-schemas ("save
+// mapping as preset") over the in-memory memSchemaStore, which mirrors
+// the repo.SchemaStore contract the handlers depend on:
 // EnsureBuiltins runs first (and is recorded), the list is the three
 // global builtins (insertion order, standing in for created_at, id)
-// followed by the caller's customs (insertion order), and other users'
-// customs never leak in. Custom schema CRUD is step 4.x; this step only
-// serves the list. The shared helpers (authHdr, apiErr, nextTestID,
-// doReq) live in accounts_test.go and settings_test.go.
+// followed by the caller's customs (insertion order), other users'
+// customs never leak in, Get sees builtins and the caller's own rows,
+// and Create names the id, trims the name and stores the spec
+// verbatim. The shared helpers (authHdr, apiErr, nextTestID, doReq)
+// live in accounts_test.go and settings_test.go.
 package server
 
 import (
@@ -15,6 +17,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"finance-tracker/internal/repo"
@@ -28,17 +31,21 @@ type memSchemaRow struct {
 	sc     repo.Schema
 }
 
-// memSchemaStore mirrors the repo.SchemaStore semantics the handler
-// depends on: EnsureBuiltins is recorded (and its error passed through),
-// and List answers the builtins first, then the caller's customs, both
-// in insertion order (the repo orders by builtin DESC, created_at, id),
-// excluding every other user's customs.
+// memSchemaStore mirrors the repo.SchemaStore semantics the handlers
+// depend on: EnsureBuiltins is recorded (and its error passed through),
+// List answers the builtins first, then the caller's customs, both in
+// insertion order (the repo orders by builtin DESC, created_at, id),
+// excluding every other user's customs, Get sees builtins and the
+// caller's own rows only, and Create trims the name, mints the id and
+// stores the spec verbatim (Builtin: false).
 type memSchemaStore struct {
 	rows []memSchemaRow
 
 	ensureErr error
 	listErr   error
 	ensured   bool
+	getErr    error
+	createErr error
 }
 
 // memBuiltinSchemas mirrors repo.builtinSchemas (unexported — the route
@@ -91,6 +98,33 @@ func (m *memSchemaStore) List(_ context.Context, userID string, _ []byte) ([]rep
 		}
 	}
 	return out, nil
+}
+
+func (m *memSchemaStore) Get(_ context.Context, userID, id string, _ []byte) (repo.Schema, error) {
+	if m.getErr != nil {
+		return repo.Schema{}, m.getErr
+	}
+	for _, r := range m.rows {
+		if r.sc.ID == id && (r.sc.Builtin || r.userID == userID) {
+			return r.sc, nil
+		}
+	}
+	return repo.Schema{}, repo.ErrSchemaNotFound
+}
+
+func (m *memSchemaStore) Create(_ context.Context, userID string, in repo.SchemaIn, _ []byte) (repo.Schema, error) {
+	if m.createErr != nil {
+		return repo.Schema{}, m.createErr
+	}
+	sc := repo.Schema{
+		ID:      nextTestID(),
+		Name:    strings.TrimSpace(in.Name),
+		Kind:    in.Kind,
+		Builtin: false,
+		Spec:    in.Spec,
+	}
+	m.rows = append(m.rows, memSchemaRow{userID: userID, sc: sc})
+	return sc, nil
 }
 
 // newSchemasServer builds a full router with a live token verifier, an
@@ -273,5 +307,95 @@ func TestImportSchemasAuth(t *testing.T) {
 		if c, m := apiErr(t, out); c != codeInternal || m != "database not configured" {
 			t.Errorf("envelope = %s/%q, want internal/database not configured", c, m)
 		}
+	})
+}
+
+// TestImportSchemasCreate covers POST /api/v1/import-schemas: a valid
+// document is stored (name trimmed, spec verbatim) and shows up in the
+// caller's list; each check in the ladder (body decode, name, kind
+// vocabulary, spec shape, kind/spec agreement) fails with its own 400
+// and writes no row; a store error is a 500.
+func TestImportSchemasCreate(t *testing.T) {
+	validSpec := `{"kind":"csv","map":{"amount":{"index":2}}}`
+
+	t.Run("valid document is stored and listed", func(t *testing.T) {
+		store := &memSchemaStore{}
+		h, key := newSchemasServer(t, store)
+		hdr := authHdr(mintIdentityToken(t, key, "sch-cr", "cr@localhost", "CR", "cr"))
+		body := `{"name":"  Padded Name  ","kind":"csv","spec":` + validSpec + `}`
+		code, out := doReq(t, h, http.MethodPost, "/api/v1/import-schemas", body, hdr)
+		if code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body %s)", code, out)
+		}
+		var row schemaOut
+		if err := json.Unmarshal([]byte(out), &row); err != nil {
+			t.Fatalf("decode: %v (body %s)", err, out)
+		}
+		if row.Name != "Padded Name" || row.Kind != "csv" || row.Builtin {
+			t.Errorf("created row = %+v, want trimmed name, kind csv, builtin false", row)
+		}
+		if string(row.Spec) != validSpec {
+			t.Errorf("spec = %s, want the sent bytes verbatim", row.Spec)
+		}
+		if len(store.rows) != 1 || store.rows[0].sc.Name != "Padded Name" {
+			t.Errorf("store = %+v, want exactly the one trimmed row", store.rows)
+		}
+
+		// The new preset is visible in the caller's list.
+		code, out = doReq(t, h, http.MethodGet, "/api/v1/import-schemas", "", hdr)
+		if code != http.StatusOK {
+			t.Fatalf("list status = %d, want 200 (body %s)", code, out)
+		}
+		var rows []schemaOut
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("decode list: %v (body %s)", err, out)
+		}
+		found := false
+		for _, r := range rows {
+			if r.ID == row.ID && r.Name == "Padded Name" && !r.Builtin {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("list of %d rows does not contain the new preset", len(rows))
+		}
+	})
+
+	t.Run("invalid documents are 400 without writing", func(t *testing.T) {
+		store := &memSchemaStore{}
+		h, key := newSchemasServer(t, store)
+		hdr := authHdr(mintIdentityToken(t, key, "sch-cb", "cb@localhost", "CB", "cb"))
+		cases := []struct {
+			name string
+			body string
+			msg  string
+		}{
+			{"malformed body", `{not json`, "invalid request body"},
+			{"empty name", `{"name":"   ","kind":"csv","spec":` + validSpec + `}`, "name must not be empty"},
+			{"name too long", `{"name":"` + strings.Repeat("a", 256) + `","kind":"csv","spec":` + validSpec + `}`, "name must be at most 255 characters"},
+			{"bad kind", `{"name":"Bad Kind","kind":"yaml","spec":` + validSpec + `}`, "kind must be one of csv, ofx, json"},
+			{"spec not a document", `{"name":"Bad Spec","kind":"csv","spec":"nope"}`, "spec must be a valid mapping document"},
+			{"spec null", `{"name":"Null Spec","kind":"csv","spec":null}`, "kind must be one of csv, ofx, json"},
+			{"empty csv spec", `{"name":"Empty CSV","kind":"csv","spec":{"kind":"csv","map":{}}}`, "csv mapping needs at least one field"},
+			{"kind/spec mismatch", `{"name":"Mismatch","kind":"ofx","spec":{"kind":"csv","map":{"amount":{"index":2}}}}`, "kind must match the spec"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				code, out := doReq(t, h, http.MethodPost, "/api/v1/import-schemas", tc.body, hdr)
+				wantAPIError(t, code, out, http.StatusBadRequest, "invalid_request", tc.msg)
+				if len(store.rows) != 0 {
+					t.Fatalf("store has %d rows, want none", len(store.rows))
+				}
+			})
+		}
+	})
+
+	t.Run("create store error is 500", func(t *testing.T) {
+		store := &memSchemaStore{createErr: errors.New("boom")}
+		h, key := newSchemasServer(t, store)
+		hdr := authHdr(mintIdentityToken(t, key, "sch-ce", "ce@localhost", "CE", "ce"))
+		body := `{"name":"Boom","kind":"csv","spec":` + validSpec + `}`
+		code, out := doReq(t, h, http.MethodPost, "/api/v1/import-schemas", body, hdr)
+		wantAPIError(t, code, out, http.StatusInternalServerError, "internal", "schema operation failed")
 	})
 }

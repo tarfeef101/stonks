@@ -30,7 +30,8 @@ export class ApiError extends Error {
 }
 
 export interface ApiInit extends Omit<RequestInit, 'body'> {
-	/** JSON-serialised unless already a string. */
+	/** JSON-serialised unless a string (sent as-is) or FormData
+	 * (multipart — the browser sets the content-type boundary). */
 	body?: unknown;
 }
 
@@ -43,6 +44,8 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
 	let body: BodyInit | null = null;
 	if (init.body !== undefined) {
 		if (typeof init.body === 'string') {
+			body = init.body;
+		} else if (init.body instanceof FormData) {
 			body = init.body;
 		} else {
 			body = JSON.stringify(init.body);
