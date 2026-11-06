@@ -48,17 +48,28 @@ type memTxRow struct {
 // filter set (repeatable account ids, category_id ""=uncategorized
 // only, inclusive date bounds, min/max amounts, the 1000-row search
 // candidate window, the date_posted DESC / id DESC ordering), and the
-// per-user period aggregation. The per-op error fields exercise the
-// handler's error mapping (real failures need a DB).
+// per-user period aggregation (same account filter as List; every call
+// is recorded in aggregateCalls so tests can assert the handler's
+// window math). The per-op error fields exercise the handler's error
+// mapping (real failures need a DB).
 type memTxStore struct {
-	rows         []memTxRow
-	accounts     map[string]map[string]bool // userID -> owned account ids
-	categories   map[string]map[string]bool // userID -> owned category ids
-	listErr      error
-	createErr    error
-	updateErr    error
-	deleteErr    error
-	aggregateErr error
+	rows           []memTxRow
+	accounts       map[string]map[string]bool // userID -> owned account ids
+	categories     map[string]map[string]bool // userID -> owned category ids
+	listErr        error
+	createErr      error
+	updateErr      error
+	deleteErr      error
+	aggregateErr   error
+	aggregateCalls []aggregateCall
+}
+
+// aggregateCall is one recorded Aggregate invocation (bounds UTC-normalized
+// as passed; accountIDs copied so later mutation cannot rewrite history).
+type aggregateCall struct {
+	from       time.Time
+	to         time.Time
+	accountIDs []string
 }
 
 func (m *memTxStore) ownAccount(userID, id string) bool {
@@ -368,7 +379,12 @@ func pageTx(rows []repo.Transaction, offset, limit int) []repo.Transaction {
 	return rows[offset:end]
 }
 
-func (m *memTxStore) Aggregate(_ context.Context, userID string, from, to time.Time) ([]repo.CategorySpend, error) {
+func (m *memTxStore) Aggregate(_ context.Context, userID string, from, to time.Time, accountIDs []string) ([]repo.CategorySpend, error) {
+	m.aggregateCalls = append(m.aggregateCalls, aggregateCall{
+		from:       from,
+		to:         to,
+		accountIDs: append([]string(nil), accountIDs...),
+	})
 	if m.aggregateErr != nil {
 		return nil, m.aggregateErr
 	}
@@ -379,6 +395,18 @@ func (m *memTxStore) Aggregate(_ context.Context, userID string, from, to time.T
 	for _, r := range m.rows {
 		if r.userID != userID {
 			continue
+		}
+		if len(accountIDs) > 0 {
+			in := false
+			for _, a := range accountIDs {
+				if r.tx.AccountID == a {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
+			}
 		}
 		d := dateOnly(r.tx.DatePosted)
 		if d < dateOnly(from) || d > dateOnly(to) {

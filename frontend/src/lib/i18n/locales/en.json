@@ -13,9 +13,26 @@
 		"mortgage": "Mortgage",
 		"settings": "Settings"
 	},
-	"home": {
-		"heading": "Personal Finance Tracker",
-		"placeholder": "The app shell is live. Summary, budgets, explore, and dashboards pages land in step 6.x; mortgage tools in step 7.x."
+	"summary": {
+		"heading": "Summary",
+		"intro": "Your money for the period: totals, spend by category against your budget, and the recent trend.",
+		"sign_in_prompt": "Sign in to see your summary.",
+		"period_label": "Period",
+		"period_month": "Month",
+		"period_quarter": "Quarter",
+		"period_year": "Year",
+		"account_label": "Account",
+		"all_accounts": "All accounts",
+		"loading": "Loading your summary…",
+		"empty": "Nothing to show for this period yet.",
+		"kpi_spend": "Spend",
+		"kpi_income": "Income",
+		"kpi_net": "Net",
+		"trend_title": "Net — last 6 periods",
+		"trend_aria": "Line chart of the net amount over the last six periods, oldest to newest.",
+		"categories_title": "By category",
+		"uncategorized": "Uncategorized",
+		"over_budget": "Over budget"
 	},
 	"explore": {
 		"heading": "Explore",

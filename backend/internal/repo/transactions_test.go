@@ -586,10 +586,13 @@ func TestDedupHash(t *testing.T) {
 	}
 }
 
-// TestTransactionAggregate exercises Aggregate (plan step 3.2): per-user
-// October-2026 fixtures across categorized, uncategorized, and a
-// net-zero group, plus rows just outside the period and a foreign user's
-// row. One fresh testcontainer (the per-Test-fn convention).
+// TestTransactionAggregate exercises Aggregate (plan step 3.2, extended
+// in 6.2 with the account filter): per-user October-2026 fixtures
+// across categorized, uncategorized, and a net-zero group, plus rows
+// just outside the period, a second account's in-period rows (visible
+// only to the unfiltered and the second-account aggregations), and a
+// foreign user's row. One fresh testcontainer (the per-Test-fn
+// convention).
 func TestTransactionAggregate(t *testing.T) {
 	env := newTestEnv(t, "agg-a", "agg-b")
 	tx := NewTransactionStore(env.pool)
@@ -603,6 +606,10 @@ func TestTransactionAggregate(t *testing.T) {
 	aAcct, err := acct.Create(ctx, aid, AccountIn{Name: "Agg Bank", Type: "bank", Currency: "USD"}, a.dek)
 	if err != nil {
 		t.Fatalf("create a account: %v", err)
+	}
+	aAcct2, err := acct.Create(ctx, aid, AccountIn{Name: "Agg Bank 2", Type: "bank", Currency: "USD"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a account 2: %v", err)
 	}
 	bAcct, err := acct.Create(ctx, bid, AccountIn{Name: "Agg Bank B", Type: "bank", Currency: "USD"}, b.dek)
 	if err != nil {
@@ -645,6 +652,10 @@ func TestTransactionAggregate(t *testing.T) {
 	seedNone("+5", "2026-10-07", "unfiled B")
 	seedCat(zero.ID, "+2.50", "2026-10-08", "zero A")
 	seedCat(zero.ID, "-2.50", "2026-10-09", "zero B")
+	// User a's second account: in-period rows only the account filter
+	// should expose (6.2).
+	seed(aAcct2.ID, a.dek, "2026-10-10", "-9.00", &groc.ID, "groceries A2")
+	seed(aAcct2.ID, a.dek, "2026-10-11", "+4.00", nil, "unfiled A2")
 	// Just outside the period, in a group that would move if the date
 	// bounds leaked: the zero group must stay 2.50 / 2.50 / 0.00.
 	seedCat(zero.ID, "-2.50", "2026-09-30", "zero before")
@@ -659,13 +670,14 @@ func TestTransactionAggregate(t *testing.T) {
 		t.Fatalf("seed b row: %v", err)
 	}
 
-	got, err := tx.Aggregate(ctx, aid, dateOf("2026-10-01"), dateOf("2026-10-31"))
+	// No account filter: both of user a's accounts.
+	got, err := tx.Aggregate(ctx, aid, dateOf("2026-10-01"), dateOf("2026-10-31"), nil)
 	if err != nil {
 		t.Fatalf("aggregate: %v", err)
 	}
 	want := []CategorySpend{
-		{CategoryID: "", Spend: "1.23", Income: "5.00", Net: "3.77"},
-		{CategoryID: groc.ID, Spend: "51.00", Income: "10.00", Net: "-41.00"},
+		{CategoryID: "", Spend: "1.23", Income: "9.00", Net: "7.77"},
+		{CategoryID: groc.ID, Spend: "60.00", Income: "10.00", Net: "-50.00"},
 		{CategoryID: coffee.ID, Spend: "3.50", Income: "0.00", Net: "-3.50"},
 		{CategoryID: zero.ID, Spend: "2.50", Income: "2.50", Net: "0.00"},
 	}
@@ -688,19 +700,46 @@ func TestTransactionAggregate(t *testing.T) {
 	}
 
 	// An empty period (and a foreign user's period) yield zero groups.
-	none, err := tx.Aggregate(ctx, aid, dateOf("2026-08-01"), dateOf("2026-08-31"))
+	none, err := tx.Aggregate(ctx, aid, dateOf("2026-08-01"), dateOf("2026-08-31"), nil)
 	if err != nil {
 		t.Fatalf("aggregate empty period: %v", err)
 	}
 	if len(none) != 0 {
 		t.Errorf("empty period must have no groups, got %+v", none)
 	}
-	other, err := tx.Aggregate(ctx, bid, dateOf("2026-10-01"), dateOf("2026-10-31"))
+	other, err := tx.Aggregate(ctx, bid, dateOf("2026-10-01"), dateOf("2026-10-31"), nil)
 	if err != nil {
 		t.Fatalf("aggregate user b: %v", err)
 	}
 	if len(other) != 1 || other[0] != (CategorySpend{CategoryID: "", Spend: "100.00", Income: "0.00", Net: "-100.00"}) {
 		t.Errorf("user b aggregation wrong: %+v", other)
+	}
+
+	// Account filter (6.2): only the second account's rows survive.
+	sub, err := tx.Aggregate(ctx, aid, dateOf("2026-10-01"), dateOf("2026-10-31"), []string{aAcct2.ID})
+	if err != nil {
+		t.Fatalf("aggregate account filter: %v", err)
+	}
+	wantSub := []CategorySpend{
+		{CategoryID: "", Spend: "0.00", Income: "4.00", Net: "4.00"},
+		{CategoryID: groc.ID, Spend: "9.00", Income: "0.00", Net: "-9.00"},
+	}
+	if len(sub) != len(wantSub) {
+		t.Fatalf("account filter: want %d groups, got %d: %+v", len(wantSub), len(sub), sub)
+	}
+	for i, w := range wantSub {
+		if sub[i] != w {
+			t.Errorf("account filter group %d: want %+v, got %+v", i, w, sub[i])
+		}
+	}
+
+	// An unknown (well-formed) account id contributes nothing.
+	unk, err := tx.Aggregate(ctx, aid, dateOf("2026-10-01"), dateOf("2026-10-31"), []string{"11111111-2222-3333-4444-555555555555"})
+	if err != nil {
+		t.Fatalf("aggregate unknown account: %v", err)
+	}
+	if len(unk) != 0 {
+		t.Errorf("unknown account id must contribute no groups, got %+v", unk)
 	}
 }
 

@@ -8,6 +8,14 @@
 // target but no transactions still shows up (0.00s). The uncategorized
 // group carries null category_id and category_name; a target key no
 // category row answers (dangling) carries a null category_name too.
+//
+// Optional parameters (6.2): trend=N (integer 1..24) appends a "trend"
+// array of the last N period windows, oldest first, each carrying the
+// window's inclusive from/to bounds and spend / income / net; without
+// the parameter the response carries no trend key at all. A repeatable
+// account_id=UUID restricts the aggregation to those accounts: an
+// empty value is skipped, a malformed value is a 400, an unknown id
+// simply contributes nothing (200 with the unfiltered shape).
 package server
 
 import (
@@ -26,12 +34,25 @@ import (
 // summaryOut is the response body. From/To are the inclusive
 // "YYYY-MM-DD" bounds of the computed period; Totals cover the
 // transaction groups only (target-only groups contribute nothing).
+// Trend is nil (and the key omitted) unless trend=N was requested.
 type summaryOut struct {
 	Period string         `json:"period"`
 	From   string         `json:"from"`
 	To     string         `json:"to"`
 	Groups []summaryGroup `json:"groups"`
 	Totals summaryTotals  `json:"totals"`
+	Trend  []trendPoint   `json:"trend,omitempty"`
+}
+
+// trendPoint is one window of summaryOut.Trend: the inclusive
+// "YYYY-MM-DD" bounds of a past period window plus its totals in
+// canonical 2-decimal strings (computed like Totals).
+type trendPoint struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Spend  string `json:"spend"`
+	Income string `json:"income"`
+	Net    string `json:"net"`
 }
 
 type summaryGroup struct {
@@ -81,6 +102,23 @@ func periodBounds(period string, now time.Time) (time.Time, time.Time) {
 	}
 }
 
+// trendShift returns now pulled back by k periods of the given kind,
+// so that periodBounds(period, trendShift(period, now, k)) is the
+// k-th window before the current one (k = 0 is the current window
+// itself). Shifting by whole periods keeps the window shape: month
+// windows are calendar months, quarter windows stay inside the same
+// quarter shape one block back, year windows stay calendar years.
+func trendShift(period string, now time.Time, k int) time.Time {
+	switch period {
+	case "quarter":
+		return now.AddDate(0, -3*k, 0)
+	case "year":
+		return now.AddDate(-k, 0, 0)
+	default: // month
+		return now.AddDate(0, -k, 0)
+	}
+}
+
 // parseCents parses a canonical 2-decimal amount string to int64 cents
 // exactly (no float involved). Canonical strings always carry two
 // fractional digits; the pad/trim is belt-and-braces.
@@ -119,7 +157,25 @@ func formatCents(c int64) string {
 	return fmt.Sprintf("%s%d.%02d", sign, c/100, c%100)
 }
 
-// summary serves GET /api/v1/summary?period=month|quarter|year&group_by=category.
+// groupCents parses one aggregation group's three canonical amount
+// strings into int64 cents (the shared parse behind the top-level
+// Totals and each trend point).
+func groupCents(g repo.CategorySpend) (spend, income, net int64, err error) {
+	if spend, err = parseCents(g.Spend); err != nil {
+		return 0, 0, 0, err
+	}
+	if income, err = parseCents(g.Income); err != nil {
+		return 0, 0, 0, err
+	}
+	if net, err = parseCents(g.Net); err != nil {
+		return 0, 0, 0, err
+	}
+	return spend, income, net, nil
+}
+
+// summary serves GET /api/v1/summary?period=month|quarter|year&group_by=category
+// with the optional 6.2 parameters trend=1..24 and repeatable
+// account_id=UUID (see the package doc).
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	if h.transactions == nil || h.budgets == nil || h.categories == nil {
 		notConfigured(w)
@@ -143,9 +199,39 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "group_by must be category")
 		return
 	}
+	trend := 0
+	if s := q.Get("trend"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "trend must be an integer")
+			return
+		}
+		if n < 1 || n > 24 {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "trend must be between 1 and 24")
+			return
+		}
+		trend = n
+	}
+	// account_id is repeatable, exactly like the transactions list
+	// filter: empty values are skipped, malformed values are a 400,
+	// unknown ids stay a 200 (they just match no rows).
+	var accountIDs []string
+	for _, a := range q["account_id"] {
+		if a == "" {
+			continue
+		}
+		if !uuidShapeOK(a) {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "account_id must be a valid UUID")
+			return
+		}
+		accountIDs = append(accountIDs, a)
+	}
 
-	from, to := periodBounds(period, time.Now())
-	groups, err := h.transactions.Aggregate(r.Context(), c.row.ID, from, to)
+	// One clock read, shared by the top-level window and every trend
+	// shift: the k=0 trend point must be exactly the top-level from/to.
+	now := time.Now()
+	from, to := periodBounds(period, now)
+	groups, err := h.transactions.Aggregate(r.Context(), c.row.ID, from, to, accountIDs)
 	if err != nil {
 		h.transactionError(w, "aggregate", err)
 		return
@@ -266,25 +352,46 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	// Totals in int64 cents over the transaction groups only.
 	var tSpend, tIncome, tNet int64
 	for _, g := range groups {
-		sp, err := parseCents(g.Spend)
-		if err != nil {
-			slog.Error("summary totals could not be computed", "error", err)
-			writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary totals could not be computed")
-			return
-		}
-		inc, err := parseCents(g.Income)
-		if err != nil {
-			slog.Error("summary totals could not be computed", "error", err)
-			writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary totals could not be computed")
-			return
-		}
-		net, err := parseCents(g.Net)
+		sp, inc, net, err := groupCents(g)
 		if err != nil {
 			slog.Error("summary totals could not be computed", "error", err)
 			writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary totals could not be computed")
 			return
 		}
 		tSpend, tIncome, tNet = tSpend+sp, tIncome+inc, tNet+net
+	}
+
+	// Trend: the last N windows, oldest first (k = N-1 down to 0).
+	// Same account filter as the top-level window; totals computed the
+	// same way. A nil Trend stays nil and drops out of the JSON.
+	var trendPts []trendPoint
+	if trend > 0 {
+		trendPts = make([]trendPoint, 0, trend)
+		for k := trend - 1; k >= 0; k-- {
+			tf, tt := periodBounds(period, trendShift(period, now, k))
+			tg, err := h.transactions.Aggregate(r.Context(), c.row.ID, tf, tt, accountIDs)
+			if err != nil {
+				h.transactionError(w, "aggregate", err)
+				return
+			}
+			var ptSpend, ptIncome, ptNet int64
+			for _, g := range tg {
+				sp, inc, net, err := groupCents(g)
+				if err != nil {
+					slog.Error("summary trend could not be computed", "error", err)
+					writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary trend could not be computed")
+					return
+				}
+				ptSpend, ptIncome, ptNet = ptSpend+sp, ptIncome+inc, ptNet+net
+			}
+			trendPts = append(trendPts, trendPoint{
+				From:   dateOnly(tf),
+				To:     dateOnly(tt),
+				Spend:  formatCents(ptSpend),
+				Income: formatCents(ptIncome),
+				Net:    formatCents(ptNet),
+			})
+		}
 	}
 
 	resp := summaryOut{
@@ -297,6 +404,7 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 			Income: formatCents(tIncome),
 			Net:    formatCents(tNet),
 		},
+		Trend: trendPts,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

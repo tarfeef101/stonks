@@ -33,7 +33,7 @@ type TransactionStore interface {
 	Upsert(ctx context.Context, userID string, in repo.TransactionIn, dek []byte) (repo.Transaction, bool, error)
 	Update(ctx context.Context, userID, id string, p repo.TransactionPatch, dek []byte) (repo.Transaction, error)
 	Delete(ctx context.Context, userID, id string) error
-	Aggregate(ctx context.Context, userID string, from, to time.Time) ([]repo.CategorySpend, error)
+	Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]repo.CategorySpend, error)
 }
 
 // Wire DTOs. transactionOut excludes DedupHash (re-import identity) and

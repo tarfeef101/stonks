@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,15 @@ func TestSummary(t *testing.T) {
 	if resp.Totals != wantTotals {
 		t.Errorf("totals = %+v, want %+v", resp.Totals, wantTotals)
 	}
+
+	// Byte-compat (6.2): without trend=N the response must not carry a
+	// trend key at all (the nil slice omitempty).
+	if resp.Trend != nil {
+		t.Errorf("trend = %+v, want nil without the param", resp.Trend)
+	}
+	if strings.Contains(out, "trend") {
+		t.Errorf("body carries a trend key without the param: %s", out)
+	}
 }
 
 // TestSummaryPeriods covers the quarter and year bounds with an empty
@@ -149,10 +159,15 @@ func TestSummaryValidation(t *testing.T) {
 	hdr := authHdr(tok)
 
 	for qs, want := range map[string]string{
-		"?period=week":       "period must be one of month, quarter, year",
-		"?period=Month":      "period must be one of month, quarter, year",
-		"?group_by=account":  "group_by must be category",
-		"?group_by=Category": "group_by must be category",
+		"?period=week":         "period must be one of month, quarter, year",
+		"?period=Month":        "period must be one of month, quarter, year",
+		"?group_by=account":    "group_by must be category",
+		"?group_by=Category":   "group_by must be category",
+		"?trend=abc":           "trend must be an integer",
+		"?trend=0":             "trend must be between 1 and 24",
+		"?trend=25":            "trend must be between 1 and 24",
+		"?trend=-1":            "trend must be between 1 and 24",
+		"?account_id=notauuid": "account_id must be a valid UUID",
 	} {
 		t.Run(qs, func(t *testing.T) {
 			code, out := doReq(t, h, http.MethodGet, "/api/v1/summary"+qs, "", hdr)
@@ -176,6 +191,237 @@ func TestSummaryValidation(t *testing.T) {
 	}
 	if resp.Period != "month" {
 		t.Errorf("default period = %q, want month", resp.Period)
+	}
+}
+
+// TestSummaryTrend covers the 6.2 trend parameter: month trend=3 with
+// fixtures at the 15th of each of the last three months (inside every
+// month), expecting the windows oldest first, the last point's bounds
+// equal to the top-level from/to, the per-point totals, and the
+// recorded store calls carrying the request's account filter. A
+// quarter trend=2 pins the window shape across the shift.
+func TestSummaryTrend(t *testing.T) {
+	c1 := nextTestID()
+	user := "id-sum-t"
+	store := &memTxStore{}
+	cats := &memCategoryStore{rows: []memCategoryRow{{userID: user, id: c1, name: "Groceries", active: true}}}
+	h, key := newTxServer(t, store, cats, &memBudgetStore{})
+	tok := mintIdentityToken(t, key, "sum-t", "t@localhost", "T", "t")
+	hdr := authHdr(tok)
+
+	now := time.Now()
+	accA, accB := nextTestID(), nextTestID()
+	// The 15th of the month k months before now.
+	mid := func(k int) string {
+		s := now.AddDate(0, -k, 0)
+		y, m, _ := s.Date()
+		return dateOnly(time.Date(y, m, 15, 12, 0, 0, 0, time.UTC))
+	}
+	seedTx(t, store, user, accA, c1, mid(0), "-10.00", "cur spend", "")
+	seedTx(t, store, user, accB, c1, mid(0), "+4.00", "cur income", "")
+	seedTx(t, store, user, accA, c1, mid(1), "-7.00", "prev spend", "")
+	seedTx(t, store, user, accA, c1, mid(2), "-1.50", "older spend", "")
+
+	code, out := doReq(t, h, http.MethodGet, "/api/v1/summary?period=month&trend=3", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, out)
+	}
+	var resp summaryOut
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	wantFrom, wantTo := periodBounds("month", time.Now())
+	if resp.From != dateOnly(wantFrom) || resp.To != dateOnly(wantTo) {
+		t.Fatalf("top-level from/to = %s..%s, want %s..%s", resp.From, resp.To, dateOnly(wantFrom), dateOnly(wantTo))
+	}
+	if len(resp.Trend) != 3 {
+		t.Fatalf("trend len = %d, want 3 (%s)", len(resp.Trend), out)
+	}
+	// Oldest first: k=2, k=1, k=0. Each window is the calendar month
+	// containing now pulled back by k months.
+	for i, k := range []int{2, 1, 0} {
+		pt := resp.Trend[i]
+		pf, ptEnd := periodBounds("month", trendShift("month", now, k))
+		if pt.From != dateOnly(pf) || pt.To != dateOnly(ptEnd) {
+			t.Errorf("trend[%d] from/to = %s..%s, want %s..%s", i, pt.From, pt.To, dateOnly(pf), dateOnly(ptEnd))
+		}
+	}
+	wantPts := []trendPoint{
+		{Spend: "1.50", Income: "0.00", Net: "-1.50"},
+		{Spend: "7.00", Income: "0.00", Net: "-7.00"},
+		{Spend: "10.00", Income: "4.00", Net: "-6.00"},
+	}
+	for i := range wantPts {
+		if resp.Trend[i].Spend != wantPts[i].Spend || resp.Trend[i].Income != wantPts[i].Income || resp.Trend[i].Net != wantPts[i].Net {
+			t.Errorf("trend[%d] amounts = %s/%s/%s, want %s/%s/%s", i,
+				resp.Trend[i].Spend, resp.Trend[i].Income, resp.Trend[i].Net,
+				wantPts[i].Spend, wantPts[i].Income, wantPts[i].Net)
+		}
+	}
+	// The k=0 point is exactly the top-level window.
+	last := resp.Trend[2]
+	if last.From != resp.From || last.To != resp.To {
+		t.Errorf("last trend point = %s..%s, want the top-level %s..%s", last.From, last.To, resp.From, resp.To)
+	}
+	if resp.Totals != (summaryTotals{Spend: "10.00", Income: "4.00", Net: "-6.00"}) {
+		t.Errorf("totals = %+v, want spend 10.00 / income 4.00 / net -6.00", resp.Totals)
+	}
+	// The store saw four calls, in request order (the top-level window,
+	// then the trend points oldest first: k=2, k=1, k=0). The handler
+	// recomputes the k=0 window rather than reusing the top-level
+	// result, so the last call's bounds equal the top-level's.
+	if len(store.aggregateCalls) != 4 {
+		t.Fatalf("aggregate calls = %d, want 4: %+v", len(store.aggregateCalls), store.aggregateCalls)
+	}
+	top := store.aggregateCalls[0]
+	if dateOnly(top.from) != resp.From || dateOnly(top.to) != resp.To {
+		t.Errorf("first call bounds = %s..%s, want %s..%s", dateOnly(top.from), dateOnly(top.to), resp.From, resp.To)
+	}
+	for i, k := range []int{2, 1, 0} {
+		c := store.aggregateCalls[1+i]
+		pf, ptEnd := periodBounds("month", trendShift("month", now, k))
+		if dateOnly(c.from) != dateOnly(pf) || dateOnly(c.to) != dateOnly(ptEnd) {
+			t.Errorf("call %d (k=%d) bounds = %s..%s, want %s..%s", 1+i, k,
+				dateOnly(c.from), dateOnly(c.to), dateOnly(pf), dateOnly(ptEnd))
+		}
+	}
+
+	// With an account filter the totals narrow and every call carries
+	// the id (top-level and each trend point).
+	code, out = doReq(t, h, http.MethodGet, "/api/v1/summary?period=month&trend=2&account_id="+accA, "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("filtered: status = %d (body %s)", code, out)
+	}
+	var filtered summaryOut
+	if err := json.Unmarshal([]byte(out), &filtered); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	if filtered.Totals != (summaryTotals{Spend: "10.00", Income: "0.00", Net: "-10.00"}) {
+		t.Errorf("filtered totals = %+v, want spend 10.00 / income 0.00 / net -10.00", filtered.Totals)
+	}
+	if len(filtered.Trend) != 2 {
+		t.Fatalf("filtered trend len = %d, want 2 (%s)", len(filtered.Trend), out)
+	}
+	if filtered.Trend[0].Spend != "7.00" || filtered.Trend[1].Spend != "10.00" {
+		t.Errorf("filtered trend spend = %s, %s, want 7.00, 10.00", filtered.Trend[0].Spend, filtered.Trend[1].Spend)
+	}
+	// The second request adds three calls (top-level plus the two trend
+	// points), so the store saw seven in total; every call from index 4
+	// on carries the account filter.
+	if len(store.aggregateCalls) != 7 {
+		t.Fatalf("aggregate calls = %d, want 7: %+v", len(store.aggregateCalls), store.aggregateCalls)
+	}
+	for i := 4; i < len(store.aggregateCalls); i++ {
+		c := store.aggregateCalls[i]
+		if len(c.accountIDs) != 1 || c.accountIDs[0] != accA {
+			t.Errorf("call %d accountIDs = %+v, want [%s]", i, c.accountIDs, accA)
+		}
+	}
+
+	t.Run("quarter bounds", func(t *testing.T) {
+		h2, key2 := newTxServer(t, &memTxStore{}, &memCategoryStore{}, &memBudgetStore{})
+		tok2 := mintIdentityToken(t, key2, "sum-tq", "tq@localhost", "TQ", "tq")
+		code, out := doReq(t, h2, http.MethodGet, "/api/v1/summary?period=quarter&trend=2", "", authHdr(tok2))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d (body %s)", code, out)
+		}
+		var resp summaryOut
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatalf("decode: %v (body %s)", err, out)
+		}
+		if len(resp.Trend) != 2 {
+			t.Fatalf("trend len = %d, want 2 (%s)", len(resp.Trend), out)
+		}
+		// Independent previous-quarter window: the 3-month block ending
+		// the quarter before the current one (year rollover handled).
+		n := time.Now()
+		y, m, _ := n.Date()
+		p := 1 + 3*((int(m)-1)/3) - 3
+		if p < 1 {
+			p += 12
+			y--
+		}
+		prevFrom := time.Date(y, time.Month(p), 1, 0, 0, 0, 0, time.UTC)
+		prevTo := prevFrom.AddDate(0, 3, -1)
+		if resp.Trend[0].From != dateOnly(prevFrom) || resp.Trend[0].To != dateOnly(prevTo) {
+			t.Errorf("previous quarter window = %s..%s, want %s..%s", resp.Trend[0].From, resp.Trend[0].To, dateOnly(prevFrom), dateOnly(prevTo))
+		}
+		if resp.Trend[1].From != resp.From || resp.Trend[1].To != resp.To {
+			t.Errorf("current quarter window = %s..%s, want the top-level %s..%s", resp.Trend[1].From, resp.Trend[1].To, resp.From, resp.To)
+		}
+	})
+}
+
+// TestSummaryAccountFilter covers the 6.2 account filter: a valid id
+// reaches the store and narrows the totals, an empty value is skipped
+// (the unfiltered 200), and an unknown id is a 200 with zeroed totals
+// and no groups.
+func TestSummaryAccountFilter(t *testing.T) {
+	c1 := nextTestID()
+	user := "id-sum-af"
+	store := &memTxStore{}
+	cats := &memCategoryStore{rows: []memCategoryRow{{userID: user, id: c1, name: "Groceries", active: true}}}
+	h, key := newTxServer(t, store, cats, &memBudgetStore{})
+	tok := mintIdentityToken(t, key, "sum-af", "af@localhost", "AF", "af")
+	hdr := authHdr(tok)
+
+	from, _ := periodBounds("month", time.Now())
+	mid := dateOnly(from.AddDate(0, 0, 14)) // the 15th: inside every month
+	accA, accB := nextTestID(), nextTestID()
+	seedTx(t, store, user, accA, c1, mid, "-10.00", "a spend", "")
+	seedTx(t, store, user, accB, c1, mid, "+6.00", "b income", "")
+
+	// Valid id: the store saw it, and the totals carry only that
+	// account's rows.
+	code, out := doReq(t, h, http.MethodGet, "/api/v1/summary?account_id="+accA, "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, out)
+	}
+	var resp summaryOut
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	if resp.Totals != (summaryTotals{Spend: "10.00", Income: "0.00", Net: "-10.00"}) {
+		t.Errorf("totals = %+v, want spend 10.00 / income 0.00 / net -10.00", resp.Totals)
+	}
+	if len(store.aggregateCalls) != 1 || len(store.aggregateCalls[0].accountIDs) != 1 || store.aggregateCalls[0].accountIDs[0] != accA {
+		t.Fatalf("aggregate calls = %+v, want one call with [%s]", store.aggregateCalls, accA)
+	}
+
+	// Empty value: skipped, so the unfiltered totals come back.
+	code, out = doReq(t, h, http.MethodGet, "/api/v1/summary?account_id=", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("empty id: status = %d (body %s)", code, out)
+	}
+	var unfiltered summaryOut
+	if err := json.Unmarshal([]byte(out), &unfiltered); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	if unfiltered.Totals != (summaryTotals{Spend: "10.00", Income: "6.00", Net: "-4.00"}) {
+		t.Errorf("unfiltered totals = %+v, want spend 10.00 / income 6.00 / net -4.00", unfiltered.Totals)
+	}
+	if len(store.aggregateCalls) != 2 || store.aggregateCalls[1].accountIDs != nil {
+		t.Errorf("calls = %+v, want the second call unfiltered", store.aggregateCalls)
+	}
+
+	// Unknown (well-formed) id: 200 with zeroed totals and no groups.
+	unknown := nextTestID()
+	code, out = doReq(t, h, http.MethodGet, "/api/v1/summary?account_id="+unknown, "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("unknown id: status = %d (body %s)", code, out)
+	}
+	var zeros summaryOut
+	if err := json.Unmarshal([]byte(out), &zeros); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	if zeros.Totals != (summaryTotals{Spend: "0.00", Income: "0.00", Net: "0.00"}) {
+		t.Errorf("zero totals = %+v, want all 0.00", zeros.Totals)
+	}
+	if len(zeros.Groups) != 0 {
+		t.Errorf("groups = %+v, want none", zeros.Groups)
+	}
+	if len(store.aggregateCalls) != 3 || len(store.aggregateCalls[2].accountIDs) != 1 || store.aggregateCalls[2].accountIDs[0] != unknown {
+		t.Errorf("calls = %+v, want the third call with [%s]", store.aggregateCalls, unknown)
 	}
 }
 

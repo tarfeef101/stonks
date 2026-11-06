@@ -631,21 +631,38 @@ type CategorySpend struct {
 
 // Aggregate sums the caller's transactions with date_posted in
 // [from, to] (inclusive, date precision) grouped by category. It is the
-// whole-period computation behind GET /api/v1/summary: no account,
-// search, or paging filters apply. The sums are re-canonicalized on the
-// way out — pgx renders numeric without preserving scale (a 0.00 sum
-// comes back as "0") — so the output always matches the 2-decimal form
-// the rest of the API speaks.
-func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, to time.Time) ([]CategorySpend, error) {
+// whole-period computation behind GET /api/v1/summary: no search or
+// paging filters apply. accountIDs (may be nil) restricts the sum to
+// those accounts; an empty or nil slice means "all accounts". The sums
+// are re-canonicalized on the way out — pgx renders numeric without
+// preserving scale (a 0.00 sum comes back as "0") — so the output
+// always matches the 2-decimal form the rest of the API speaks.
+func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]CategorySpend, error) {
+	where := []string{"user_id = $1"}
+	args := []any{userID}
+	add := func(cond string, val any) {
+		args = append(args, val)
+		where = append(where, fmt.Sprintf("%s $%d", cond, len(args)))
+	}
+	add("date_posted >=", dateStr(from))
+	add("date_posted <=", dateStr(to))
+	if len(accountIDs) > 0 {
+		ph := make([]string, len(accountIDs))
+		for i, id := range accountIDs {
+			args = append(args, id)
+			ph[i] = "$" + strconv.Itoa(len(args))
+		}
+		where = append(where, "account_id IN ("+strings.Join(ph, ", ")+")")
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT COALESCE(category_id::text, ''),
 		       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount END), 0),
 		       COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0),
 		       COALESCE(SUM(amount), 0)
 		FROM transactions
-		WHERE user_id = $1 AND date_posted >= $2 AND date_posted <= $3
+		WHERE `+strings.Join(where, " AND ")+`
 		GROUP BY category_id
-		ORDER BY category_id NULLS FIRST`, userID, dateStr(from), dateStr(to))
+		ORDER BY category_id NULLS FIRST`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repo: aggregate transactions: %w", err)
 	}
