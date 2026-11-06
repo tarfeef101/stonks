@@ -4,14 +4,34 @@
 	},
 	"nav": {
 		"summary": "Summary",
+		"explore": "Explore",
+		"dashboards": "Dashboards",
+		"budgets": "Budgets",
 		"imports": "Imports",
 		"review": "Review",
 		"notifications": "Notifications",
+		"mortgage": "Mortgage",
 		"settings": "Settings"
 	},
 	"home": {
 		"heading": "Personal Finance Tracker",
 		"placeholder": "The app shell is live. Summary, budgets, explore, and dashboards pages land in step 6.x; mortgage tools in step 7.x."
+	},
+	"explore": {
+		"heading": "Explore",
+		"empty": "Explore isn't built yet — this page will let you dig into and explore your transactions."
+	},
+	"dashboards": {
+		"heading": "Dashboards",
+		"empty": "Dashboards aren't built yet — this page will show your finances at a glance."
+	},
+	"budgets": {
+		"heading": "Budgets",
+		"empty": "Budgets aren't built yet — this page will let you set and track budgets."
+	},
+	"mortgage": {
+		"heading": "Mortgage",
+		"no_mortgage": "No mortgage on file yet."
 	},
 	"auth": {
 		"sign_in": "Sign in",
@@ -53,12 +73,14 @@
 		"matched_preset": "Matched preset",
 		"preset_label": "Preset",
 		"preset_auto": "Automatic (filename and headers)",
+		"saved": "(saved)",
 		"mapping_title": "Field mapping",
 		"mapping_csv_note": "Pick the column for each field; leave a field unmapped if the file has no equivalent.",
 		"mapping_json_note": "Type the JSON pointer to each field (RFC 6901, e.g. /amount).",
 		"array_pointers_label": "Location of the transactions",
 		"array_pointers_placeholder": "(root), /transactions, /data",
 		"array_pointers_note": "Comma-separated pointers to the array holding the transactions, tried in order. (root) = the document root; leave blank for root only.",
+		"pointer_placeholder": "/path/to/field",
 		"field_label": "Field",
 		"column_label": "Source",
 		"unmapped": "— unmapped —",

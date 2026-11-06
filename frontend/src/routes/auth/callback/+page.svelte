@@ -2,7 +2,7 @@
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
-	import type { RouteIdWithSearchOrHash } from '$app/types';
+	import type { RouteId } from '$app/types';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
 	import { signInCallback } from '#lib/auth/client';
@@ -36,14 +36,16 @@
 			// identity appearance; this page awaits its own load because it
 			// must decide the redirect target before navigating.)
 			// Both targets are internal paths — resolve() keeps base-path
-			// deployments working. The cast is safe: return_to only ever
-			// carries this app's own page.url (set by login()), so it is a
-			// route id — the static-segment routes pass any query string
-			// through unchanged.
+			// deployments working. `target` is typed as a route id with an
+			// optional query string: login() only ever sends
+			// page.url.pathname + page.url.search, so the echoed return_to
+			// is one of this app's own routes. The type is kept in the
+			// route-id family on purpose — SvelteKit 3's resolve() accepts
+			// this union but rejects a plain string or the full
+			// RouteIdWithSearchOrHash union.
 			const st = await loadSettings();
-			const target = (
-				st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')
-			) as RouteIdWithSearchOrHash;
+			const target = (st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')) as
+				RouteId | `${RouteId}?${string}`;
 			goto(resolve(target), { replaceState: true });
 		} catch (e) {
 			// e.g. visiting /auth/callback directly with no pending state.

@@ -467,7 +467,9 @@
 							{#each kindPresets as p (p.id)}
 								<!-- "(saved)" marks the user's own presets against the code builtins. -->
 								<option value={p.id}>
-									{p.name}{p.bank !== '' ? ` (${p.bank})` : ''}{p.builtin ? '' : ' (saved)'}
+									{p.name}{p.bank !== '' ? ` (${p.bank})` : ''}{p.builtin
+										? ''
+										: ` ${$_('imports.saved')}`}
 								</option>
 							{/each}
 						</select>
@@ -543,7 +545,7 @@
 												onchange={(e) => {
 													setPointer(f, e.currentTarget.value);
 												}}
-												placeholder="/path/to/field"
+												placeholder={$_('imports.pointer_placeholder')}
 												type="text"
 												value={pointersByField[f]?.[0] ?? ''}
 											/>
