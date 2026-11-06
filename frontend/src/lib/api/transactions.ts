@@ -1,5 +1,5 @@
 // Transaction API (step 3.1, created from the manual-entry form in
-// 4.7): POST /v1/transactions.
+// 4.7): POST /v1/transactions; the filtered list (step 3.2) since 6.4.
 //
 // Success bodies are the raw values the backend returns (no envelope);
 // non-2xx responses are the 3.1 envelope {error: {code, message}} and
@@ -48,4 +48,42 @@ export interface CreateTransactionInput {
  * (conflict). */
 export function createTransaction(input: CreateTransactionInput): Promise<Transaction> {
 	return api<Transaction>('/v1/transactions', { method: 'POST', body: input });
+}
+
+/** List filters for GET /v1/transactions (step 3.2), AND-combined on the
+ * server. Absent (undefined) params are omitted from the query; an empty
+ * `category_id` means "uncategorized only". */
+export interface ListParams {
+	/** Inclusive lower bound on date_posted (YYYY-MM-DD). */
+	date_from?: string;
+	/** Inclusive upper bound on date_posted (YYYY-MM-DD). */
+	date_to?: string;
+	/** Repeatable account filter (sent once per id). */
+	account_id?: string[];
+	/** A category id, or '' for uncategorized rows only. */
+	category_id?: string;
+	min_amount?: string;
+	max_amount?: string;
+	/** Case-insensitive description substring. */
+	search?: string;
+	limit?: number;
+	offset?: number;
+}
+
+/** The transaction list (step 3.2): rows in date_posted DESC, id DESC
+ * order. The server caps `limit` at 100 silently; an empty match returns
+ * `[]`. */
+export function listTransactions(params: ListParams = {}): Promise<Transaction[]> {
+	const q = new URLSearchParams();
+	if (params.date_from !== undefined) q.append('date_from', params.date_from);
+	if (params.date_to !== undefined) q.append('date_to', params.date_to);
+	for (const id of params.account_id ?? []) q.append('account_id', id);
+	if (params.category_id !== undefined) q.append('category_id', params.category_id);
+	if (params.min_amount !== undefined) q.append('min_amount', params.min_amount);
+	if (params.max_amount !== undefined) q.append('max_amount', params.max_amount);
+	if (params.search !== undefined) q.append('search', params.search);
+	if (params.limit !== undefined) q.append('limit', String(params.limit));
+	if (params.offset !== undefined) q.append('offset', String(params.offset));
+	const qs = q.toString();
+	return api<Transaction[]>(`/v1/transactions${qs ? `?${qs}` : ''}`);
 }
