@@ -352,6 +352,117 @@ func TestSummaryTrend(t *testing.T) {
 	})
 }
 
+// TestSummaryTrendGroups covers the 6.3 per-window breakdown on the
+// trend points: each point's groups equal that window's aggregation
+// rows (names joined from the category list, sorted with the shared
+// comparator — name asc, nulls last, id tiebreak — so the order can
+// differ from the store's own id-asc output), an empty window
+// marshals "groups":[] (never null, never absent), and the trend
+// array carries no target key anywhere.
+func TestSummaryTrendGroups(t *testing.T) {
+	c1 := nextTestID()
+	c2 := nextTestID()
+	c3 := nextTestID()
+	user := "id-sum-tg"
+	store := &memTxStore{}
+	cats := &memCategoryStore{rows: []memCategoryRow{
+		{userID: user, id: c1, name: "Beta", active: true},
+		{userID: user, id: c2, name: "Alpha", active: true},
+		{userID: user, id: c3, name: "Gamma", active: true},
+	}}
+	h, key := newTxServer(t, store, cats, &memBudgetStore{})
+	tok := mintIdentityToken(t, key, "sum-tg", "tg@localhost", "TG", "tg")
+	hdr := authHdr(tok)
+
+	now := time.Now()
+	acc := nextTestID()
+	// mid(k): the 15th of the month k months before now (inside every
+	// calendar month, so no month length or clock position flips the
+	// windows).
+	mid := func(k int) string {
+		s := now.AddDate(0, -k, 0)
+		y, m, _ := s.Date()
+		return dateOnly(time.Date(y, m, 15, 12, 0, 0, 0, time.UTC))
+	}
+	// Seed only the current (k=0) and previous (k=1) windows, so the
+	// k=2 window of a trend=3 request is empty. The two seeded
+	// windows' rows differ, and the fake's own output order (id asc,
+	// "" first) differs from the handler's (name asc, nulls last):
+	// the previous window holds c2 ("Alpha") plus an uncategorized
+	// row, the current window holds c1 ("Beta") plus c2.
+	seedTx(t, store, user, acc, c2, mid(1), "-5.00", "prev alpha", "")
+	seedTx(t, store, user, acc, "", mid(1), "-1.00", "prev uncat", "")
+	seedTx(t, store, user, acc, c1, mid(0), "-2.00", "cur beta", "")
+	seedTx(t, store, user, acc, c2, mid(0), "-3.00", "cur alpha", "")
+
+	code, out := doReq(t, h, http.MethodGet, "/api/v1/summary?period=month&trend=3", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", code, out)
+	}
+	var resp summaryOut
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	if len(resp.Trend) != 3 {
+		t.Fatalf("trend len = %d, want 3 (%s)", len(resp.Trend), out)
+	}
+	// Point 0 = the empty k=2 window: a non-nil empty groups list.
+	if !reflect.DeepEqual(resp.Trend[0].Groups, []trendGroup{}) {
+		t.Errorf("trend[0] groups = %+v, want an empty slice", resp.Trend[0].Groups)
+	}
+	// Point 1 = the previous window: "Alpha" first (name asc), the
+	// uncategorized row (null name) last — NOT the fake's id-asc order
+	// ("" first).
+	want1 := []trendGroup{
+		{CategoryID: &c2, CategoryName: strPtr("Alpha"), Spend: "5.00", Income: "0.00", Net: "-5.00"},
+		{Spend: "1.00", Income: "0.00", Net: "-1.00"},
+	}
+	if !reflect.DeepEqual(resp.Trend[1].Groups, want1) {
+		t.Errorf("trend[1] groups = %+v, want %+v", resp.Trend[1].Groups, want1)
+	}
+	// Point 2 = the current window: name asc (Alpha, Beta).
+	want2 := []trendGroup{
+		{CategoryID: &c2, CategoryName: strPtr("Alpha"), Spend: "3.00", Income: "0.00", Net: "-3.00"},
+		{CategoryID: &c1, CategoryName: strPtr("Beta"), Spend: "2.00", Income: "0.00", Net: "-2.00"},
+	}
+	if !reflect.DeepEqual(resp.Trend[2].Groups, want2) {
+		t.Errorf("trend[2] groups = %+v, want %+v", resp.Trend[2].Groups, want2)
+	}
+	// The current window's trend groups sort exactly like the
+	// top-level groups for the same rows (both hold Alpha, Beta).
+	nameSeq := func(gs []trendGroup) []string {
+		s := make([]string, 0, len(gs))
+		for _, g := range gs {
+			s = append(s, *g.CategoryName)
+		}
+		return s
+	}
+	topSeq := make([]string, 0, len(resp.Groups))
+	for _, g := range resp.Groups {
+		topSeq = append(topSeq, *g.CategoryName)
+	}
+	if !reflect.DeepEqual(nameSeq(resp.Trend[2].Groups), topSeq) {
+		t.Errorf("trend[2] order %v, want the top-level order %v", nameSeq(resp.Trend[2].Groups), topSeq)
+	}
+	// Raw-body pins: the empty window marshals [] (never null and
+	// never absent), and the trend array (the last marshalled key of
+	// the response) carries no target key anywhere.
+	if !strings.Contains(out, `"groups":[]`) {
+		t.Errorf("body lacks \"groups\":[] for the empty window: %s", out)
+	}
+	if strings.Contains(out, `"groups":null`) {
+		t.Errorf("body carries a null groups: %s", out)
+	}
+	ti := strings.Index(out, `"trend":`)
+	if ti == -1 {
+		t.Fatalf("body lacks the trend key: %s", out)
+	}
+	trendBody := out[ti+len(`"trend":`):]
+	if strings.Contains(trendBody, `"target"`) {
+		t.Errorf("trend array carries a target key: %s", trendBody)
+	}
+}
+
 // TestSummaryAccountFilter covers the 6.2 account filter: a valid id
 // reaches the store and narrows the totals, an empty value is skipped
 // (the unfiltered 200), and an unknown id is a 200 with zeroed totals

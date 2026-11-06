@@ -27,14 +27,31 @@ export interface SummaryTotals {
 	net: string;
 }
 
+/** One per-category row of a trend window (backend trendGroup): the
+ * summaryGroup shape WITHOUT a target — a budget's activeness has no
+ * dates, so a past window has no well-defined targets; the caller
+ * joins the row against its own targets document. Amounts are
+ * canonical 2-decimal strings; a null category is the uncategorized
+ * bucket. */
+export interface TrendGroup {
+	category_id: string | null;
+	category_name: string | null;
+	spend: string;
+	income: string;
+	net: string;
+}
+
 /** One trend window (backend trendPoint) — the same period as the
- * request; oldest first, ending on the current period. */
+ * request; oldest first, ending on the current period. Groups is the
+ * window's per-category breakdown (always present when a trend is
+ * requested; an empty window is []). */
 export interface TrendPoint {
 	from: string;
 	to: string;
 	spend: string;
 	income: string;
 	net: string;
+	groups: TrendGroup[];
 }
 
 export interface Summary {

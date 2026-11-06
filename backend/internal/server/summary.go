@@ -15,7 +15,11 @@
 // the parameter the response carries no trend key at all. A repeatable
 // account_id=UUID restricts the aggregation to those accounts: an
 // empty value is skipped, a malformed value is a 400, an unknown id
-// simply contributes nothing (200 with the unfiltered shape).
+// simply contributes nothing (200 with the unfiltered shape). 6.3:
+// each trend point also carries its window's per-category breakdown
+// (the point's groups — summaryGroup's shape without the target,
+// sorted like the top-level groups), so a caller tracking a budget
+// joins a point's groups against its own targets document.
 package server
 
 import (
@@ -45,14 +49,29 @@ type summaryOut struct {
 }
 
 // trendPoint is one window of summaryOut.Trend: the inclusive
-// "YYYY-MM-DD" bounds of a past period window plus its totals in
-// canonical 2-decimal strings (computed like Totals).
+// "YYYY-MM-DD" bounds of a past period window, its totals in canonical
+// 2-decimal strings (computed like Totals), and its per-category
+// breakdown (Groups — see trendGroup). Groups has no omitempty, like
+// the top-level groups: an empty window marshals as [], never null.
 type trendPoint struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Spend  string `json:"spend"`
-	Income string `json:"income"`
-	Net    string `json:"net"`
+	From   string       `json:"from"`
+	To     string       `json:"to"`
+	Spend  string       `json:"spend"`
+	Income string       `json:"income"`
+	Net    string       `json:"net"`
+	Groups []trendGroup `json:"groups"`
+}
+
+// trendGroup is a trend point's per-category breakdown — the same shape as
+// summaryGroup WITHOUT Target: a budget's activeness is a present-tense flag
+// with no dates, so no past window has well-defined targets; callers that
+// track a budget join this against their own targets document.
+type trendGroup struct {
+	CategoryID   *string `json:"category_id"`
+	CategoryName *string `json:"category_name"`
+	Spend        string  `json:"spend"`
+	Income       string  `json:"income"`
+	Net          string  `json:"net"`
 }
 
 type summaryGroup struct {
@@ -171,6 +190,43 @@ func groupCents(g repo.CategorySpend) (spend, income, net int64, err error) {
 		return 0, 0, 0, err
 	}
 	return spend, income, net, nil
+}
+
+// groupKey is the (category id, category name) pair a group's order is
+// keyed on. The top-level summaryGroup list and each trend point's
+// trendGroup list both sort through it, so the two listings always
+// agree.
+type groupKey struct {
+	id   *string
+	name *string
+}
+
+// sortGroups orders groups by category name asc with null names last;
+// ties break by category id asc (a nil id sorts after a non-nil one,
+// so the uncategorized null id is last among the unnamed).
+func sortGroups[T any](groups []T, key func(T) groupKey) {
+	sort.Slice(groups, func(i, j int) bool {
+		ki, kj := key(groups[i]), key(groups[j])
+		ni, nj := ki.name == nil, kj.name == nil
+		if ni != nj {
+			return !ni
+		}
+		if ni {
+			iID, jID := ki.id == nil, kj.id == nil
+			if iID != jID {
+				return !iID
+			}
+			return !iID || *ki.id < *kj.id
+		}
+		if *ki.name != *kj.name {
+			return *ki.name < *kj.name
+		}
+		iID, jID := ki.id == nil, kj.id == nil
+		if iID != jID {
+			return !iID
+		}
+		return !iID || *ki.id < *kj.id
+	})
 }
 
 // summary serves GET /api/v1/summary?period=month|quarter|year&group_by=category
@@ -326,27 +382,10 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		out = append(out, sg)
 	}
 	// Sort: category name asc, nulls last; ties break by category id
-	// asc (the uncategorized null id sorts last among the unnamed).
-	sort.Slice(out, func(i, j int) bool {
-		ni, nj := out[i].CategoryName == nil, out[j].CategoryName == nil
-		if ni != nj {
-			return !ni
-		}
-		if ni {
-			iID, jID := out[i].CategoryID == nil, out[j].CategoryID == nil
-			if iID != jID {
-				return !iID
-			}
-			return !iID || *out[i].CategoryID < *out[j].CategoryID
-		}
-		if *out[i].CategoryName != *out[j].CategoryName {
-			return *out[i].CategoryName < *out[j].CategoryName
-		}
-		iID, jID := out[i].CategoryID == nil, out[j].CategoryID == nil
-		if iID != jID {
-			return !iID
-		}
-		return !iID || *out[i].CategoryID < *out[j].CategoryID
+	// asc (the uncategorized null id sorts last among the unnamed) —
+	// the shared comparator the trend points' groups use too.
+	sortGroups(out, func(g summaryGroup) groupKey {
+		return groupKey{id: g.CategoryID, name: g.CategoryName}
 	})
 
 	// Totals in int64 cents over the transaction groups only.
@@ -363,7 +402,11 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 
 	// Trend: the last N windows, oldest first (k = N-1 down to 0).
 	// Same account filter as the top-level window; totals computed the
-	// same way. A nil Trend stays nil and drops out of the JSON.
+	// same way. Each point also carries its window's per-category
+	// breakdown (6.3): the same Aggregate rows the totals were summed
+	// from, names joined from the shared names map and sorted with the
+	// shared group comparator. A nil Trend stays nil and drops out of
+	// the JSON.
 	var trendPts []trendPoint
 	if trend > 0 {
 		trendPts = make([]trendPoint, 0, trend)
@@ -375,6 +418,7 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var ptSpend, ptIncome, ptNet int64
+			tgs := make([]trendGroup, 0, len(tg))
 			for _, g := range tg {
 				sp, inc, net, err := groupCents(g)
 				if err != nil {
@@ -383,13 +427,27 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				ptSpend, ptIncome, ptNet = ptSpend+sp, ptIncome+inc, ptNet+net
+				grp := trendGroup{Spend: g.Spend, Income: g.Income, Net: g.Net}
+				if g.CategoryID != "" {
+					id := g.CategoryID
+					grp.CategoryID = &id
+				}
+				if name, ok := names[g.CategoryID]; ok {
+					n := name
+					grp.CategoryName = &n
+				}
+				tgs = append(tgs, grp)
 			}
+			sortGroups(tgs, func(g trendGroup) groupKey {
+				return groupKey{id: g.CategoryID, name: g.CategoryName}
+			})
 			trendPts = append(trendPts, trendPoint{
 				From:   dateOnly(tf),
 				To:     dateOnly(tt),
 				Spend:  formatCents(ptSpend),
 				Income: formatCents(ptIncome),
 				Net:    formatCents(ptNet),
+				Groups: tgs,
 			})
 		}
 	}
