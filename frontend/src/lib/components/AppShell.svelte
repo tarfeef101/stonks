@@ -14,7 +14,8 @@
 		{ href: '/', key: 'nav.summary' },
 		{ href: '/imports', key: 'nav.imports' },
 		{ href: '/review', key: 'nav.review' },
-		{ href: '/notifications', key: 'nav.notifications' }
+		{ href: '/notifications', key: 'nav.notifications' },
+		{ href: '/settings', key: 'nav.settings' }
 	] as const;
 
 	// Unread-notification badge on the Notifications link. Refreshed

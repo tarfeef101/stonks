@@ -106,6 +106,7 @@ type handler struct {
 	jobs          *repo.CategoriseJobStore
 	review        ReviewStore
 	reprompt      *Reprompter
+	llmCreds      *LLMCredentials
 	m             *httpMetrics
 }
 
@@ -134,8 +135,11 @@ type handler struct {
 // routes (plan 5.5: GET /api/v1/review, the accept and accept-all
 // writes); nil and those routes answer 503. reprompt serves
 // POST /api/v1/review/{id}/reprompt (re-run the LLM on one row); nil
-// and that route answers 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter) http.Handler {
+// and that route answers 503. llmCreds serves the LLM credential routes
+// (plan 5.6: GET /api/v1/llm-credentials, PUT and DELETE
+// /api/v1/llm-credentials/{provider}, POST /api/v1/llm-credentials/test);
+// nil and those routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -154,6 +158,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		jobs:          jobs,
 		review:        review,
 		reprompt:      reprompt,
+		llmCreds:      llmCreds,
 		m:             newHTTPMetrics(),
 	}
 
@@ -257,6 +262,15 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/review/accept-all", h.reviewAcceptAll)
 		r.Post("/v1/review/{id}/accept", h.reviewAccept)
 		r.Post("/v1/review/{id}/reprompt", h.reviewReprompt)
+		// LLM credentials (plan 5.6): the caller's per-provider LLM
+		// endpoint and encrypted API key (key masked on read), plus the
+		// test-connection probe. The static /test segment wins over
+		// /{provider} (chi routing); it is POST-only, so a PUT to it is
+		// just the {provider} route with provider "test" (400).
+		r.Get("/v1/llm-credentials", h.llmCredsList)
+		r.Put("/v1/llm-credentials/{provider}", h.llmCredsPut)
+		r.Delete("/v1/llm-credentials/{provider}", h.llmCredsDelete)
+		r.Post("/v1/llm-credentials/test", h.llmCredsTest)
 	})
 	return r
 }

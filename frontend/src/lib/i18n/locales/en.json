@@ -6,7 +6,8 @@
 		"summary": "Summary",
 		"imports": "Imports",
 		"review": "Review",
-		"notifications": "Notifications"
+		"notifications": "Notifications",
+		"settings": "Settings"
 	},
 	"home": {
 		"heading": "Personal Finance Tracker",
@@ -141,5 +142,32 @@
 		"mark_read": "Mark as read",
 		"unread": "Unread",
 		"read_on": "Read on"
+	},
+	"settings": {
+		"title": "Settings",
+		"intro": "App settings — right now, the LLM endpoint the auto-categoriser talks to, per provider.",
+		"sign_in_prompt": "Sign in to manage your settings.",
+		"loading": "Loading settings…",
+		"llm_title": "LLM credentials",
+		"provider_label": "Provider",
+		"provider": {
+			"self_hosted": "Self-hosted (Ollama / llama.cpp)",
+			"openai": "OpenAI",
+			"custom": "Custom endpoint"
+		},
+		"endpoint_label": "Endpoint",
+		"api_key_label": "API key",
+		"api_key_required_note": "Required for this provider.",
+		"api_key_optional_note": "Optional — self-hosted servers usually need no key.",
+		"mask_note": "The field shows the stored key's mask; the key itself is encrypted and never read back. Re-enter the key to keep it on the next save.",
+		"save": "Save",
+		"saving": "Saving…",
+		"saved": "Credential saved.",
+		"test": "Test connection",
+		"testing": "Testing…",
+		"test_ok": "Connected in {ms} ms — {tin} tokens in / {tout} tokens out.",
+		"test_ok_model": "Model: {model}.",
+		"delete": "Delete credential",
+		"deleting": "Deleting…"
 	}
 }

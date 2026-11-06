@@ -78,6 +78,7 @@ func main() {
 		jobs          *repo.CategoriseJobStore
 		review        server.ReviewStore
 		reprompt      *server.Reprompter
+		llmCreds      *server.LLMCredentials
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -173,9 +174,24 @@ func main() {
 				return llm.New(baseURL, apiKey, model), nil
 			},
 		}
+		// LLM credentials (step 5.6): the per-user credential routes
+		// (same pool; the key is sealed with the caller's DEK) plus the
+		// test-connection probe, which reuses the process LLM fallback
+		// for its model (credentials carry no model) and a 20 s
+		// per-attempt timeout (WithTimeout applies to every attempt,
+		// the nudge retry included).
+		llmCreds = &server.LLMCredentials{
+			Store: repo.NewCredentialStore(pool),
+			Env: categorize.NormalizeEnv(categorize.LLMEnv{
+				BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model,
+			}),
+			LLM: func(baseURL, apiKey, model string) (llm.Categorizer, error) {
+				return llm.New(baseURL, apiKey, model, llm.WithTimeout(20*time.Second)), nil
+			},
+		}
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.
