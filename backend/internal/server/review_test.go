@@ -221,7 +221,7 @@ func newReviewServer(t *testing.T, store ReviewStore, rep *Reprompter) (http.Han
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil, nil), key
 }
 
 // reviewHdr is the Authorization header for a fresh identity token on

@@ -107,6 +107,7 @@ type handler struct {
 	review        ReviewStore
 	reprompt      *Reprompter
 	llmCreds      *LLMCredentials
+	cards         CardStore
 	m             *httpMetrics
 }
 
@@ -138,8 +139,11 @@ type handler struct {
 // and that route answers 503. llmCreds serves the LLM credential routes
 // (plan 5.6: GET /api/v1/llm-credentials, PUT and DELETE
 // /api/v1/llm-credentials/{provider}, POST /api/v1/llm-credentials/test);
+// nil and those routes answer 503. cards serves the dashboard card
+// routes (plan 6.5: GET/POST /api/v1/dashboard-cards, GET/PATCH/DELETE
+// /api/v1/dashboard-cards/{id}, PUT /api/v1/dashboard-cards/order);
 // nil and those routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -159,6 +163,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		review:        review,
 		reprompt:      reprompt,
 		llmCreds:      llmCreds,
+		cards:         cards,
 		m:             newHTTPMetrics(),
 	}
 
@@ -224,6 +229,15 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/budgets", h.budgetsCreate)
 		r.Patch("/v1/budgets/{id}", h.budgetsUpdate)
 		r.Delete("/v1/budgets/{id}", h.budgetsDelete)
+		// Dashboard cards (plan 6.5, migration 0008): saved Explore
+		// views. Unlike budgets there IS a single-GET route; the static
+		// /order segment wins over /{id} (chi routing).
+		r.Get("/v1/dashboard-cards", h.cardsList)
+		r.Post("/v1/dashboard-cards", h.cardsCreate)
+		r.Get("/v1/dashboard-cards/{id}", h.cardsGet)
+		r.Patch("/v1/dashboard-cards/{id}", h.cardsUpdate)
+		r.Delete("/v1/dashboard-cards/{id}", h.cardsDelete)
+		r.Put("/v1/dashboard-cards/order", h.cardsSetOrder)
 		// Notifications (step 3.3): list with unread/limit/offset
 		// filters, idempotent mark-read, and the unread count the
 		// browser badge polls.

@@ -31,7 +31,7 @@ func newImportRunServer(t *testing.T, imp ImportStore, txs TransactionStore) (ht
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, txs, nil, nil, nil, imp, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, txs, nil, nil, nil, imp, nil, nil, nil, nil, nil), key
 }
 
 // setJobStatus overwrites a seeded job's status directly (the only
@@ -181,7 +181,7 @@ func TestImportRunGates(t *testing.T) {
 	setJobStatus(store, jobID, "mapping")
 
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, &memTxStore{}, nil, nil, nil, store, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, &memTxStore{}, nil, nil, nil, store, nil, nil, nil, nil, nil)
 		if code, _ := doReq(t, h, http.MethodPost, "/api/v1/imports/"+jobID+"/run", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}
@@ -300,7 +300,7 @@ func TestImportRun(t *testing.T) {
 	// The real jobs store is wired in so the run's plan-5.4 chain
 	// (inserts -> pending categorise job) is exercised for real.
 	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil,
-		repo.NewAccountStore(pool), nil, repo.NewTransactionStore(pool), nil, nil, nil, repo.NewImportJobStore(pool), repo.NewCategoriseJobStore(pool), nil, nil, nil)
+		repo.NewAccountStore(pool), nil, repo.NewTransactionStore(pool), nil, nil, nil, repo.NewImportJobStore(pool), repo.NewCategoriseJobStore(pool), nil, nil, nil, nil)
 	hdr := authHdr(mintIdentityToken(t, key, sub, sub+"@localhost", sub, sub))
 
 	// The 5.4 import chain: a run that inserts transactions enqueues

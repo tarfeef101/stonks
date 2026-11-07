@@ -79,6 +79,7 @@ func main() {
 		review        server.ReviewStore
 		reprompt      *server.Reprompter
 		llmCreds      *server.LLMCredentials
+		cards         server.CardStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -189,9 +190,13 @@ func main() {
 				return llm.New(baseURL, apiKey, model, llm.WithTimeout(20*time.Second)), nil
 			},
 		}
+		// Dashboard cards (plan 6.5, migration 0008): same pool; name +
+		// explore_state are DEK-encrypted by the repo layer, the handlers
+		// pass the per-user DEK from bootstrap (like every other store).
+		cards = repo.NewDashboardCardStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, cards)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

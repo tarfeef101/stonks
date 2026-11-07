@@ -80,11 +80,23 @@
 		"col_spend": "Spend",
 		"col_income": "Income",
 		"col_net": "Net",
-		"row_count": "{n} transactions"
+		"row_count": "{n} transactions",
+		"save_as_card": "Save as card",
+		"save_prompt": "Card name:",
+		"saved": "Card saved"
 	},
 	"dashboards": {
 		"heading": "Dashboards",
-		"empty": "Dashboards aren't built yet — this page will show your finances at a glance."
+		"empty": "No cards yet — each saved Explore view appears here.",
+		"empty_cta": "Save a view from the Explore page",
+		"sign_in": "Sign in to see your dashboards.",
+		"loading": "Loading cards…",
+		"rename": "Rename",
+		"move_up": "Move up",
+		"move_down": "Move down",
+		"delete": "Delete",
+		"delete_confirm": "Delete this card?",
+		"open": "Open {name} in Explore"
 	},
 	"budgets": {
 		"heading": "Budgets",

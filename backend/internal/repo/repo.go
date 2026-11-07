@@ -54,6 +54,9 @@ var (
 	// 5.4 categorise jobs.
 	ErrCategoriseJobNotFound  = errors.New("repo: categorise job not found")
 	ErrNoPendingCategoriseJob = errors.New("repo: no pending categorise job")
+
+	// 6.5 dashboard cards.
+	ErrDashboardCardNotFound = errors.New("repo: dashboard card not found")
 )
 
 // hashName computes the §5 plaintext name_hash.
