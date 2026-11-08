@@ -108,6 +108,7 @@ type handler struct {
 	reprompt      *Reprompter
 	llmCreds      *LLMCredentials
 	cards         CardStore
+	mortgages     MortgageStore
 	m             *httpMetrics
 }
 
@@ -142,8 +143,10 @@ type handler struct {
 // nil and those routes answer 503. cards serves the dashboard card
 // routes (plan 6.5: GET/POST /api/v1/dashboard-cards, GET/PATCH/DELETE
 // /api/v1/dashboard-cards/{id}, PUT /api/v1/dashboard-cards/order);
-// nil and those routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore) http.Handler {
+// nil and those routes answer 503. mortgages serves the mortgage routes
+// (plan 7.1: GET/POST /api/v1/mortgages, GET/PATCH/DELETE
+// /api/v1/mortgages/{id}); nil and those routes answer 503.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -164,6 +167,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		reprompt:      reprompt,
 		llmCreds:      llmCreds,
 		cards:         cards,
+		mortgages:     mortgages,
 		m:             newHTTPMetrics(),
 	}
 
@@ -238,6 +242,15 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Patch("/v1/dashboard-cards/{id}", h.cardsUpdate)
 		r.Delete("/v1/dashboard-cards/{id}", h.cardsDelete)
 		r.Put("/v1/dashboard-cards/order", h.cardsSetOrder)
+		// Mortgages (plan 7.1, migration 0009): the mortgage CRUD over a
+		// single mortgage-typed account (existence/type checked in the
+		// handler). No PUT; account_id is immutable (absent from the
+		// PATCH body).
+		r.Get("/v1/mortgages", h.mortgagesList)
+		r.Post("/v1/mortgages", h.mortgagesCreate)
+		r.Get("/v1/mortgages/{id}", h.mortgagesGet)
+		r.Patch("/v1/mortgages/{id}", h.mortgagesUpdate)
+		r.Delete("/v1/mortgages/{id}", h.mortgagesDelete)
 		// Notifications (step 3.3): list with unread/limit/offset
 		// filters, idempotent mark-read, and the unread count the
 		// browser badge polls.

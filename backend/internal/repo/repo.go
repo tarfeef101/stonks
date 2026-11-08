@@ -57,6 +57,9 @@ var (
 
 	// 6.5 dashboard cards.
 	ErrDashboardCardNotFound = errors.New("repo: dashboard card not found")
+
+	// 7.1 mortgages.
+	ErrMortgageNotFound = errors.New("repo: mortgage not found")
 )
 
 // hashName computes the §5 plaintext name_hash.
