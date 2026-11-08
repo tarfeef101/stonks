@@ -12,13 +12,16 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"finance-tracker/internal/authn"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/mail"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -52,15 +55,48 @@ func (m *memStore) get(sub string) (UserRow, bool) {
 	return r, ok
 }
 
-func (m *memStore) UpsertUser(_ context.Context, sub, email, displayName string, wrappedDEK []byte) (UserRow, error) {
+// captureMailer is a mail.Sender test double (step 8.1): records every
+// message and optionally fails with err. onSend, if set, runs after the
+// append (outside the lock) so it can observe the stores the test built.
+type captureMailer struct {
+	mu     sync.Mutex
+	msgs   []mail.Message
+	err    error
+	onSend func()
+}
+
+func (c *captureMailer) Send(_ context.Context, m mail.Message) error {
+	c.mu.Lock()
+	c.msgs = append(c.msgs, m)
+	err := c.err
+	c.mu.Unlock()
+	if c.onSend != nil {
+		c.onSend()
+	}
+	return err
+}
+
+func (c *captureMailer) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.msgs)
+}
+
+func (c *captureMailer) at(i int) mail.Message {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.msgs[i]
+}
+
+func (m *memStore) UpsertUser(_ context.Context, sub, email, displayName string, wrappedDEK []byte) (UserRow, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if row, ok := m.rows[sub]; ok {
-		return row, nil // stored row wins
+		return row, false, nil // stored row wins (conflict loser: not created)
 	}
 	row := UserRow{ID: "id-" + sub, Sub: sub, Email: email, DisplayName: displayName, WrappedDEK: wrappedDEK}
 	m.rows[sub] = row
-	return row, nil
+	return row, true, nil
 }
 
 func testKEK(t *testing.T) []byte {
@@ -137,11 +173,11 @@ func mintIdentityToken(t *testing.T, key jwk.Key, sub, email, name, username str
 }
 
 func TestNewBootstrapFailFast(t *testing.T) {
-	if _, err := NewBootstrap(nil, testKEK(t)); err == nil || err.Error() != "server: user store is required" {
+	if _, err := NewBootstrap(nil, testKEK(t), nil); err == nil || err.Error() != "server: user store is required" {
 		t.Fatalf("nil store: want %q, got %v", "server: user store is required", err)
 	}
 	short := make([]byte, 16)
-	if _, err := NewBootstrap(newMemStore(), short); err == nil {
+	if _, err := NewBootstrap(newMemStore(), short, nil); err == nil {
 		t.Fatal("short KEK: want error, got nil")
 	}
 }
@@ -149,7 +185,7 @@ func TestNewBootstrapFailFast(t *testing.T) {
 func TestEnsureUserCreatesWrappedDEK(t *testing.T) {
 	kek := testKEK(t)
 	store := newMemStore()
-	b, err := NewBootstrap(store, kek)
+	b, err := NewBootstrap(store, kek, nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -180,7 +216,7 @@ func TestEnsureUserCreatesWrappedDEK(t *testing.T) {
 func TestEnsureUserRepeatLoginKeepsFirstRow(t *testing.T) {
 	kek := testKEK(t)
 	store := newMemStore()
-	b, err := NewBootstrap(store, kek)
+	b, err := NewBootstrap(store, kek, nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -213,7 +249,7 @@ func TestEnsureUserRepeatLoginKeepsFirstRow(t *testing.T) {
 
 func TestEnsureUserClaimFallbacks(t *testing.T) {
 	kek := testKEK(t)
-	b, err := NewBootstrap(newMemStore(), kek)
+	b, err := NewBootstrap(newMemStore(), kek, nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -240,6 +276,103 @@ func TestEnsureUserClaimFallbacks(t *testing.T) {
 	}
 	if _, err := b.EnsureUser(context.Background(), authn.Identity{}); err == nil {
 		t.Fatal("empty sub: want error, got nil")
+	}
+}
+
+// TestEnsureUserWelcomeExactlyOnce (step 8.1): the welcome email fires on
+// the row-creating call only — a repeat login (created=false) never
+// sends, and the message carries the stored row's email and display name.
+func TestEnsureUserWelcomeExactlyOnce(t *testing.T) {
+	m := &captureMailer{}
+	b, err := NewBootstrap(newMemStore(), testKEK(t), m)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	id := authn.Identity{Sub: "w-sub", Email: "w@example.com", Name: "Wel Come"}
+	if _, err := b.EnsureUser(context.Background(), id); err != nil {
+		t.Fatalf("first EnsureUser: %v", err)
+	}
+	if m.count() != 1 {
+		t.Fatalf("sends after first EnsureUser = %d, want 1", m.count())
+	}
+	got := m.at(0)
+	if got.To != "w@example.com" || got.Subject != "Welcome to Personal Finance Tracker" {
+		t.Errorf("welcome = to %q subject %q", got.To, got.Subject)
+	}
+	if !strings.Contains(got.Text, "Wel Come") || !strings.Contains(got.HTML, "Wel Come") {
+		t.Error("welcome bodies missing the display name")
+	}
+	// Repeat login: created=false, no second send.
+	if _, err := b.EnsureUser(context.Background(), id); err != nil {
+		t.Fatalf("second EnsureUser: %v", err)
+	}
+	if m.count() != 1 {
+		t.Errorf("sends after repeat EnsureUser = %d, want 1", m.count())
+	}
+}
+
+// TestEnsureUserWelcomeConcurrent (step 8.1): 8 racing first logins for
+// the same sub yield exactly one welcome — the store's insert-once flag
+// (RowsAffected in production) is the exactly-once mechanism.
+func TestEnsureUserWelcomeConcurrent(t *testing.T) {
+	m := &captureMailer{}
+	b, err := NewBootstrap(newMemStore(), testKEK(t), m)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = b.EnsureUser(context.Background(),
+				authn.Identity{Sub: "race-sub", Email: "race@example.com", Name: "Race"})
+		}(i)
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("goroutine %d: %v", i, e)
+		}
+	}
+	if m.count() != 1 {
+		t.Fatalf("concurrent sends = %d, want 1", m.count())
+	}
+}
+
+// TestEnsureUserNilMailer (step 8.1): a nil mailer is the disabled mode —
+// no panic, no sends, and the request still succeeds.
+func TestEnsureUserNilMailer(t *testing.T) {
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, err := b.EnsureUser(context.Background(),
+		authn.Identity{Sub: "nm-sub", Email: "nm@example.com", Name: "No Mail"}); err != nil {
+		t.Fatalf("EnsureUser with nil mailer: %v", err)
+	}
+}
+
+// TestEnsureUserMailFailureSwallowed (step 8.1): a failing mailer must
+// never fail the request — the row is returned as if mail did not exist.
+func TestEnsureUserMailFailureSwallowed(t *testing.T) {
+	m := &captureMailer{err: errors.New("smtp down")}
+	b, err := NewBootstrap(newMemStore(), testKEK(t), m)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	row, err := b.EnsureUser(context.Background(),
+		authn.Identity{Sub: "fail-sub", Email: "fail@example.com", Name: "Fail"})
+	if err != nil {
+		t.Fatalf("EnsureUser must succeed despite mail failure: %v", err)
+	}
+	if row.Sub != "fail-sub" {
+		t.Fatalf("row.Sub = %q, want fail-sub", row.Sub)
+	}
+	if m.count() != 1 {
+		t.Fatalf("sends = %d, want 1", m.count())
 	}
 }
 
@@ -325,7 +458,7 @@ func countUsers(t *testing.T, pool *pgxpool.Pool, ctx context.Context, sub strin
 func TestPGUserStoreIdempotentAndRaceSafe(t *testing.T) {
 	pool, ctx := migratedPool(t)
 	kek := testKEK(t)
-	b, err := NewBootstrap(NewPGUserStore(pool), kek)
+	b, err := NewBootstrap(NewPGUserStore(pool), kek, nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}

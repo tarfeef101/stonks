@@ -200,11 +200,11 @@ func seedJobFile(store *memImportStore, accountID, fileName string, createdAt ti
 func newImportsServer(t *testing.T, store ImportStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, false), key
 }
 
 // doMultipart posts a multipart/form-data body to POST /api/v1/imports:
@@ -591,7 +591,7 @@ func TestImportsErrors(t *testing.T) {
 func TestImportsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, nil, &memImportStore{}, nil, nil, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, nil, &memImportStore{}, nil, nil, nil, nil, nil, nil, nil, false)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/imports", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token (list): status = %d, want 401", code)
 		}

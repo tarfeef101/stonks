@@ -177,11 +177,11 @@ func (m *memCardStore) SetOrder(_ context.Context, userID string, ids []string) 
 func newCardServer(t *testing.T, store CardStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil, nil, false), key
 }
 
 // TestCardsCRUD covers the happy path end to end: create (201, trimmed
@@ -717,7 +717,7 @@ func TestCardsCrossUser(t *testing.T) {
 func TestCardsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, &memCardStore{}, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, &memCardStore{}, nil, nil, false)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/dashboard-cards", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"finance-tracker/internal/authn"
+	"finance-tracker/internal/mail"
 )
 
 // memSettingsStore is an in-memory SettingsStore. Get auto-creates a
@@ -105,18 +106,39 @@ func (m *memSettingsStore) Update(_ context.Context, sub string, p SettingsPatch
 	return st, nil
 }
 
+// OnboardedAt reports the row's onboarding time, or nil when the row is
+// missing or the flag is unset (mirrors the pg store: no row = never
+// onboarded, not an error).
+func (m *memSettingsStore) OnboardedAt(_ context.Context, sub string) (*time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, ok := m.rows[sub]
+	if !ok {
+		return nil, nil
+	}
+	return st.OnboardedAt, nil
+}
+
 // newSettingsServer builds a router with a live token verifier, an
 // in-memory bootstrap (user store), and the given settings store (nil
 // allowed — the 503 path). Returns the handler and a minted access
 // token for sub.
 func newSettingsServer(t *testing.T, sub string, store SettingsStore) (http.Handler, string) {
+	return newSettingsServerWithMail(t, sub, store, nil, false)
+}
+
+// newSettingsServerWithMail is newSettingsServer with the step 8.1
+// mailer and mail-enabled flag wired into the handler. The bootstrap
+// deliberately gets a nil mailer so tests see only the settings-route
+// (verification) sends.
+func newSettingsServerWithMail(t *testing.T, sub string, store SettingsStore, mailer mail.Sender, mailEnabled bool) (http.Handler, string) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, mailer, mailEnabled)
 	return h, mintIdentityToken(t, key, sub, sub+"@localhost", sub, sub)
 }
 
@@ -278,6 +300,87 @@ func TestPatchOnboardedOneWay(t *testing.T) {
 	}
 }
 
+// TestPatchOnboardedVerificationEmail (step 8.1): the first flip of the
+// onboarded flag sends exactly one verification email, and only AFTER
+// the update is applied (the onSend hook asserts the store already
+// reports the flag); a re-PATCH of the one-way flag sends nothing more.
+func TestPatchOnboardedVerificationEmail(t *testing.T) {
+	store := newMemSettingsStore()
+	// Pre-seed a row the way EnsureUser does in production: the users
+	// row carries the token's email, and ComposeVerification refuses an
+	// empty recipient (the mem store's auto-created row would not send).
+	seed := defaultSettings()
+	seed.Email = "vmail-sub@localhost"
+	seed.DisplayName = "vmail-sub"
+	store.rows["vmail-sub"] = seed
+	m := &captureMailer{}
+	var atSend *time.Time
+	m.onSend = func() {
+		at, _ := store.OnboardedAt(context.Background(), "vmail-sub")
+		atSend = at
+	}
+	h, token := newSettingsServerWithMail(t, "vmail-sub", store, m, true)
+	hdr := map[string]string{"Authorization": "Bearer " + token}
+
+	code, body := doReq(t, h, http.MethodPatch, "/api/v1/settings", `{"onboarded":true}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("first onboard PATCH = %d, want 200 (body %s)", code, body)
+	}
+	if m.count() != 1 {
+		t.Fatalf("sends after first flip = %d, want 1", m.count())
+	}
+	if atSend == nil {
+		t.Fatal("at send time the store had not recorded onboarded_at yet")
+	}
+	got := m.at(0)
+	if got.To != "vmail-sub@localhost" || got.Subject != "Your Personal Finance Tracker account is set up" {
+		t.Errorf("verification = to %q subject %q", got.To, got.Subject)
+	}
+	// The token's name claim is the sub here, so the bodies must carry it.
+	if !strings.Contains(got.Text, "vmail-sub") || !strings.Contains(got.HTML, "vmail-sub") {
+		t.Error("verification bodies missing the display name")
+	}
+
+	// Re-PATCH the one-way flag: prior is set, no second send.
+	code, body = doReq(t, h, http.MethodPatch, "/api/v1/settings", `{"onboarded":true}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("re-PATCH = %d, want 200 (body %s)", code, body)
+	}
+	if m.count() != 1 {
+		t.Errorf("sends after re-PATCH = %d, want 1", m.count())
+	}
+}
+
+// TestGetSettingsMailEnabled (step 8.1): the GET envelope carries
+// mail_enabled, reflecting the handler wiring (true and false).
+func TestGetSettingsMailEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mailEnabled bool
+	}{
+		{"enabled", true},
+		{"disabled", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, token := newSettingsServerWithMail(t, "mailflag-sub", newMemSettingsStore(), nil, tc.mailEnabled)
+			code, body := doReq(t, h, http.MethodGet, "/api/v1/settings", "",
+				map[string]string{"Authorization": "Bearer " + token})
+			if code != http.StatusOK {
+				t.Fatalf("GET settings = %d, want 200 (body %s)", code, body)
+			}
+			var out struct {
+				MailEnabled bool `json:"mail_enabled"`
+			}
+			if err := json.Unmarshal([]byte(body), &out); err != nil {
+				t.Fatalf("decode: %v (%s)", err, body)
+			}
+			if out.MailEnabled != tc.mailEnabled {
+				t.Errorf("mail_enabled = %v, want %v (body %s)", out.MailEnabled, tc.mailEnabled, body)
+			}
+		})
+	}
+}
+
 func TestSettingsUnauthorized(t *testing.T) {
 	h, _ := newSettingsServer(t, "auth-sub", newMemSettingsStore())
 	for _, method := range []string{http.MethodGet, http.MethodPatch} {
@@ -290,7 +393,7 @@ func TestSettingsUnauthorized(t *testing.T) {
 
 func TestSettingsNotConfigured(t *testing.T) {
 	// Either dependency missing (no pool in main.go) answers 503 internal.
-	bootstrap, err := NewBootstrap(newMemStore(), testKEK(t))
+	bootstrap, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -304,7 +407,7 @@ func TestSettingsNotConfigured(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := mintKey(t)
-			h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), tc.bootstrap, tc.settings, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), tc.bootstrap, tc.settings, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
 			token := mintIdentityToken(t, key, "nc-sub", "n@localhost", "N", "n")
 			code, body := doReq(t, h, http.MethodGet, "/api/v1/settings", "",
 				map[string]string{"Authorization": "Bearer " + token})
@@ -340,7 +443,7 @@ func TestPGSettingsStore(t *testing.T) {
 	defer pool.Close()
 
 	kek := testKEK(t)
-	b, err := NewBootstrap(NewPGUserStore(pool), kek)
+	b, err := NewBootstrap(NewPGUserStore(pool), kek, nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}

@@ -217,11 +217,11 @@ func catBody(catID string) string {
 func newReviewServer(t *testing.T, store ReviewStore, rep *Reprompter) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil, nil, nil, nil, false), key
 }
 
 // reviewHdr is the Authorization header for a fresh identity token on

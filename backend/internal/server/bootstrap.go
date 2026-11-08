@@ -9,9 +9,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"finance-tracker/internal/authn"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/mail"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -29,9 +31,12 @@ type UserRow struct {
 
 // UserStore persists users rows. Implementations must be idempotent for a
 // given sub: repeat calls return the stored row (first login wins), never
-// a second row and never an overwritten wrapped_dek.
+// a second row and never an overwritten wrapped_dek. created is true only
+// on the call that inserted the row (false for conflict losers, which see
+// the winner's row) — it is the exactly-once flag for first-login side
+// effects (step 8.1: the welcome email).
 type UserStore interface {
-	UpsertUser(ctx context.Context, sub, email, displayName string, wrappedDEK []byte) (UserRow, error)
+	UpsertUser(ctx context.Context, sub, email, displayName string, wrappedDEK []byte) (UserRow, bool, error)
 }
 
 // pgUserStore is the production UserStore backed by the users table.
@@ -48,18 +53,20 @@ func NewPGUserStore(pool *pgxpool.Pool) UserStore {
 	return &pgUserStore{pool: pool}
 }
 
-func (s *pgUserStore) UpsertUser(ctx context.Context, sub, email, displayName string, wrappedDEK []byte) (UserRow, error) {
+func (s *pgUserStore) UpsertUser(ctx context.Context, sub, email, displayName string, wrappedDEK []byte) (UserRow, bool, error) {
 	// Idempotent create. A conflicting concurrent INSERT blocks on the
 	// winner's committed transaction, so the SELECT below is guaranteed to
 	// see the row. ON CONFLICT DO NOTHING yields no RETURNING row on
 	// conflict, hence the second statement. Losers' freshly wrapped DEKs
 	// are simply discarded — they never touch the stored pack.
-	_, err := s.pool.Exec(ctx, `
+	// RowsAffected doubles as the exactly-once flag: 1 on the winning
+	// insert, 0 on every conflict (no extra query).
+	res, err := s.pool.Exec(ctx, `
 		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (auth0_sub) DO NOTHING`, sub, email, displayName, wrappedDEK)
 	if err != nil {
-		return UserRow{}, fmt.Errorf("server: insert user %q: %w", sub, err)
+		return UserRow{}, false, fmt.Errorf("server: insert user %q: %w", sub, err)
 	}
 	var row UserRow
 	err = s.pool.QueryRow(ctx, `
@@ -68,31 +75,34 @@ func (s *pgUserStore) UpsertUser(ctx context.Context, sub, email, displayName st
 		WHERE auth0_sub = $1`, sub).
 		Scan(&row.ID, &row.Sub, &row.Email, &row.DisplayName, &row.WrappedDEK)
 	if errors.Is(err, sql.ErrNoRows) {
-		return UserRow{}, fmt.Errorf("server: user %q not found after insert", sub)
+		return UserRow{}, false, fmt.Errorf("server: user %q not found after insert", sub)
 	}
 	if err != nil {
-		return UserRow{}, fmt.Errorf("server: fetch user %q: %w", sub, err)
+		return UserRow{}, false, fmt.Errorf("server: fetch user %q: %w", sub, err)
 	}
-	return row, nil
+	return row, res.RowsAffected() == 1, nil
 }
 
 // Bootstrap wires a UserStore to the KEK so the API can ensure a user row
-// on first authenticated request.
+// on first authenticated request. mailer (may be nil = disabled) sends
+// the exactly-once welcome email on the row-creating call (step 8.1).
 type Bootstrap struct {
-	store UserStore
-	kek   []byte
+	store  UserStore
+	kek    []byte
+	mailer mail.Sender
 }
 
 // NewBootstrap returns a Bootstrap. It fails fast on a nil store or a KEK
-// that is not exactly crypto.KEKSize bytes.
-func NewBootstrap(store UserStore, kek []byte) (*Bootstrap, error) {
+// that is not exactly crypto.KEKSize bytes. mailer may be nil: the
+// welcome email is then skipped silently.
+func NewBootstrap(store UserStore, kek []byte, mailer mail.Sender) (*Bootstrap, error) {
 	if store == nil {
 		return nil, errors.New("server: user store is required")
 	}
 	if len(kek) != crypto.KEKSize {
 		return nil, fmt.Errorf("server: KEK must be %d bytes, got %d", crypto.KEKSize, len(kek))
 	}
-	return &Bootstrap{store: store, kek: kek}, nil
+	return &Bootstrap{store: store, kek: kek, mailer: mailer}, nil
 }
 
 // EnsureUser idempotently creates the users row for id. The first call
@@ -124,7 +134,22 @@ func (b *Bootstrap) EnsureUser(ctx context.Context, id authn.Identity) (UserRow,
 	if err != nil {
 		return UserRow{}, fmt.Errorf("server: wrap DEK: %w", err)
 	}
-	return b.store.UpsertUser(ctx, id.Sub, email, displayName, wrapped)
+	row, created, err := b.store.UpsertUser(ctx, id.Sub, email, displayName, wrapped)
+	if err != nil {
+		return UserRow{}, err
+	}
+	// Exactly-once welcome (step 8.1): only the row-creating call sends
+	// (the conflict loser gets created=false), and a mail failure is
+	// logged and swallowed — it must never fail the request.
+	if created && b.mailer != nil {
+		msg, cerr := mail.ComposeWelcome(row.Email, row.DisplayName)
+		if cerr != nil {
+			slog.Error("compose welcome email failed", "sub", row.Sub, "error", cerr)
+		} else if serr := b.mailer.Send(ctx, msg); serr != nil {
+			slog.Error("send welcome email failed", "sub", row.Sub, "to", row.Email, "error", serr)
+		}
+	}
+	return row, nil
 }
 
 // UnwrapDEK opens the row's wrapped DEK pack with the KEK so handlers can

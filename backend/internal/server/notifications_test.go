@@ -138,11 +138,11 @@ func (m *memNotificationStore) CountUnread(_ context.Context, userID string) (in
 func newNotificationsServer(t *testing.T, store NotificationStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, false), key
 }
 
 // listIDs decodes a list body and returns its ids in order (sameIDs, the
@@ -549,7 +549,7 @@ func TestNotificationsUnreadCount(t *testing.T) {
 func TestNotificationsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, &memNotificationStore{}, nil, nil, nil, nil, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, &memNotificationStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

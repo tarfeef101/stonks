@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"finance-tracker/internal/authn"
+	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
 
 	"github.com/go-chi/chi/v5"
@@ -109,6 +110,8 @@ type handler struct {
 	llmCreds      *LLMCredentials
 	cards         CardStore
 	mortgages     MortgageStore
+	mailer        mail.Sender
+	mailEnabled   bool
 	m             *httpMetrics
 }
 
@@ -145,8 +148,11 @@ type handler struct {
 // /api/v1/dashboard-cards/{id}, PUT /api/v1/dashboard-cards/order);
 // nil and those routes answer 503. mortgages serves the mortgage routes
 // (plan 7.1: GET/POST /api/v1/mortgages, GET/PATCH/DELETE
-// /api/v1/mortgages/{id}); nil and those routes answer 503.
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore) http.Handler {
+// /api/v1/mortgages/{id}); nil and those routes answer 503. mailer
+// (may be nil = no email; the settings routes then skip the verification
+// send) delivers the transactional emails (step 8.1); mailEnabled
+// reflects it in the settings envelope (mail_enabled).
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -168,6 +174,8 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		llmCreds:      llmCreds,
 		cards:         cards,
 		mortgages:     mortgages,
+		mailer:        mailer,
+		mailEnabled:   mailEnabled,
 		m:             newHTTPMetrics(),
 	}
 

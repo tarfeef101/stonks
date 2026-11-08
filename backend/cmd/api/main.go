@@ -17,6 +17,7 @@ import (
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
 	"finance-tracker/internal/llm"
+	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
 	"finance-tracker/internal/server"
 
@@ -58,6 +59,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer nrApp.Shutdown(5 * time.Second)
+
+	// Transactional email (step 8.1): configured from SMTP_* regardless
+	// of the database — with no host the sender is a NopSender (messages
+	// are logged and dropped), so a mail outage can never block the API.
+	mailer := mail.New(cfg.SMTP)
+	mailEnabled := cfg.SMTP.Host != ""
 
 	// Database pool. pgxpool.New does not connect immediately; readiness
 	// is surfaced through /readyz. An empty DATABASE_URL leaves the pool
@@ -126,7 +133,7 @@ func main() {
 			logger.Error("kek parse failed", "error", err)
 			os.Exit(1)
 		}
-		bootstrap, err = server.NewBootstrap(server.NewPGUserStore(pool), kek)
+		bootstrap, err = server.NewBootstrap(server.NewPGUserStore(pool), kek, mailer)
 		if err != nil {
 			logger.Error("user bootstrap init failed", "error", err)
 			os.Exit(1)
@@ -196,7 +203,7 @@ func main() {
 		cards = repo.NewDashboardCardStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, cards, repo.NewMortgageStore(pool))
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, cards, repo.NewMortgageStore(pool), mailer, mailEnabled)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

@@ -169,11 +169,11 @@ func (m *memBudgetStore) Delete(_ context.Context, userID, id string) error {
 func newBudgetServer(t *testing.T, store BudgetStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false), key
 }
 
 // TestBudgetsCRUD covers the happy path end to end: create (201, trimmed
@@ -616,7 +616,7 @@ func TestBudgetsForeignTargets(t *testing.T) {
 func TestBudgetsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, &memBudgetStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, &memBudgetStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/budgets", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

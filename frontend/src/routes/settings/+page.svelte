@@ -13,6 +13,7 @@
 		type LLMProvider,
 		type LLMTestResult
 	} from '#lib/api/llmcredentials';
+	import { loadSettings, settings } from '#lib/settings';
 
 	// LLM credentials (step 5.6): at most one credential per provider
 	// (self-hosted, OpenAI, custom endpoint) for the endpoint the
@@ -174,6 +175,9 @@
 	// a signed-out load simply 401s and the card stays hidden behind
 	// the sign-in prompt).
 	onMount(() => {
+		// Step 8.1: the mail_enabled flag drives the "email disabled"
+		// notice below; fail-open (a failed load just hides it).
+		void loadSettings();
 		void listLLMCredentials()
 			.then((rows) => {
 				credentials = rows;
@@ -192,6 +196,10 @@
 <section class="space-y-3">
 	<h1 class="text-2xl font-semibold">{$_('settings.title')}</h1>
 	<p class="max-w-2xl text-sm text-zinc-600">{$_('settings.intro')}</p>
+
+	{#if $settings && !$settings.mail_enabled}
+		<p class="text-sm text-zinc-500">{$_('settings.mail_disabled')}</p>
+	{/if}
 
 	{#if !$user}
 		<p class="text-sm text-zinc-600">

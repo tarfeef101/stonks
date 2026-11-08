@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"finance-tracker/internal/mail"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -61,6 +63,19 @@ type SettingsPatch struct {
 type SettingsStore interface {
 	Get(ctx context.Context, sub string) (Settings, error)
 	Update(ctx context.Context, sub string, p SettingsPatch) (Settings, error)
+	// OnboardedAt reports the onboarding completion time for sub, or nil
+	// when unset (flag never flipped, or no row at all). Step 8.1 uses it
+	// to detect the first flip for the verification email.
+	OnboardedAt(ctx context.Context, sub string) (*time.Time, error)
+}
+
+// settingsOut is the settings response envelope: the Settings fields plus
+// mail_enabled — whether the server is configured to send transactional
+// email (the frontend shows a notice when it is not). Both GET and PATCH
+// render this so the client's Settings-typed store stays consistent.
+type settingsOut struct {
+	Settings
+	MailEnabled bool `json:"mail_enabled"`
 }
 
 // pgSettingsStore is the production SettingsStore backed by the users
@@ -84,6 +99,20 @@ const settingsSelect = `
 	SELECT email, display_name, language, default_currency, default_period,
 	       notify_monthly, notify_quarterly, notify_annual, onboarded_at
 	FROM users`
+
+func (s *pgSettingsStore) OnboardedAt(ctx context.Context, sub string) (*time.Time, error) {
+	var at *time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT onboarded_at FROM users WHERE auth0_sub = $1`, sub).
+		Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil // no row: never onboarded
+	}
+	if err != nil {
+		return nil, fmt.Errorf("server: fetch onboarded_at %q: %w", sub, err)
+	}
+	return at, nil
+}
 
 func (s *pgSettingsStore) Get(ctx context.Context, sub string) (Settings, error) {
 	var st Settings
@@ -255,7 +284,7 @@ func (h *handler) getSettings(w http.ResponseWriter, r *http.Request) {
 		h.settingsError(w, sub, "get", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	writeJSON(w, http.StatusOK, settingsOut{Settings: st, MailEnabled: h.mailEnabled})
 }
 
 func (h *handler) patchSettings(w http.ResponseWriter, r *http.Request) {
@@ -273,12 +302,35 @@ func (h *handler) patchSettings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
+	// Verification email (step 8.1): the prior flag is read BEFORE the
+	// Update so the first flip is detectable. validatePatch above already
+	// rejects onboarded=false, so a non-nil Onboarded means true.
+	// Tolerance: concurrent duplicate first-PATCHes may both read nil and
+	// both send (documented in the step 8.1 report; no locking in
+	// iteration 1).
+	var priorOnboardedAt *time.Time
+	if patch.Onboarded != nil {
+		at, err := h.settings.OnboardedAt(r.Context(), sub)
+		if err != nil {
+			h.settingsError(w, sub, "onboarded_at", err)
+			return
+		}
+		priorOnboardedAt = at
+	}
 	st, err := h.settings.Update(r.Context(), sub, patch)
 	if err != nil {
 		h.settingsError(w, sub, "update", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	if patch.Onboarded != nil && priorOnboardedAt == nil && h.mailer != nil {
+		msg, cerr := mail.ComposeVerification(st.Email, st.DisplayName)
+		if cerr != nil {
+			slog.Error("compose verification email failed", "sub", sub, "error", cerr)
+		} else if serr := h.mailer.Send(r.Context(), msg); serr != nil {
+			slog.Error("send verification email failed", "sub", sub, "to", st.Email, "error", serr)
+		}
+	}
+	writeJSON(w, http.StatusOK, settingsOut{Settings: st, MailEnabled: h.mailEnabled})
 }
 
 // settingsError maps store errors to responses: missing row → 404

@@ -332,6 +332,7 @@
 	"settings": {
 		"title": "Settings",
 		"intro": "App settings — right now, the LLM endpoint the auto-categoriser talks to, per provider.",
+		"mail_disabled": "Email notifications are disabled on this server — no email is sent for account events.",
 		"sign_in_prompt": "Sign in to manage your settings.",
 		"loading": "Loading settings…",
 		"llm_title": "LLM credentials",

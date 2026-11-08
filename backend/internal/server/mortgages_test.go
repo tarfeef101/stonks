@@ -180,11 +180,11 @@ func (m *memMortgageStore) Delete(_ context.Context, userID, id string) error {
 func newMortgageServer(t *testing.T, accounts AccountStore, store MortgageStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil, false), key
 }
 
 // baseMortgageBody is the full 9-field create body with every value

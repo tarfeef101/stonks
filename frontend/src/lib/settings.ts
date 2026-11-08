@@ -25,6 +25,8 @@ export interface Settings {
 	notify_annual: boolean;
 	/** ISO-8601 timestamp, or null while onboarding is incomplete. */
 	onboarded_at: string | null;
+	/** Server-wide: whether transactional email is configured (step 8.1). */
+	mail_enabled: boolean;
 }
 
 /**

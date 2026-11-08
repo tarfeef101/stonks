@@ -145,7 +145,7 @@ func (c *credTestStub) Categorize(_ context.Context, req llm.Request) (*llm.Resp
 func newCredServer(t *testing.T, store LLMCredentialStore, stub *credTestStub, factoryErr error) (http.Handler, jwk.Key, *[]llmArgs) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -161,7 +161,7 @@ func newCredServer(t *testing.T, store LLMCredentialStore, stub *credTestStub, f
 			return stub, nil
 		},
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil), key, calls
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil, nil, false), key, calls
 }
 
 // credHdr is the Authorization header for a fresh identity token on
@@ -721,10 +721,10 @@ func TestLLMCredNotConfigured(t *testing.T) {
 func newCredServerLLMNil(t *testing.T, store LLMCredentialStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
-	b, err := NewBootstrap(newMemStore(), testKEK(t))
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	wrap := &LLMCredentials{Store: store, Env: categorize.LLMEnv{Model: "test-env-model"}}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil, nil, false), key
 }
