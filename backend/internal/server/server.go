@@ -251,6 +251,11 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Get("/v1/mortgages/{id}", h.mortgagesGet)
 		r.Patch("/v1/mortgages/{id}", h.mortgagesUpdate)
 		r.Delete("/v1/mortgages/{id}", h.mortgagesDelete)
+		// Mortgage amortization + what-if (plan 7.3): read-only
+		// schedule computation over the stored spec, plus a
+		// stateless what-if (no second row is written).
+		r.Get("/v1/mortgages/{id}/amortization", h.mortgageAmortizationGet)
+		r.Post("/v1/mortgages/{id}/amortization/what-if", h.mortgageWhatIfPost)
 		// Notifications (step 3.3): list with unread/limit/offset
 		// filters, idempotent mark-read, and the unread count the
 		// browser badge polls.

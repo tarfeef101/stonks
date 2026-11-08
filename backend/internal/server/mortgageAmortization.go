@@ -1,0 +1,312 @@
+// Amortization endpoints (plan step 7.3) over the 7.2 mortgage engine:
+// GET /api/v1/mortgages/{id}/amortization serves the stored spec's full
+// schedule; POST /api/v1/mortgages/{id}/amortization/what-if compares a
+// scenario (rate / recurring extra / one-time prepayment) against the
+// base schedule. This handler is the ONLY converter between the
+// repo.MortgageSpec canonical strings and the engine's numeric
+// mortgage.Spec: the engine (7.2) is pure and never imports the repo
+// package. Every amount is served as a canonical 2-decimal string
+// (strconv.FormatFloat 'f' 2); the engine's own round2 guarantees the
+// values are already cent-exact.
+package server
+
+import (
+	"errors"
+	"log/slog"
+	"math"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"finance-tracker/internal/mortgage"
+	"finance-tracker/internal/repo"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// paymentOut is one schedule row on the wire: every amount is a
+// canonical 2-decimal string.
+type paymentOut struct {
+	Date      string `json:"date"`
+	Payment   string `json:"payment"`
+	Interest  string `json:"interest"`
+	Principal string `json:"principal"`
+	Extra     string `json:"extra"`
+	Balance   string `json:"balance"`
+}
+
+// scheduleOut is the amortization body: the 7.2 Schedule in canonical
+// strings. len(payments) == payoff_index (the engine's invariant).
+type scheduleOut struct {
+	BasePayment   string       `json:"base_payment"`
+	PayoffDate    string       `json:"payoff_date"`
+	PayoffIndex   int          `json:"payoff_index"`
+	TotalPaid     string       `json:"total_paid"`
+	TotalInterest string       `json:"total_interest"`
+	Payments      []paymentOut `json:"payments"`
+}
+
+// whatIfPrepayment is the one-time prepayment sub-object of the what-if
+// body (both fields required when the object is present).
+type whatIfPrepayment struct {
+	Amount *string `json:"amount"`
+	Date   *string `json:"date"`
+}
+
+// whatIfIn is the POST body: ALL fields optional, at least one present.
+// A nil field keeps the stored spec value.
+type whatIfIn struct {
+	AnnualRate            *string           `json:"annual_rate"`
+	ExtraPaymentAmount    *string           `json:"extra_payment_amount"`
+	ExtraPaymentFrequency *string           `json:"extra_payment_frequency"`
+	OneTimePrepayment     *whatIfPrepayment `json:"one_time_prepayment"`
+}
+
+// whatIfOut carries EXACTLY the plan's five what-if fields.
+// interest_saved is signed (a rate increase costs interest: "-123.45").
+type whatIfOut struct {
+	PayoffDate    string      `json:"payoff_date"`
+	TotalInterest string      `json:"total_interest"`
+	MonthsSaved   int         `json:"months_saved"`
+	InterestSaved string      `json:"interest_saved"`
+	Schedule      scheduleOut `json:"schedule"`
+}
+
+// fmtAmt renders a float as the canonical 2-decimal string.
+func fmtAmt(v float64) string {
+	return strconv.FormatFloat(v, 'f', 2, 64)
+}
+
+// toScheduleOut maps the engine's Schedule to the wire DTO: dates as
+// YYYY-MM-DD, every amount via fmtAmt.
+func toScheduleOut(sch mortgage.Schedule) scheduleOut {
+	payments := make([]paymentOut, len(sch.Payments))
+	for i, p := range sch.Payments {
+		payments[i] = paymentOut{
+			Date:      p.Date.Format("2006-01-02"),
+			Payment:   fmtAmt(p.Payment),
+			Interest:  fmtAmt(p.Interest),
+			Principal: fmtAmt(p.Principal),
+			Extra:     fmtAmt(p.Extra),
+			Balance:   fmtAmt(p.Balance),
+		}
+	}
+	return scheduleOut{
+		BasePayment:   fmtAmt(sch.BasePayment),
+		PayoffDate:    sch.PayoffDate.Format("2006-01-02"),
+		PayoffIndex:   sch.PayoffIndex,
+		TotalPaid:     fmtAmt(sch.TotalPaid),
+		TotalInterest: fmtAmt(sch.TotalInterest),
+		Payments:      payments,
+	}
+}
+
+// specToEngine converts a stored repo.Mortgage into the engine's numeric
+// Spec. The stored spec was validated at create/patch (7.1), so a parse
+// failure here is an UNREACHABLE backstop: the error maps to 500 in the
+// handler, never to a 400. AnnualRate is the PERCENT (the engine's
+// convention); StartDate parses to UTC midnight (time.Parse shape).
+func specToEngine(m repo.Mortgage) (mortgage.Spec, error) {
+	principal, err := strconv.ParseFloat(m.Spec.Principal, 64)
+	if err != nil {
+		return mortgage.Spec{}, errors.New("stored principal " + m.Spec.Principal + " does not parse: " + err.Error())
+	}
+	rate, err := strconv.ParseFloat(m.Spec.AnnualRate, 64)
+	if err != nil {
+		return mortgage.Spec{}, errors.New("stored annual_rate " + m.Spec.AnnualRate + " does not parse: " + err.Error())
+	}
+	extra, err := strconv.ParseFloat(m.Spec.ExtraPaymentAmount, 64)
+	if err != nil {
+		return mortgage.Spec{}, errors.New("stored extra_payment_amount " + m.Spec.ExtraPaymentAmount + " does not parse: " + err.Error())
+	}
+	start, err := time.Parse("2006-01-02", m.Spec.StartDate)
+	if err != nil {
+		return mortgage.Spec{}, errors.New("stored start_date " + m.Spec.StartDate + " does not parse: " + err.Error())
+	}
+	return mortgage.Spec{
+		Principal:             principal,
+		AnnualRate:            rate,
+		AmortizationYears:     m.Spec.AmortizationYears,
+		StartDate:             start,
+		PaymentFrequency:      m.Spec.PaymentFrequency,
+		ExtraPaymentAmount:    extra,
+		ExtraPaymentFrequency: m.Spec.ExtraPaymentFrequency,
+		ExtraPrepaymentType:   m.Spec.ExtraPrepaymentType,
+	}, nil
+}
+
+// whatIfProblems validates the PRESENT what-if fields, in wire order,
+// and returns their problems (the caller "; "-joins them into ONE 400).
+// Nil fields are skipped (absent = keep the stored value). The Canonical
+// amount errors are passed through verbatim (the 7.1 wording).
+func whatIfProblems(in *whatIfIn) []string {
+	var problems []string
+	if in.AnnualRate != nil {
+		v, err := strconv.ParseFloat(*in.AnnualRate, 64)
+		switch {
+		case err != nil:
+			problems = append(problems, "annual_rate must be a number")
+		case math.IsNaN(v) || v <= 0 || v > 100:
+			problems = append(problems, "annual_rate must be greater than 0 and at most 100")
+		}
+	}
+	if in.ExtraPaymentAmount != nil {
+		if c, err := repo.CanonicalAmount(*in.ExtraPaymentAmount); err != nil {
+			problems = append(problems, err.Error())
+		} else if v, _ := strconv.ParseFloat(c, 64); v < 0 {
+			problems = append(problems, "extra_payment_amount must not be negative")
+		}
+	}
+	if in.ExtraPaymentFrequency != nil {
+		switch *in.ExtraPaymentFrequency {
+		case "monthly", "quarterly", "yearly":
+		default:
+			problems = append(problems, "extra_payment_frequency must be monthly, quarterly, or yearly")
+		}
+	}
+	if in.OneTimePrepayment != nil {
+		pt := in.OneTimePrepayment
+		if pt.Amount == nil {
+			problems = append(problems, "one_time_prepayment.amount is required")
+		} else {
+			if c, err := repo.CanonicalAmount(*pt.Amount); err != nil {
+				problems = append(problems, err.Error())
+			} else if v, _ := strconv.ParseFloat(c, 64); v <= 0 {
+				problems = append(problems, "one_time_prepayment.amount must be greater than zero")
+			}
+		}
+		if pt.Date == nil {
+			problems = append(problems, "one_time_prepayment.date is required")
+		} else if _, err := time.Parse("2006-01-02", *pt.Date); err != nil {
+			problems = append(problems, "one_time_prepayment.date must be a date in YYYY-MM-DD form")
+		}
+	}
+	return problems
+}
+
+// mortgageAmortizationGet serves GET /api/v1/mortgages/{id}/amortization.
+// Same house order as 7.1: nil store -> 503, auth, malformed id -> 404
+// BEFORE the store, store error mapping, then the engine (a stored spec
+// always validates, so engine failure is a 500 backstop).
+func (h *handler) mortgageAmortizationGet(w http.ResponseWriter, r *http.Request) {
+	if h.mortgages == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !uuidShapeOK(id) {
+		writeAPIError(w, http.StatusNotFound, codeNotFound, "mortgage not found")
+		return
+	}
+	m, err := h.mortgages.Get(r.Context(), c.row.ID, id, c.dek)
+	if err != nil {
+		h.mortgageError(w, "amortization", err)
+		return
+	}
+	spec, err := specToEngine(m)
+	if err != nil {
+		slog.Error("mortgage operation failed", "op", "amortization", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
+		return
+	}
+	sch, err := mortgage.Generate(spec)
+	if err != nil {
+		slog.Error("mortgage operation failed", "op", "amortization", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, toScheduleOut(sch))
+}
+
+// mortgageWhatIfPost serves POST /api/v1/mortgages/{id}/amortization/what-if.
+// Steps 1-4 are identical to the GET; then the body: decode (400 house
+// text), the all-nil empty check, the present-field validation (ONE 400,
+// "; "-joined), the scenario composition, and the engine (the
+// after-payoff prepayment error maps to its EXACT 400 text; anything
+// else is a 500 backstop).
+func (h *handler) mortgageWhatIfPost(w http.ResponseWriter, r *http.Request) {
+	if h.mortgages == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !uuidShapeOK(id) {
+		writeAPIError(w, http.StatusNotFound, codeNotFound, "mortgage not found")
+		return
+	}
+	m, err := h.mortgages.Get(r.Context(), c.row.ID, id, c.dek)
+	if err != nil {
+		h.mortgageError(w, "what_if", err)
+		return
+	}
+	var in whatIfIn
+	if err := decodeBody(r, &in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "body must be a JSON object: "+err.Error())
+		return
+	}
+	if in.AnnualRate == nil && in.ExtraPaymentAmount == nil &&
+		in.ExtraPaymentFrequency == nil && in.OneTimePrepayment == nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "empty what-if: provide at least one field")
+		return
+	}
+	if problems := whatIfProblems(&in); len(problems) > 0 {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, strings.Join(problems, "; "))
+		return
+	}
+	spec, err := specToEngine(m)
+	if err != nil {
+		slog.Error("mortgage operation failed", "op", "what_if", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
+		return
+	}
+	// Compose the scenario: a present (validated) field overrides the
+	// stored spec value; nil keeps it. The validation above guarantees
+	// every dereference/parse here succeeds.
+	var sc mortgage.Scenario
+	if in.AnnualRate != nil {
+		v, _ := strconv.ParseFloat(*in.AnnualRate, 64)
+		sc.AnnualRate = &v
+	}
+	if in.ExtraPaymentAmount != nil {
+		canon, _ := repo.CanonicalAmount(*in.ExtraPaymentAmount)
+		v, _ := strconv.ParseFloat(canon, 64)
+		sc.ExtraPaymentAmount = &v
+	}
+	if in.ExtraPaymentFrequency != nil {
+		sc.ExtraPaymentFrequency = in.ExtraPaymentFrequency
+	}
+	if in.OneTimePrepayment != nil {
+		canon, _ := repo.CanonicalAmount(*in.OneTimePrepayment.Amount)
+		v, _ := strconv.ParseFloat(canon, 64)
+		d, _ := time.Parse("2006-01-02", *in.OneTimePrepayment.Date)
+		sc.OneTimePrepayment = &mortgage.Prepayment{Amount: v, Date: d}
+	}
+	cmp, err := mortgage.WhatIf(spec, sc)
+	if err != nil {
+		if err.Error() == "one-time prepayment date is after the payoff date" {
+			// The one engine runtime error with a 400 meaning (a valid
+			// future date is allowed input; the engine decides payoff).
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+			return
+		}
+		slog.Error("mortgage operation failed", "op", "what_if", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, whatIfOut{
+		PayoffDate:    cmp.PayoffDate.Format("2006-01-02"),
+		TotalInterest: fmtAmt(cmp.TotalInterest),
+		MonthsSaved:   cmp.MonthsSaved,
+		InterestSaved: fmtAmt(cmp.InterestSaved), // sign preserved
+		Schedule:      toScheduleOut(cmp.Schedule),
+	})
+}
