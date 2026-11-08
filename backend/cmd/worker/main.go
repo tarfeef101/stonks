@@ -20,8 +20,12 @@ import (
 	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
+	"finance-tracker/internal/report"
+	"finance-tracker/internal/schedule"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -114,11 +118,59 @@ func main() {
 		categorize.LLMEnv{BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model},
 	)
 
+	// Scheduler leader election (step 8.3): a dedicated *pgx.Conn (NOT
+	// the pool) holds the session advisory locks, so the lock survives
+	// pool churn. pgx.Connect dials eagerly, so a dead database fails
+	// fast at startup.
+	lc, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	leaderConn, lerr := pgx.Connect(lc, cfg.DatabaseURL)
+	lcancel()
+	if lerr != nil {
+		logger.Error("leader connection failed", "error", lerr)
+		os.Exit(1)
+	}
+	defer leaderConn.Close(context.Background())
+
+	// The clock: WORKER_FAKE_NOW (dev-only) pins the instant so a
+	// compose run can exercise the startup dispatch deterministically.
+	schedClock := schedule.NewClock()
+	if _, fixed := schedClock.(schedule.FixedClock); fixed {
+		logger.Warn("worker: WORKER_FAKE_NOW override active (dev only)")
+	}
+
+	// Report dispatch (step 8.3): the daily 00:15 UTC batch — for every
+	// (user, due period): DEK -> Collect -> Generate -> render -> SMTP.
+	dispatcher := schedule.NewDispatcher(
+		schedClock,
+		schedule.NewPoolUserLister(pool),
+		&report.Collector{
+			Tx:       schedule.NewTransactionAdapter(repo.NewTransactionStore(pool)),
+			Budget:   schedule.NewBudgetAdapter(repo.NewBudgetStore(pool)),
+			Category: schedule.NewCategoryAdapter(repo.NewCategoryStore(pool)),
+		},
+		dekForUser,
+		mail.New(cfg.SMTP),
+		schedule.NewPoolNotifier(repo.NewNotificationStore(pool)),
+	)
+	dispatcher.Log = logger
+
+	// The hourly FI-sync hook (phase 9 placeholder until 9.2).
+	fiHook := schedule.NewFiSyncHook()
+	fiHook.Log = logger
+
+	sched := schedule.NewScheduler(schedClock, schedule.NewAdvisoryLock(leaderConn), []schedule.Entry{
+		{Name: "report-dispatch", Spec: schedule.ReportDispatchSpec, Key: schedule.LockKeyReport, Run: dispatcher.Dispatch},
+		{Name: "fi-sync", Spec: schedule.FiSyncSpec, Key: schedule.LockKeyFiSync, Run: fiHook.Run},
+	})
+	sched.Log = logger
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	logger.Info("worker started", "version", version,
 		"reset_running", reset, "poll_interval", pollInterval.String())
+
+	go sched.Start(ctx)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()

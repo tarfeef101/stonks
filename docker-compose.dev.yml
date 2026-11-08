@@ -116,6 +116,14 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
       KEK: ${KEK:-}
+      # SMTP (step 8.3): the worker's report dispatch sends via the same
+      # mailpit the backend uses; mirrors the backend's SMTP block.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TLS_POLICY: ${SMTP_TLS_POLICY:-none}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
