@@ -204,7 +204,7 @@ func newImportsServer(t *testing.T, store ImportStore) (http.Handler, jwk.Key) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, false), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, false, nil, nil), key
 }
 
 // doMultipart posts a multipart/form-data body to POST /api/v1/imports:
@@ -591,7 +591,7 @@ func TestImportsErrors(t *testing.T) {
 func TestImportsAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, nil, &memImportStore{}, nil, nil, nil, nil, nil, nil, nil, false)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, nil, &memImportStore{}, nil, nil, nil, nil, nil, nil, nil, false, nil, nil)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/imports", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token (list): status = %d, want 401", code)
 		}

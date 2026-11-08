@@ -112,6 +112,8 @@ type handler struct {
 	mortgages     MortgageStore
 	mailer        mail.Sender
 	mailEnabled   bool
+	institutions  InstitutionStore
+	fiCredentials FICredentialStore
 	m             *httpMetrics
 }
 
@@ -148,11 +150,17 @@ type handler struct {
 // /api/v1/dashboard-cards/{id}, PUT /api/v1/dashboard-cards/order);
 // nil and those routes answer 503. mortgages serves the mortgage routes
 // (plan 7.1: GET/POST /api/v1/mortgages, GET/PATCH/DELETE
-// /api/v1/mortgages/{id}); nil and those routes answer 503. mailer
+// /api/v1/mortgages/{id}); nil and those routes answer 503.
+// institutions serves the FI institution registry routes (plan 9.1:
+// GET/POST /api/v1/fi/institutions — global, no user scoping); nil
+// and those routes answer 503. fiCredentials serves the FI credential
+// routes (plan 9.1: GET/POST /api/v1/fi/credentials, DELETE
+// /api/v1/fi/credentials/{id}); nil and those routes answer 503.
+// mailer
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
 // reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -176,6 +184,8 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		mortgages:     mortgages,
 		mailer:        mailer,
 		mailEnabled:   mailEnabled,
+		institutions:  institutions,
+		fiCredentials: fiCredentials,
 		m:             newHTTPMetrics(),
 	}
 
@@ -264,6 +274,17 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// stateless what-if (no second row is written).
 		r.Get("/v1/mortgages/{id}/amortization", h.mortgageAmortizationGet)
 		r.Post("/v1/mortgages/{id}/amortization/what-if", h.mortgageWhatIfPost)
+		// FI institutions + credentials (plan 9.1, migration 0010):
+		// the GLOBAL institution registry (auth required, no user
+		// scoping) and the per-user tokens (the secrets are
+		// DEK-encrypted in the repo layer; the DTOs carry none of
+		// them). No institution-delete route (9.1 scope: institutions
+		// are shared vocabulary).
+		r.Get("/v1/fi/institutions", h.fiInstitutionsList)
+		r.Post("/v1/fi/institutions", h.fiInstitutionsCreate)
+		r.Get("/v1/fi/credentials", h.fiCredentialsList)
+		r.Post("/v1/fi/credentials", h.fiCredentialsCreate)
+		r.Delete("/v1/fi/credentials/{id}", h.fiCredentialsDelete)
 		// Notifications (step 3.3): list with unread/limit/offset
 		// filters, idempotent mark-read, and the unread count the
 		// browser badge polls.

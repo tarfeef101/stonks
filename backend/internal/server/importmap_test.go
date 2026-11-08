@@ -41,7 +41,7 @@ func newImportMapServer(t *testing.T, imp ImportStore, schemas SchemaStore) (htt
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, schemas, imp, nil, nil, nil, nil, nil, nil, nil, false), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, schemas, imp, nil, nil, nil, nil, nil, nil, nil, false, nil, nil), key
 }
 
 // ip is a pointer to one csv index (fieldRef.Index is *int; a zero
@@ -977,7 +977,7 @@ func TestImportMapAuth(t *testing.T) {
 	}
 
 	t.Run("missing or invalid token is 401", func(t *testing.T) {
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, &memSchemaStore{}, &memImportStore{}, nil, nil, nil, nil, nil, nil, nil, false)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, &memSchemaStore{}, &memImportStore{}, nil, nil, nil, nil, nil, nil, nil, false, nil, nil)
 		for _, tc := range routes {
 			for name, hdr := range map[string]map[string]string{
 				"no-token": {},

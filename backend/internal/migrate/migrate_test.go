@@ -131,10 +131,11 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 9 (all twelve tables present, mortgages from 0009 on top of
+// version 10 (all fourteen tables present, fi_institutions +
+// fi_credentials from 0010 on top of mortgages from 0009 +
 // dashboard_cards from 0008 + categorise_jobs from 0007 + import_jobs'
 // 0006 mapping column), a second `up` is a no-op, and `down` rolls back
-// exactly one step (0009 drops mortgages; dashboard_cards,
+// exactly one step (0010 drops the fi tables; mortgages, dashboard_cards,
 // categorise_jobs, import_jobs' 0006 mapping column and
 // 0001+0002+0003+0004 stay in place, users keeps its 0004
 // onboarded_at column).
@@ -145,13 +146,14 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 9 {
-		t.Fatalf("version after up = %d, want 9", ver)
+	if ver != 10 {
+		t.Fatalf("version after up = %d, want 10", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
 		"accounts", "transactions", "budgets", "llm_credentials",
 		"import_jobs", "categorise_jobs", "dashboard_cards", "mortgages",
+		"fi_institutions", "fi_credentials",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -178,24 +180,34 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 9 {
-		t.Fatalf("version after re-up = %d (err %v), want 9", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 10 {
+		t.Fatalf("version after re-up = %d (err %v), want 10", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0009) only —
-	// mortgages goes; dashboard_cards (0008), categorise_jobs,
-	// import_jobs' 0006 mapping column and the 0001+0002+0003+0004 tables
-	// stay.
+	// One-step down: goose rolls back the latest migration (0010) only —
+	// the fi tables go; mortgages (0009), dashboard_cards (0008),
+	// categorise_jobs, import_jobs' 0006 mapping column and the
+	// 0001+0002+0003+0004 tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 8 {
-		t.Fatalf("version after down = %d (err %v), want 8", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 9 {
+		t.Fatalf("version after down = %d (err %v), want 9", ver, err)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name = 'mortgages'`); n != 0 {
-		t.Fatalf("mortgages remaining after one-step down = %d, want 0 (only 0009 rolls back)", n)
+		  WHERE table_schema = 'public' AND table_name = 'mortgages'`); n != 1 {
+		t.Fatalf("mortgages remaining after one-step down = %d, want 1 (0009 stays)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'fi_institutions'`); n != 0 {
+		t.Fatalf("fi_institutions remaining after one-step down = %d, want 0 (only 0010 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'fi_credentials'`); n != 0 {
+		t.Fatalf("fi_credentials remaining after one-step down = %d, want 0 (only 0010 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables

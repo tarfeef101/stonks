@@ -60,6 +60,12 @@ var (
 
 	// 7.1 mortgages.
 	ErrMortgageNotFound = errors.New("repo: mortgage not found")
+
+	// 9.1 FI institutions + credentials.
+	ErrInstitutionNotFound  = errors.New("repo: institution not found")
+	ErrInstitutionCodeTaken = errors.New("repo: institution code already taken")
+	ErrFICredentialNotFound = errors.New("repo: fi credential not found")
+	ErrFICredentialExists   = errors.New("repo: a fi credential for this institution already exists")
 )
 
 // hashName computes the §5 plaintext name_hash.
