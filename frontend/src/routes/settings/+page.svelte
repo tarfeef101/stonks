@@ -405,7 +405,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('settings.provider_label')}</span>
 					<select
-						class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
 						value={provider}
 						onchange={(e) => selectProvider(e.currentTarget.value as LLMProvider)}
 					>

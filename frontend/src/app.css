@@ -15,3 +15,18 @@ html {
 html.dark {
   color-scheme: dark;
 }
+
+/* <option> rows inside native <select> popups: not every browser
+ * propagates the page's color-scheme to the popup, so a dark-mode page
+ * can render a light popup while option text still inherits the dark
+ * page color — white on white, unreadable. Pin option backgrounds and
+ * text to the page palette explicitly so rows stay readable however the
+ * popup is themed. */
+option {
+  background-color: #fff;
+  color: #18181b;
+}
+.dark option {
+  background-color: #18181b;
+  color: #f4f4f5;
+}
