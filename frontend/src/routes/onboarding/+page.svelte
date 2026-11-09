@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
-	import { displayName, user } from '#lib/auth/client';
+	import { displayName, login, user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
 	import {
 		CURRENCIES,
@@ -101,7 +102,9 @@
 
 	{#if !$user}
 		<p class="text-sm text-zinc-600 dark:text-zinc-400">
-			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')} </a>
+			<button class="underline" onclick={() => login(page.url.pathname + page.url.search)}>
+				{$_('auth.sign_in')}
+			</button>
 		</p>
 	{:else if done}
 		<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('onboarding.already_done')}</p>

@@ -10,6 +10,13 @@
 #     `kc.sh import` is the offline 26.x replacement. (KC_BOOTSTRAP_KEYCLOAK_IMPORT
 #     appears in `kc.sh show-config` but is INERT at runtime — empirically
 #     verified 2026-11-02: the realm is never imported.)
+#     Realm-JSON gotcha (26.x): multivalued client config attributes such
+#     as `post.logout.redirect.uris` are stored with a `##` delimiter
+#     (Constants.CFG_DELIMITER changed from "," to "##" in 26.x) — a
+#     comma-joined value parses as ONE bogus URI and sign-out breaks with
+#     "invalid redirect uri". The old ClientRepresentation field
+#     `postLogoutRedirectUris` was removed in 26.x — the import/admin API
+#     reject it with an "Unrecognized field" 400 (verified 2026-11-09).
 #     The KC_BOOTSTRAP_ADMIN_USERNAME/PASSWORD env vars (set compose-wide)
 #     are consumed during the import's realm initialization: the admin user
 #     is created WITH the env-var password in that same step (verified:

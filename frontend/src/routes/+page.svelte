@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
-	import { user } from '#lib/auth/client';
+	import { login, user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
 	import { listAccounts, type Account } from '#lib/api/accounts';
 	import {
@@ -205,7 +205,11 @@
 	{#if !$user}
 		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('summary.sign_in_prompt')}
-			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
+			<!-- Sign in = IdP redirect, not a page link (step 1.2 UX); the
+			     current URL is the return_to so the user comes back here. -->
+			<button class="underline" onclick={() => login(page.url.pathname + page.url.search)}>
+				{$_('auth.sign_in')}
+			</button>
 		</p>
 	{:else}
 		<!-- Controls: period switcher + account filter; changing either
