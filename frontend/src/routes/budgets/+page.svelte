@@ -345,10 +345,10 @@
 
 <section class="space-y-4">
 	<h1 class="text-2xl font-semibold">{$_('budgets.heading')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('budgets.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('budgets.intro')}</p>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('budgets.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
@@ -356,13 +356,13 @@
 		<!-- New budget (always visible): name + period + a raw-text
 		     target input per active category (empty = no target for
 		     that category). -->
-		<div class="rounded-lg border border-zinc-200 bg-white p-5">
-			<p class="text-xs font-medium text-zinc-500 uppercase">{$_('budgets.new_budget')}</p>
+		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+			<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('budgets.new_budget')}</p>
 			<div class="mt-3 flex flex-wrap items-end gap-4">
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('budgets.name_label')}</span>
 					<input
-						class="w-56 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						placeholder={$_('budgets.name_placeholder')}
 						bind:value={newName}
 					/>
@@ -370,7 +370,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('budgets.period_label')}</span>
 					<select
-						class="w-40 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-40 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={newPeriod}
 						onchange={(e) => (newPeriod = e.currentTarget.value as Period)}
 					>
@@ -395,7 +395,7 @@
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{c.name}</span>
 							<input
-								class="w-28 rounded-md border border-zinc-300 px-3 py-1.5"
+								class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 								placeholder={$_('budgets.target_none')}
 								inputmode="decimal"
 								bind:value={newTargets[c.id]}
@@ -405,18 +405,18 @@
 				</div>
 			</div>
 			{#if formError}
-				<p class="mt-2 text-sm text-red-600">{formError}</p>
+				<p class="mt-2 text-sm text-red-600 dark:text-red-400">{formError}</p>
 			{/if}
 		</div>
 
 		{#if loading && budgets.length === 0}
-			<p class="text-sm text-zinc-600">{$_('budgets.loading')}</p>
+			<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('budgets.loading')}</p>
 		{:else}
 			{#if loadError}
-				<p class="text-sm text-red-600">{loadError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 			{/if}
 			{#if budgets.length === 0 && !loadError}
-				<p class="text-sm text-zinc-500">{$_('budgets.empty')}</p>
+				<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('budgets.empty')}</p>
 			{:else}
 				<div class="space-y-4">
 					{#each budgets as b (b.id)}
@@ -426,13 +426,13 @@
 						     read-only) or the current-period adherence
 						     against the budget's OWN targets plus the
 						     trailing 6-window history table. -->
-						<div class="rounded-lg border border-zinc-200 bg-white p-5">
+						<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 							<div class="flex flex-wrap items-center gap-3">
 								<h2 class="text-lg font-semibold">{b.name}</h2>
-								<span class="rounded bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
+								<span class="rounded bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:text-zinc-400">
 									{periodLabel(b.period)}
 								</span>
-								<label class="ml-auto flex items-center gap-2 text-sm text-zinc-600">
+								<label class="ml-auto flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
 									<input
 										type="checkbox"
 										checked={b.active}
@@ -443,14 +443,14 @@
 								</label>
 								{#if editingId !== b.id}
 									<button
-										class="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
 										type="button"
 										onclick={() => startEdit(b)}
 									>
 										{$_('budgets.edit')}
 									</button>
 									<button
-										class="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+										class="rounded-md border border-red-300 dark:border-red-900 px-4 py-2 text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 disabled:opacity-50"
 										disabled={busy[b.id]}
 										type="button"
 										onclick={() => void removeBudget(b)}
@@ -460,19 +460,19 @@
 								{/if}
 							</div>
 							{#if editingId === b.id}
-								<div class="mt-4 border-t border-zinc-100 pt-4">
+								<div class="mt-4 border-t border-zinc-100 dark:border-zinc-800 pt-4">
 									<div class="flex flex-wrap items-end gap-4">
 										<label class="block text-sm">
 											<span class="mb-1 block font-medium">{$_('budgets.name_label')}</span>
 											<input
-												class="w-56 rounded-md border border-zinc-300 px-3 py-1.5"
+												class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 												bind:value={editName}
 											/>
 										</label>
 										<div class="block text-sm">
 											<span class="mb-1 block font-medium">{$_('budgets.period_label')}</span>
 											<span
-												class="inline-flex w-40 items-center rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-zinc-500"
+												class="inline-flex w-40 items-center rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-1.5 text-zinc-500 dark:text-zinc-400"
 											>
 												{periodLabel(b.period)}
 											</span>
@@ -486,7 +486,7 @@
 											{saving ? $_('budgets.saving') : $_('budgets.save')}
 										</button>
 										<button
-											class="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+											class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
 											disabled={saving}
 											type="button"
 											onclick={cancelEdit}
@@ -503,7 +503,7 @@
 												<label class="block text-sm">
 													<span class="mb-1 block font-medium">{c.name}</span>
 													<input
-														class="w-28 rounded-md border border-zinc-300 px-3 py-1.5"
+														class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 														placeholder={$_('budgets.target_none')}
 														inputmode="decimal"
 														bind:value={editTargets[c.id]}
@@ -512,21 +512,21 @@
 											{/each}
 										</div>
 									</div>
-									<p class="mt-2 text-xs text-zinc-500">{$_('budgets.period_fixed')}</p>
+									<p class="mt-2 text-xs text-zinc-500 dark:text-zinc-400">{$_('budgets.period_fixed')}</p>
 									{#if editError}
-										<p class="mt-2 text-sm text-red-600">{editError}</p>
+										<p class="mt-2 text-sm text-red-600 dark:text-red-400">{editError}</p>
 									{/if}
 								</div>
 							{:else}
 								<!-- Targets as "Name: value, …" (the target
 									 numbers render via Svelte's default
 									 number-to-string — see the page header). -->
-								<p class="mt-3 text-sm text-zinc-600">{targetsText(b)}</p>
+								<p class="mt-3 text-sm text-zinc-600 dark:text-zinc-400">{targetsText(b)}</p>
 
 								<!-- Current-period adherence: the spend strings
 									 are the raw API text; the bar and the
 									 over/under label are geometry only. -->
-								<p class="mt-4 text-xs font-medium text-zinc-500 uppercase">
+								<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
 									{$_('budgets.current_window', {
 										values: {
 											from: summaries[b.period]?.from ?? '',
@@ -539,12 +539,12 @@
 										<li class="text-sm">
 											<div class="flex items-baseline justify-between gap-2">
 												<span class="font-medium">{c.name}</span>
-												<span class="text-zinc-600 tabular-nums">
+												<span class="text-zinc-600 dark:text-zinc-400 tabular-nums">
 													{rowSpend(b, c.id) ?? $_('budgets.no_tx')}
 													<span class="text-zinc-400"> / {b.targets[c.id]}</span>
 												</span>
 											</div>
-											<div class="mt-1 h-2 w-full overflow-hidden rounded bg-zinc-100">
+											<div class="mt-1 h-2 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
 												{#if rowPct(b, c.id) !== null}
 													<div
 														class="h-full rounded {rowOver(b, c.id)
@@ -555,9 +555,9 @@
 												{/if}
 											</div>
 											{#if rowOver(b, c.id)}
-												<p class="mt-0.5 text-xs text-red-600">{$_('budgets.over')}</p>
+												<p class="mt-0.5 text-xs text-red-600 dark:text-red-400">{$_('budgets.over')}</p>
 											{:else if rowSpend(b, c.id) !== null}
-												<p class="mt-0.5 text-xs text-green-700">{$_('budgets.under')}</p>
+												<p class="mt-0.5 text-xs text-green-700 dark:text-green-400">{$_('budgets.under')}</p>
 											{/if}
 										</li>
 									{/each}
@@ -569,17 +569,17 @@
 									 ECharts call is 6.4's. Cells are the raw
 									 API strings; red = over the budget's own
 									 target for the category. -->
-								<p class="mt-4 text-xs font-medium text-zinc-500 uppercase">
+								<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
 									{$_('budgets.history')}
 								</p>
 								{#if (summaries[b.period]?.trend ?? []).length === 0}
-									<p class="mt-2 text-sm text-zinc-500">{$_('budgets.no_tx')}</p>
+									<p class="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{$_('budgets.no_tx')}</p>
 								{:else}
 									<div class="mt-2 overflow-x-auto">
 										<table class="w-full text-sm">
 											<thead>
 												<tr
-													class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase"
+													class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase"
 												>
 													<th class="py-1.5 pr-4">{$_('budgets.col_window')}</th>
 													{#each targetCats(b) as c (c.id)}
@@ -589,8 +589,8 @@
 											</thead>
 											<tbody>
 												{#each summaries[b.period]?.trend ?? [] as p (p.from)}
-													<tr class="border-b border-zinc-100 last:border-0">
-														<td class="py-1.5 pr-4 text-zinc-600">
+													<tr class="border-b border-zinc-100 dark:border-zinc-800 last:border-0">
+														<td class="py-1.5 pr-4 text-zinc-600 dark:text-zinc-400">
 															{$_('budgets.window_label', {
 																values: { from: p.from, to: p.to }
 															})}
@@ -602,8 +602,8 @@
 																	c.id,
 																	b.targets[c.id]
 																)
-																	? 'font-medium text-red-600'
-																	: 'text-zinc-600'}"
+																	? 'font-medium text-red-600 dark:text-red-400'
+																	: 'text-zinc-600 dark:text-zinc-400'}"
 															>
 																{trendSpend(p.groups, c.id) ?? $_('budgets.no_tx')}
 															</td>
@@ -616,7 +616,7 @@
 								{/if}
 							{/if}
 							{#if cardError[b.id]}
-								<p class="mt-3 text-sm text-red-600">{cardError[b.id]}</p>
+								<p class="mt-3 text-sm text-red-600 dark:text-red-400">{cardError[b.id]}</p>
 							{/if}
 						</div>
 					{/each}

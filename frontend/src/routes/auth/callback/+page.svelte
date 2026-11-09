@@ -57,7 +57,7 @@
 {#if error}
 	<section class="space-y-3">
 		<h1 class="text-2xl font-semibold">{$_('auth.error_title')}</h1>
-		<p class="text-sm text-red-600">{error}</p>
+		<p class="text-sm text-red-600 dark:text-red-400">{error}</p>
 		<a href={resolve('/')} class="text-sm underline">{$_('auth.go_home')}</a>
 	</section>
 {:else}

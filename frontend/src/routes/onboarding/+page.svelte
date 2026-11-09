@@ -100,20 +100,20 @@
 	<h1 class="text-2xl font-semibold">{$_('onboarding.title')}</h1>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')} </a>
 		</p>
 	{:else if done}
-		<p class="text-sm text-zinc-600">{$_('onboarding.already_done')}</p>
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('onboarding.already_done')}</p>
 		<a class="text-sm underline" href={resolve('/')}>{$_('onboarding.back_to_summary')}</a>
 	{:else}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('onboarding.sign_in_as')}
-			<span class="font-medium text-zinc-900">{displayName($user) || '—'}</span>
+			<span class="font-medium text-zinc-900 dark:text-zinc-100">{displayName($user) || '—'}</span>
 		</p>
 
 		<form
-			class="max-w-md space-y-5 rounded-lg border border-zinc-200 bg-white p-5"
+			class="max-w-md space-y-5 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5"
 			onsubmit={(e) => {
 				e.preventDefault();
 				void submit();
@@ -123,7 +123,7 @@
 				<span class="mb-1 block font-medium">{$_('onboarding.email_label')}</span>
 				<input
 					bind:value={email}
-					class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					required
 					type="email"
 				/>
@@ -131,7 +131,7 @@
 
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('onboarding.currency_label')}</span>
-				<select bind:value={currency} class="w-full rounded-md border border-zinc-300 px-3 py-1.5">
+				<select bind:value={currency} class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5">
 					{#each CURRENCIES as code (code)}
 						<option value={code}>{code}</option>
 					{/each}
@@ -160,16 +160,16 @@
 				<p class="mb-1 font-medium">{$_('onboarding.categories_heading')}</p>
 				<ul class="flex flex-wrap gap-1.5">
 					{#each DEFAULT_CATEGORY_NAMES as name (name)}
-						<li class="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs text-zinc-700">
+						<li class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2.5 py-0.5 text-xs text-zinc-700 dark:text-zinc-300">
 							{name}
 						</li>
 					{/each}
 				</ul>
-				<p class="mt-1.5 text-xs text-zinc-500">{$_('onboarding.categories_note')}</p>
+				<p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{$_('onboarding.categories_note')}</p>
 			</div>
 
 			{#if error}
-				<p class="text-sm text-red-600">{error}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{error}</p>
 			{/if}
 
 			<button

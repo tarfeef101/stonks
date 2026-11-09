@@ -40,6 +40,7 @@ func defaultSettings() Settings {
 		Language:        "en",
 		DefaultCurrency: "USD",
 		DefaultPeriod:   "month",
+		Theme:           "system",
 	}
 }
 
@@ -87,6 +88,9 @@ func (m *memSettingsStore) Update(_ context.Context, sub string, p SettingsPatch
 	}
 	if p.DefaultPeriod != nil {
 		st.DefaultPeriod = *p.DefaultPeriod
+	}
+	if p.Theme != nil {
+		st.Theme = *p.Theme
 	}
 	if p.NotifyMonthly != nil {
 		st.NotifyMonthly = *p.NotifyMonthly
@@ -237,6 +241,7 @@ func TestPatchSettingsValidation(t *testing.T) {
 		{"lowercase currency", `{"default_currency": "cad"}`, "default_currency"},
 		{"four-letter currency", `{"default_currency": "CA$"}`, "default_currency"},
 		{"week period", `{"default_period": "week"}`, "default_period"},
+		{"bad theme", `{"theme": "sepia"}`, "theme must be one of light|dark|system"},
 		{"onboarded false", `{"onboarded": false}`, "onboarded must be true"},
 		{"non-JSON body", `{`, "JSON object"},
 		{"JSON array body", `[1]`, "JSON object"},
@@ -461,7 +466,7 @@ func TestPGSettingsStore(t *testing.T) {
 		t.Fatalf("get fresh: %v", err)
 	}
 	if st.Language != "en" || st.DefaultCurrency != "USD" || st.DefaultPeriod != "month" ||
-		st.NotifyMonthly || st.OnboardedAt != nil {
+		st.Theme != "system" || st.NotifyMonthly || st.OnboardedAt != nil {
 		t.Fatalf("fresh row is not at DB defaults: %+v", st)
 	}
 	if st.Email != "pg-sub-a@localhost" {
@@ -470,13 +475,15 @@ func TestPGSettingsStore(t *testing.T) {
 
 	updated, err := store.Update(ctx, "pg-sub-a", SettingsPatch{
 		DefaultCurrency: strPtr("CAD"),
+		Theme:           strPtr("dark"),
 		NotifyAnnual:    boolPtr(true),
 		Onboarded:       boolPtr(true),
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if updated.DefaultCurrency != "CAD" || !updated.NotifyAnnual || updated.OnboardedAt == nil {
+	if updated.DefaultCurrency != "CAD" || updated.Theme != "dark" || !updated.NotifyAnnual ||
+		updated.OnboardedAt == nil {
 		t.Fatalf("update not reflected in response: %+v", updated)
 	}
 	firstAt := *updated.OnboardedAt
@@ -487,14 +494,14 @@ func TestPGSettingsStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-get: %v", err)
 	}
-	if again.DefaultCurrency != "CAD" || !again.OnboardedAt.Equal(firstAt) {
+	if again.DefaultCurrency != "CAD" || again.Theme != "dark" || !again.OnboardedAt.Equal(firstAt) {
 		t.Fatalf("update not persisted: %+v", again)
 	}
 	other, err := store.Get(ctx, "pg-sub-b")
 	if err != nil {
 		t.Fatalf("get other: %v", err)
 	}
-	if other.DefaultCurrency != "USD" || other.OnboardedAt != nil {
+	if other.DefaultCurrency != "USD" || other.Theme != "system" || other.OnboardedAt != nil {
 		t.Fatalf("settings leaked across users: %+v", other)
 	}
 

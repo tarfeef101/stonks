@@ -36,6 +36,7 @@ type Settings struct {
 	Language        string     `json:"language"`
 	DefaultCurrency string     `json:"default_currency"`
 	DefaultPeriod   string     `json:"default_period"`
+	Theme           string     `json:"theme"`
 	NotifyMonthly   bool       `json:"notify_monthly"`
 	NotifyQuarterly bool       `json:"notify_quarterly"`
 	NotifyAnnual    bool       `json:"notify_annual"`
@@ -52,6 +53,7 @@ type SettingsPatch struct {
 	Language        *string `json:"language"`
 	DefaultCurrency *string `json:"default_currency"`
 	DefaultPeriod   *string `json:"default_period"`
+	Theme           *string `json:"theme"`
 	NotifyMonthly   *bool   `json:"notify_monthly"`
 	NotifyQuarterly *bool   `json:"notify_quarterly"`
 	NotifyAnnual    *bool   `json:"notify_annual"`
@@ -97,7 +99,7 @@ func NewPGSettingsStore(pool *pgxpool.Pool) SettingsStore {
 
 const settingsSelect = `
 	SELECT email, display_name, language, default_currency, default_period,
-	       notify_monthly, notify_quarterly, notify_annual, onboarded_at
+	       theme, notify_monthly, notify_quarterly, notify_annual, onboarded_at
 	FROM users`
 
 func (s *pgSettingsStore) OnboardedAt(ctx context.Context, sub string) (*time.Time, error) {
@@ -118,8 +120,8 @@ func (s *pgSettingsStore) Get(ctx context.Context, sub string) (Settings, error)
 	var st Settings
 	err := s.pool.QueryRow(ctx, settingsSelect+` WHERE auth0_sub = $1`, sub).
 		Scan(&st.Email, &st.DisplayName, &st.Language, &st.DefaultCurrency,
-			&st.DefaultPeriod, &st.NotifyMonthly, &st.NotifyQuarterly, &st.NotifyAnnual,
-			&st.OnboardedAt)
+			&st.DefaultPeriod, &st.Theme, &st.NotifyMonthly, &st.NotifyQuarterly,
+			&st.NotifyAnnual, &st.OnboardedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Settings{}, ErrSettingsNotFound
 	}
@@ -153,6 +155,9 @@ func (s *pgSettingsStore) Update(ctx context.Context, sub string, p SettingsPatc
 	if p.DefaultPeriod != nil {
 		add("default_period", *p.DefaultPeriod)
 	}
+	if p.Theme != nil {
+		add("theme", *p.Theme)
+	}
 	if p.NotifyMonthly != nil {
 		add("notify_monthly", *p.NotifyMonthly)
 	}
@@ -185,8 +190,8 @@ func (s *pgSettingsStore) Update(ctx context.Context, sub string, p SettingsPatc
 	var st Settings
 	err = tx.QueryRow(ctx, settingsSelect+` WHERE auth0_sub = $1`, sub).
 		Scan(&st.Email, &st.DisplayName, &st.Language, &st.DefaultCurrency,
-			&st.DefaultPeriod, &st.NotifyMonthly, &st.NotifyQuarterly, &st.NotifyAnnual,
-			&st.OnboardedAt)
+			&st.DefaultPeriod, &st.Theme, &st.NotifyMonthly, &st.NotifyQuarterly,
+			&st.NotifyAnnual, &st.OnboardedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Settings{}, ErrSettingsNotFound
 	}
@@ -206,7 +211,7 @@ func (s *pgSettingsStore) Update(ctx context.Context, sub string, p SettingsPatc
 // instead of tripping the DB constraint (500).
 func validatePatch(p SettingsPatch) error {
 	empty := p.Email == nil && p.DisplayName == nil && p.Language == nil &&
-		p.DefaultCurrency == nil && p.DefaultPeriod == nil &&
+		p.DefaultCurrency == nil && p.DefaultPeriod == nil && p.Theme == nil &&
 		p.NotifyMonthly == nil && p.NotifyQuarterly == nil && p.NotifyAnnual == nil &&
 		p.Onboarded == nil
 	if empty {
@@ -240,6 +245,9 @@ func validatePatch(p SettingsPatch) error {
 	if p.DefaultPeriod != nil && !validPeriods[*p.DefaultPeriod] {
 		problems = append(problems, "default_period must be one of month|quarter|year")
 	}
+	if p.Theme != nil && !validThemes[*p.Theme] {
+		problems = append(problems, "theme must be one of light|dark|system")
+	}
 	if p.Onboarded != nil && !*p.Onboarded {
 		problems = append(problems, "onboarded must be true (completion is one-way)")
 	}
@@ -252,6 +260,9 @@ func validatePatch(p SettingsPatch) error {
 var (
 	iso4217Re    = regexp.MustCompile(`^[A-Z]{3}$`)
 	validPeriods = map[string]bool{"month": true, "quarter": true, "year": true}
+	// validThemes mirrors users_theme_check (0011) so a bad value 400s
+	// before it can trip the DB constraint (500).
+	validThemes = map[string]bool{"light": true, "dark": true, "system": true}
 )
 
 // settingsPrecheck runs the guards shared by both settings routes and

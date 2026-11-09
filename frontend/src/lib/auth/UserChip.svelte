@@ -21,15 +21,15 @@
 		{#if needsOnboarding}
 			<a
 				href={resolve('/onboarding')}
-				class="font-medium text-amber-700 hover:underline"
+				class="font-medium text-amber-700 dark:text-amber-400 hover:underline"
 				title={$_('auth.complete_onboarding')}
 			>
 				{$_('auth.complete_onboarding')}
 			</a>
 		{/if}
-		<span class="text-zinc-600">{name}</span>
+		<span class="text-zinc-600 dark:text-zinc-400">{name}</span>
 		<button
-			class="rounded-md border border-zinc-300 bg-white px-3 py-1 font-medium hover:bg-zinc-50"
+			class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1 font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
 			onclick={() => void logout()}
 		>
 			{$_('auth.sign_out')}
@@ -37,7 +37,7 @@
 	</div>
 {:else}
 	<button
-		class="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-zinc-50"
+		class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
 		onclick={() => login(page.url.pathname + page.url.search)}
 	>
 		{$_('auth.sign_in')}

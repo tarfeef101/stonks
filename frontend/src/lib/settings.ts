@@ -20,6 +20,9 @@ export interface Settings {
 	language: string;
 	default_currency: string;
 	default_period: string;
+	/** Appearance: 'light' | 'dark' | 'system' (follow the OS/browser
+	 * preference). 'system' is the DB default (0011). */
+	theme: string;
 	notify_monthly: boolean;
 	notify_quarterly: boolean;
 	notify_annual: boolean;

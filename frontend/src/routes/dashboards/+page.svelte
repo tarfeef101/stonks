@@ -164,30 +164,30 @@
 	<h1 class="text-2xl font-semibold">{$_('dashboards.heading')}</h1>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">{$_('dashboards.sign_in')}</p>
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('dashboards.sign_in')}</p>
 	{:else if loading && cards.length === 0}
-		<p class="text-sm text-zinc-600">{$_('dashboards.loading')}</p>
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('dashboards.loading')}</p>
 	{:else if loadError}
-		<p class="text-sm text-red-600">{loadError}</p>
+		<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 	{:else if cards.length === 0}
 		<!-- No cards yet: point at the Explore page's "Save as card". -->
-		<div class="rounded-lg border border-zinc-200 bg-white p-5">
-			<p class="text-sm text-zinc-500">{$_('dashboards.empty')}</p>
+		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+			<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('dashboards.empty')}</p>
 			<a href={resolve('/explore')} class="underline">{$_('dashboards.empty_cta')}</a>
 		</div>
 	{:else}
 		{#if opError}
-			<p class="text-sm text-red-600">{opError}</p>
+			<p class="text-sm text-red-600 dark:text-red-400">{opError}</p>
 		{/if}
 		<div class="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
 			{#each cards as card, i (card.id)}
-				<article class="space-y-3 rounded-lg border border-zinc-200 bg-white p-4">
+				<article class="space-y-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-4">
 					<!-- Header row: the name (or the inline rename
 					     input) plus the card's controls. -->
 					<div class="flex flex-wrap items-start justify-between gap-3">
 						{#if renamingId === card.id}
 							<input
-								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 text-sm"
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm"
 								bind:value={draftName}
 								use:autofocus
 								onkeydown={(e) => {
@@ -201,7 +201,7 @@
 						{/if}
 						<div class="flex shrink-0 items-center gap-3">
 							<button
-								class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900"
+								class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100"
 								type="button"
 								aria-label={$_('dashboards.rename')}
 								onclick={() => startRename(card)}
@@ -209,7 +209,7 @@
 								{$_('dashboards.rename')}
 							</button>
 							<button
-								class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900 disabled:text-zinc-300 disabled:no-underline"
+								class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
 								type="button"
 								aria-label={$_('dashboards.move_up')}
 								disabled={i === 0}
@@ -218,7 +218,7 @@
 								{$_('dashboards.move_up')}
 							</button>
 							<button
-								class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900 disabled:text-zinc-300 disabled:no-underline"
+								class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
 								type="button"
 								aria-label={$_('dashboards.move_down')}
 								disabled={i === cards.length - 1}
@@ -227,7 +227,7 @@
 								{$_('dashboards.move_down')}
 							</button>
 							<button
-								class="text-sm font-medium text-red-600 underline hover:text-red-700"
+								class="text-sm font-medium text-red-600 dark:text-red-400 underline hover:text-red-700 dark:hover:text-red-400"
 								type="button"
 								aria-label={$_('dashboards.delete')}
 								onclick={() => void removeCard(card)}

@@ -113,34 +113,34 @@
 
 <section class="space-y-3">
 	<h1 class="text-2xl font-semibold">{$_('review.title')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('review.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('review.intro')}</p>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('review.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
 	{:else}
 		{#if loading}
-			<p class="text-sm text-zinc-600">{$_('review.loading')}</p>
+			<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('review.loading')}</p>
 		{:else}
 			{#if loadError}
-				<p class="text-sm text-red-600">{loadError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 			{/if}
 			{#if rows.length === 0 && !loadError}
-				<p class="text-sm text-zinc-500">{$_('review.empty')}</p>
+				<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('review.empty')}</p>
 			{/if}
 
 			<!-- Apply-all: one category for every remaining row (the
 			     card stays up after a successful apply-all so the result
 			     is still visible over the now-empty queue). -->
 			{#if rows.length > 0 || appliedAll !== null}
-				<div class="space-y-2 rounded-lg border border-zinc-200 bg-white p-5">
+				<div class="space-y-2 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<div class="flex flex-wrap items-end gap-4">
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('review.all_category_label')}</span>
 							<select
-								class="w-64 rounded-md border border-zinc-300 px-3 py-1.5"
+								class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 								value={allCategoryId}
 								onchange={(e) => {
 									allCategoryId = e.currentTarget.value;
@@ -162,23 +162,23 @@
 							{applyingAll ? $_('review.applying_all') : $_('review.apply_all')}
 						</button>
 						{#if appliedAll !== null}
-							<p class="pb-1.5 text-sm text-green-600">
+							<p class="pb-1.5 text-sm text-green-600 dark:text-green-400">
 								{$_('review.applied_all', { values: { n: appliedAll } })}
 							</p>
 						{/if}
 					</div>
 					{#if allError}
-						<p class="text-sm text-red-600">{allError}</p>
+						<p class="text-sm text-red-600 dark:text-red-400">{allError}</p>
 					{/if}
 				</div>
 			{/if}
 
 			{#if rows.length > 0}
-				<div class="rounded-lg border border-zinc-200 bg-white p-5">
+				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<div class="overflow-x-auto">
 						<table class="w-full text-sm">
 							<thead>
-								<tr class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase">
+								<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
 									<th class="py-1.5 pr-4">{$_('review.col_date')}</th>
 									<th class="py-1.5 pr-4">{$_('review.col_description')}</th>
 									<th class="py-1.5 pr-4 text-right">{$_('review.col_amount')}</th>

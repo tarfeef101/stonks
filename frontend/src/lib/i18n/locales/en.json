@@ -331,10 +331,18 @@
 	},
 	"settings": {
 		"title": "Settings",
-		"intro": "App settings — right now, the LLM endpoint the auto-categoriser talks to, per provider.",
+		"intro": "App settings: appearance and default currency, the LLM endpoint the auto-categoriser talks to, per provider, and the categories used to classify transactions.",
 		"mail_disabled": "Email notifications are disabled on this server — no email is sent for account events.",
 		"sign_in_prompt": "Sign in to manage your settings.",
 		"loading": "Loading settings…",
+		"prefs_title": "Preferences",
+		"theme_label": "Theme",
+		"theme": {
+			"system": "Match system",
+			"light": "Light",
+			"dark": "Dark"
+		},
+		"currency_label": "Default currency",
 		"llm_title": "LLM credentials",
 		"provider_label": "Provider",
 		"provider": {
@@ -355,6 +363,19 @@
 		"test_ok": "Connected in {ms} ms — {tin} tokens in / {tout} tokens out.",
 		"test_ok_model": "Model: {model}.",
 		"delete": "Delete credential",
-		"deleting": "Deleting…"
+		"deleting": "Deleting…",
+		"categories_title": "Categories",
+		"categories_note": "The vocabulary for classifying transactions. Checked categories are offered when you add or review a transaction; unchecked ones stay on existing transactions but are hidden from the pickers. Deleting a category keeps its transactions — they become uncategorized.",
+		"cat_loading": "Loading categories…",
+		"cat_active_aria": "Offer {name} in the category pickers",
+		"cat_rename": "Rename",
+		"cancel": "Cancel",
+		"cat_delete": "Delete",
+		"cat_deleting": "Deleting…",
+		"cat_delete_confirm": "Delete category “{name}”? Its transactions are kept (uncategorized).",
+		"cat_add_label": "New category",
+		"cat_add_placeholder": "e.g. Groceries",
+		"cat_add": "Add",
+		"cat_adding": "Adding…"
 	}
 }

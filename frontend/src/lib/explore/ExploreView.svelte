@@ -198,24 +198,24 @@
 <!-- Render section moved from the explore page (step 6.5 C1): the
      1000-row cap note, the loading/error/empty lines, and the
      chart/table view over the same grouped data. -->
-<p class="text-sm text-zinc-600">{$_('explore.row_count', { values: { n: rows.length } })}</p>
+<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('explore.row_count', { values: { n: rows.length } })}</p>
 {#if capped}
-	<p class="self-center text-sm text-amber-700">{$_('explore.cap_note')}</p>
+	<p class="self-center text-sm text-amber-700 dark:text-amber-400">{$_('explore.cap_note')}</p>
 {/if}
 {#if loading && rows.length === 0}
-	<p class="text-sm text-zinc-600">{$_('explore.loading')}</p>
+	<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('explore.loading')}</p>
 {:else if loadError}
-	<p class="text-sm text-red-600">{loadError}</p>
+	<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 {:else if rows.length === 0}
-	<p class="text-sm text-zinc-500">{$_('explore.empty')}</p>
+	<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('explore.empty')}</p>
 {:else if explore.chart === 'table'}
 	<!-- The table view: the GROUPED rows only (never the raw
 	     transactions); every amount is a formatCents of the
 	     group's integer-cents sums. -->
-	<div class="overflow-x-auto rounded-lg border border-zinc-200 bg-white">
+	<div class="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
 		<table class="w-full text-sm">
 			<thead>
-				<tr class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase">
+				<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
 					<th class="px-4 py-2">{$_('explore.col_group')}</th>
 					<th class="px-4 py-2 text-right">{$_('explore.col_count')}</th>
 					<th class="px-4 py-2 text-right">{$_('explore.col_spend')}</th>
@@ -225,7 +225,7 @@
 			</thead>
 			<tbody>
 				{#each aggs as g (g.key)}
-					<tr class="border-b border-zinc-100 last:border-0">
+					<tr class="border-b border-zinc-100 dark:border-zinc-800 last:border-0">
 						<td class="px-4 py-1.5">{g.label}</td>
 						<td class="px-4 py-1.5 text-right tabular-nums">{g.count}</td>
 						<td class="px-4 py-1.5 text-right tabular-nums">
@@ -246,9 +246,9 @@
 	<!-- Chart view: svelte-echarts over the same grouped data
 	     (line/bar x = group labels, y = the metric in cents;
 	     the pie drops non-positive groups and says so). -->
-	<div class="rounded-lg border border-zinc-200 bg-white p-5">
+	<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 		{#if explore.chart === 'pie' && pieHidden > 0}
-			<p class="mb-2 text-xs text-zinc-500">
+			<p class="mb-2 text-xs text-zinc-500 dark:text-zinc-400">
 				{$_('explore.pie_excluded', { values: { n: pieHidden } })}
 			</p>
 		{/if}

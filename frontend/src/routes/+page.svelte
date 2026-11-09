@@ -200,10 +200,10 @@
 
 <section class="space-y-4">
 	<h1 class="text-2xl font-semibold">{$_('summary.heading')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('summary.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('summary.intro')}</p>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('summary.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
@@ -214,7 +214,7 @@
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('summary.period_label')}</span>
 				<select
-					class="w-40 rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-40 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					value={period}
 					onchange={(e) => pickPeriod(e.currentTarget.value as Period)}
 				>
@@ -226,7 +226,7 @@
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('summary.account_label')}</span>
 				<select
-					class="w-64 rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					value={accountId}
 					onchange={(e) => (accountId = e.currentTarget.value)}
 				>
@@ -239,29 +239,29 @@
 		</div>
 
 		{#if loading && !summary}
-			<p class="text-sm text-zinc-600">{$_('summary.loading')}</p>
+			<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('summary.loading')}</p>
 		{:else if loadError}
-			<p class="text-sm text-red-600">{loadError}</p>
+			<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 		{:else if summary}
 			<!-- KPI cards: the raw API strings, verbatim. -->
 			<div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-				<div class="rounded-lg border border-zinc-200 bg-white p-5">
-					<p class="text-xs font-medium text-zinc-500 uppercase">{$_('summary.kpi_spend')}</p>
-					<p class="mt-1 text-2xl font-semibold text-zinc-900">{summary.totals.spend}</p>
+				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('summary.kpi_spend')}</p>
+					<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{summary.totals.spend}</p>
 				</div>
-				<div class="rounded-lg border border-zinc-200 bg-white p-5">
-					<p class="text-xs font-medium text-zinc-500 uppercase">{$_('summary.kpi_income')}</p>
-					<p class="mt-1 text-2xl font-semibold text-green-700">{summary.totals.income}</p>
+				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('summary.kpi_income')}</p>
+					<p class="mt-1 text-2xl font-semibold text-green-700 dark:text-green-400">{summary.totals.income}</p>
 				</div>
-				<div class="rounded-lg border border-zinc-200 bg-white p-5">
-					<p class="text-xs font-medium text-zinc-500 uppercase">{$_('summary.kpi_net')}</p>
-					<p class="mt-1 text-2xl font-semibold text-zinc-900">{summary.totals.net}</p>
+				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('summary.kpi_net')}</p>
+					<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">{summary.totals.net}</p>
 				</div>
 			</div>
 
 			<!-- 6-period net sparkline (oldest → newest, no axis labels). -->
-			<div class="rounded-lg border border-zinc-200 bg-white p-5">
-				<p class="text-xs font-medium text-zinc-500 uppercase">{$_('summary.trend_title')}</p>
+			<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+				<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('summary.trend_title')}</p>
 				{#if sparkPoints(summary.trend)}
 					<svg
 						viewBox="0 0 100 32"
@@ -276,26 +276,26 @@
 							stroke="currentColor"
 							stroke-width="1.5"
 							vector-effect="non-scaling-stroke"
-							class="text-zinc-700"
+							class="text-zinc-700 dark:text-zinc-300"
 						/>
 					</svg>
 				{:else}
-					<p class="mt-2 text-sm text-zinc-500">{$_('summary.empty')}</p>
+					<p class="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{$_('summary.empty')}</p>
 				{/if}
 			</div>
 
 			<!-- Per-category spend vs the active budget target. -->
-			<div class="rounded-lg border border-zinc-200 bg-white p-5">
-				<p class="text-xs font-medium text-zinc-500 uppercase">{$_('summary.categories_title')}</p>
+			<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+				<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('summary.categories_title')}</p>
 				{#if summary.groups.length === 0}
-					<p class="mt-2 text-sm text-zinc-500">{$_('summary.empty')}</p>
+					<p class="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{$_('summary.empty')}</p>
 				{:else}
 					<ul class="mt-3 space-y-3">
 						{#each summary.groups as g (g.category_id ?? 'uncategorized')}
 							<li class="text-sm">
 								<div class="flex items-baseline justify-between gap-2">
 									<span class="font-medium">{groupName(g)}</span>
-									<span class="text-zinc-600 tabular-nums">
+									<span class="text-zinc-600 dark:text-zinc-400 tabular-nums">
 										{g.spend}{#if g.target !== null}
 											<span class="text-zinc-400"> / {g.target}</span>
 										{/if}
@@ -304,7 +304,7 @@
 								<!-- Bar fill: geometry only (the % is
 									 computed from the strings; the numbers
 									 themselves render as the raw strings). -->
-								<div class="mt-1 h-2 w-full overflow-hidden rounded bg-zinc-100">
+								<div class="mt-1 h-2 w-full overflow-hidden rounded bg-zinc-100 dark:bg-zinc-800">
 									{#if barPct(g) !== null}
 										<div
 											class="h-full rounded {overTarget(g) ? 'bg-red-500' : 'bg-zinc-700'}"
@@ -313,7 +313,7 @@
 									{/if}
 								</div>
 								{#if overTarget(g)}
-									<p class="mt-0.5 text-xs text-red-600">{$_('summary.over_budget')}</p>
+									<p class="mt-0.5 text-xs text-red-600 dark:text-red-400">{$_('summary.over_budget')}</p>
 								{/if}
 							</li>
 						{/each}
@@ -321,7 +321,7 @@
 				{/if}
 			</div>
 		{:else}
-			<p class="text-sm text-zinc-500">{$_('summary.empty')}</p>
+			<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('summary.empty')}</p>
 		{/if}
 	{/if}
 </section>

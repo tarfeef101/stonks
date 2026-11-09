@@ -76,40 +76,40 @@
 
 <section class="space-y-3">
 	<h1 class="text-2xl font-semibold">{$_('notifications.title')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('notifications.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('notifications.intro')}</p>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('notifications.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
 	{:else}
 		{#if loading}
-			<p class="text-sm text-zinc-600">{$_('notifications.loading')}</p>
+			<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('notifications.loading')}</p>
 		{:else}
 			{#if loadError}
-				<p class="text-sm text-red-600">{loadError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 			{/if}
 			{#if items.length === 0 && !loadError}
-				<p class="text-sm text-zinc-500">{$_('notifications.empty')}</p>
+				<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('notifications.empty')}</p>
 			{:else}
 				<ul class="space-y-2">
 					{#each items as n (n.id)}
 						<li
 							class="flex items-start justify-between gap-4 rounded-lg border p-4 {n.read_at ===
 							null
-								? 'border-zinc-300 bg-white'
-								: 'border-zinc-200 bg-zinc-50'}"
+								? 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900'
+								: 'border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950'}"
 						>
 							<div class="space-y-1">
 								<p
 									class="text-sm {n.read_at === null
-										? 'font-semibold text-zinc-900'
-										: 'font-medium text-zinc-600'}"
+										? 'font-semibold text-zinc-900 dark:text-zinc-100'
+										: 'font-medium text-zinc-600 dark:text-zinc-400'}"
 								>
 									{n.title}
 								</p>
-								<p class="text-sm text-zinc-600">{n.body}</p>
+								<p class="text-sm text-zinc-600 dark:text-zinc-400">{n.body}</p>
 								<p class="text-xs text-zinc-400">
 									{n.read_at === null
 										? $_('notifications.unread')
@@ -118,7 +118,7 @@
 							</div>
 							{#if n.read_at === null}
 								<button
-									class="shrink-0 rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100"
+									class="shrink-0 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
 									type="button"
 									onclick={() => void markRead(n.id)}
 								>

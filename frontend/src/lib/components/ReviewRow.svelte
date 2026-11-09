@@ -93,14 +93,14 @@
 	}
 </script>
 
-<tr class="border-b border-zinc-100 align-top">
+<tr class="border-b border-zinc-100 dark:border-zinc-800 align-top">
 	<td class="py-2 pr-4 whitespace-nowrap">{row.date_posted}</td>
 	<td class="py-2 pr-4">{row.description}</td>
 	<td class="py-2 pr-4 text-right whitespace-nowrap">{row.amount}</td>
 	<td class="py-2 pr-4 whitespace-nowrap">{accountName(row.account_id)}</td>
 	<td class="py-2 pr-4">
 		<select
-			class="w-44 rounded-md border border-zinc-300 px-2 py-1"
+			class="w-44 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1"
 			value={categoryId}
 			onchange={(e) => {
 				categoryId = e.currentTarget.value;
@@ -124,7 +124,7 @@
 				{accepting ? $_('review.applying') : $_('review.apply')}
 			</button>
 			<button
-				class="rounded-md border border-zinc-300 px-3 py-1 text-sm text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+				class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
 				disabled={accepting || reprompting}
 				type="button"
 				onclick={() => void repromptAgain()}
@@ -133,18 +133,18 @@
 			</button>
 		</div>
 		{#if error}
-			<p class="mt-1 text-xs text-red-600">{error}</p>
+			<p class="mt-1 text-xs text-red-600 dark:text-red-400">{error}</p>
 		{/if}
 		{#if reprompt}
-			<p class="mt-1 text-xs text-zinc-600">
+			<p class="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
 				{$_('review.suggested')}:
-				<span class="font-medium text-zinc-900">{reprompt.category}</span>
+				<span class="font-medium text-zinc-900 dark:text-zinc-100">{reprompt.category}</span>
 				({(reprompt.confidence * 100).toFixed(0)}%)
 			</p>
 			{#if reprompt.rationale !== ''}
-				<p class="text-xs text-zinc-500">{reprompt.rationale}</p>
+				<p class="text-xs text-zinc-500 dark:text-zinc-400">{reprompt.rationale}</p>
 			{/if}
-			<p class="text-xs {reprompt.applied ? 'text-green-600' : 'text-amber-600'}">
+			<p class="text-xs {reprompt.applied ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'}">
 				{reprompt.applied ? $_('review.applied') : $_('review.not_applied')}
 			</p>
 		{/if}

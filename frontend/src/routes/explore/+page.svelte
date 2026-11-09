@@ -252,10 +252,10 @@
 
 <section class="space-y-4">
 	<h1 class="text-2xl font-semibold">{$_('explore.heading')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('explore.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('explore.intro')}</p>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('explore.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
@@ -265,13 +265,13 @@
 		     is a convenience over from/to (a hand-picked range shows
 		     "Custom" and selecting it is a no-op). min/max are raw
 		     text — a bad value is a server 400 shown verbatim. -->
-		<div class="rounded-lg border border-zinc-200 bg-white p-5">
-			<p class="text-xs font-medium text-zinc-500 uppercase">{$_('explore.filter_title')}</p>
+		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+			<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('explore.filter_title')}</p>
 			<div class="mt-3 flex flex-wrap items-end gap-4">
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.preset_label')}</span>
 					<select
-						class="w-40 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-40 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={currentPreset()}
 						onchange={(e) => applyPreset(e.currentTarget.value)}
 					>
@@ -285,7 +285,7 @@
 					<span class="mb-1 block font-medium">{$_('explore.date_from')}</span>
 					<input
 						type="date"
-						class="rounded-md border border-zinc-300 px-3 py-1.5"
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						bind:value={explore.from}
 					/>
 				</label>
@@ -293,14 +293,14 @@
 					<span class="mb-1 block font-medium">{$_('explore.date_to')}</span>
 					<input
 						type="date"
-						class="rounded-md border border-zinc-300 px-3 py-1.5"
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						bind:value={explore.to}
 					/>
 				</label>
 				<div class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.account_label')}</span>
 					<select
-						class="h-16 w-56 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="h-16 w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						multiple
 						value={explore.account}
 						onchange={onAccountsChange}
@@ -313,7 +313,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.category_label')}</span>
 					<select
-						class="w-48 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-48 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={explore.category}
 						onchange={(e) => (explore = { ...explore, category: e.currentTarget.value })}
 					>
@@ -327,7 +327,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.min_label')}</span>
 					<input
-						class="w-28 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						inputmode="decimal"
 						bind:value={explore.min}
 					/>
@@ -335,7 +335,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.max_label')}</span>
 					<input
-						class="w-28 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						inputmode="decimal"
 						bind:value={explore.max}
 					/>
@@ -343,12 +343,12 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.search_label')}</span>
 					<input
-						class="w-48 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-48 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						bind:value={explore.q}
 					/>
 				</label>
 				<button
-					class="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+					class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
 					type="button"
 					onclick={resetFilters}
 				>
@@ -361,15 +361,15 @@
 		     they never refetch) plus the "Save as card" button. The row
 		     count and the 1000-row cap note render inside the
 		     ExploreView (below). -->
-		<div class="rounded-lg border border-zinc-200 bg-white p-5">
+		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<div class="flex flex-wrap items-end gap-4">
-				<p class="self-center text-xs font-medium text-zinc-500 uppercase">
+				<p class="self-center text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
 					{$_('explore.view_title')}
 				</p>
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.chart_label')}</span>
 					<select
-						class="w-32 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={explore.chart}
 						onchange={(e) =>
 							(explore = { ...explore, chart: e.currentTarget.value as ExploreState['chart'] })}
@@ -383,7 +383,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.group_label')}</span>
 					<select
-						class="w-36 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-36 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={explore.group}
 						onchange={(e) =>
 							(explore = { ...explore, group: e.currentTarget.value as ExploreState['group'] })}
@@ -397,7 +397,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.metric_label')}</span>
 					<select
-						class="w-32 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={explore.metric}
 						onchange={(e) =>
 							(explore = { ...explore, metric: e.currentTarget.value as ExploreState['metric'] })}
@@ -408,7 +408,7 @@
 					</select>
 				</label>
 				<button
-					class="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100"
+					class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
 					type="button"
 					onclick={saveAsCard}
 				>
@@ -416,10 +416,10 @@
 				</button>
 			</div>
 			{#if saveNote}
-				<p class="text-sm text-green-700">{saveNote}</p>
+				<p class="text-sm text-green-700 dark:text-green-400">{saveNote}</p>
 			{/if}
 			{#if saveError}
-				<p class="text-sm text-red-600">{saveError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{saveError}</p>
 			{/if}
 		</div>
 

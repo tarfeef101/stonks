@@ -126,10 +126,10 @@
 
 <div class="space-y-3">
 	<h2 class="text-lg font-medium">{$_('manual_entry.title')}</h2>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('manual_entry.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('manual_entry.intro')}</p>
 
 	<form
-		class="space-y-4 rounded-lg border border-zinc-200 bg-white p-5"
+		class="space-y-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5"
 		onsubmit={(e) => {
 			e.preventDefault();
 			void submit();
@@ -138,21 +138,21 @@
 		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('manual_entry.account_label')}</span>
-				<select bind:value={accountId} class="w-full rounded-md border border-zinc-300 px-3 py-1.5">
+				<select bind:value={accountId} class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5">
 					<option value="">{$_('manual_entry.account_placeholder')}</option>
 					{#each accounts as a (a.id)}
 						<option value={a.id}>{a.name} ({a.currency})</option>
 					{/each}
 				</select>
 				{#if accounts.length === 0 && !loadError}
-					<span class="mt-1 block text-xs text-zinc-500">{$_('manual_entry.no_accounts')}</span>
+					<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">{$_('manual_entry.no_accounts')}</span>
 				{/if}
 			</label>
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('manual_entry.category_label')}</span>
 				<select
 					bind:value={categoryId}
-					class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 				>
 					<option value="">{$_('manual_entry.category_none')}</option>
 					{#each activeCategories as c (c.id)}
@@ -164,7 +164,7 @@
 				<span class="mb-1 block font-medium">{$_('manual_entry.date_posted_label')}</span>
 				<input
 					bind:value={datePosted}
-					class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					type="date"
 				/>
 			</label>
@@ -172,7 +172,7 @@
 				<span class="mb-1 block font-medium">{$_('manual_entry.date_executed_label')}</span>
 				<input
 					bind:value={dateExecuted}
-					class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					type="date"
 				/>
 			</label>
@@ -180,18 +180,18 @@
 				<span class="mb-1 block font-medium">{$_('manual_entry.amount_label')}</span>
 				<input
 					bind:value={amount}
-					class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					inputmode="decimal"
 					placeholder={$_('manual_entry.amount_placeholder')}
 					type="text"
 				/>
-				<span class="mt-1 block text-xs text-zinc-500">{$_('manual_entry.amount_note')}</span>
+				<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">{$_('manual_entry.amount_note')}</span>
 			</label>
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('manual_entry.description_label')}</span>
 				<input
 					bind:value={description}
-					class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 					placeholder={$_('manual_entry.description_placeholder')}
 					type="text"
 				/>
@@ -201,21 +201,21 @@
 			<span class="mb-1 block font-medium">{$_('manual_entry.notes_label')}</span>
 			<textarea
 				bind:value={notes}
-				class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+				class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 				placeholder={$_('manual_entry.notes_placeholder')}
 				rows="2"></textarea>
 		</label>
 		{#if loadError}
-			<p class="text-sm text-red-600">{loadError}</p>
+			<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 		{/if}
 		{#if missing}
-			<p class="text-sm text-red-600">{$_('manual_entry.missing')}</p>
+			<p class="text-sm text-red-600 dark:text-red-400">{$_('manual_entry.missing')}</p>
 		{/if}
 		{#if error}
-			<p class="text-sm text-red-600">{error}</p>
+			<p class="text-sm text-red-600 dark:text-red-400">{error}</p>
 		{/if}
 		{#if created}
-			<p class="text-sm text-green-600">
+			<p class="text-sm text-green-600 dark:text-green-400">
 				{$_('manual_entry.success', {
 					values: { amount: created.amount, date: created.datePosted, id: created.id }
 				})}

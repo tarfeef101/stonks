@@ -1,1 +1,17 @@
 @import 'tailwindcss';
+
+/* Class-based dark mode (Tailwind v4): the `dark:` variant matches when
+ * <html> carries the .dark class. The pre-paint script in app.html sets
+ * it from the stored setting before first paint; the route layout
+ * re-applies the server-side setting (the source of truth) on load and
+ * follows prefers-color-scheme live while the setting is 'system'. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Native control internals (select dropdowns, checkboxes, scrollbars)
+ * follow the page palette instead of the OS one. */
+html {
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}

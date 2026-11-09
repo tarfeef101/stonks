@@ -18,7 +18,7 @@
 	{@render children()}
 {:else}
 	<button
-		class="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium hover:bg-zinc-50"
+		class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
 		onclick={() => login(page.url.pathname + page.url.search)}
 	>
 		{$_('auth.sign_in')}

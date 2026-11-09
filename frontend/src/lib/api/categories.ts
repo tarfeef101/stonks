@@ -22,3 +22,32 @@ export interface Category {
 export function listCategories(): Promise<Category[]> {
 	return api<Category[]>('/v1/categories');
 }
+
+/** Creates a category (201 → the new row). `parent_id` may be omitted or
+ * a category id; omitting it creates a root. A duplicate name is a 409. */
+export function createCategory(input: { name: string; parent_id?: string }): Promise<Category> {
+	// JSON.stringify omits the undefined parent_id, so a root create is
+	// just {name} on the wire.
+	return api<Category>('/v1/categories', { method: 'POST', body: input });
+}
+
+/** PATCH body. `parent_id` is tri-state: `undefined` (omitted) leaves the
+ * parent untouched, `null` demotes to root, a string re-parents. At least
+ * one field must be present (an empty patch is a 400). */
+export interface CategoryPatch {
+	name?: string;
+	parent_id?: string | null;
+	active?: boolean;
+}
+
+/** Updates a category (200 → the updated row). 404 when unknown, 409 on a
+ * name conflict. */
+export function patchCategory(id: string, patch: CategoryPatch): Promise<Category> {
+	return api<Category>(`/v1/categories/${id}`, { method: 'PATCH', body: patch });
+}
+
+/** Deletes a category (204 → undefined). Transactions in it are kept —
+ * the FK is ON DELETE SET NULL. 404 when unknown. */
+export function deleteCategory(id: string): Promise<void> {
+	return api<void>(`/v1/categories/${id}`, { method: 'DELETE' });
+}

@@ -6,7 +6,7 @@
 	import { onMount } from 'svelte';
 	import AppShell from '#lib/components/AppShell.svelte';
 	import { initSession, user } from '#lib/auth/client';
-	import { clearSettings, loadSettings } from '#lib/settings';
+	import { clearSettings, loadSettings, settings } from '#lib/settings';
 	import { queryClient } from '#lib/query';
 	import { waitLocale } from '#lib/i18n';
 	import type { LayoutProps } from './$types';
@@ -64,6 +64,31 @@
 		} else {
 			clearSettings();
 		}
+	});
+
+	// Theme (appearance setting): the server-side value is the source of
+	// truth; the pre-paint script in app.html applied the last-saved one
+	// before first paint. This effect re-applies the authoritative setting
+	// on load and on every change, mirrors it to localStorage for the next
+	// pre-paint, and — while the setting is 'system' — follows the
+	// OS/browser prefers-color-scheme live (matchMedia change events).
+	$effect(() => {
+		const theme = $settings?.theme ?? 'system';
+		const root = document.documentElement;
+		root.classList.toggle(
+			'dark',
+			theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)
+		);
+		try {
+			localStorage.setItem('ftrk-theme', theme);
+		} catch {
+			/* storage unavailable (private mode): theme still applies */
+		}
+		if (theme !== 'system') return;
+		const mq = matchMedia('(prefers-color-scheme: dark)');
+		const onChange = (e: MediaQueryListEvent) => root.classList.toggle('dark', e.matches);
+		mq.addEventListener('change', onChange);
+		return () => mq.removeEventListener('change', onChange);
 	});
 </script>
 

@@ -131,13 +131,13 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 10 (all fourteen tables present, fi_institutions +
-// fi_credentials from 0010 on top of mortgages from 0009 +
-// dashboard_cards from 0008 + categorise_jobs from 0007 + import_jobs'
+// version 11 (all fourteen tables present, users.theme from 0011 on top of
+// fi_institutions + fi_credentials from 0010 on top of mortgages from 0009
+// + dashboard_cards from 0008 + categorise_jobs from 0007 + import_jobs'
 // 0006 mapping column), a second `up` is a no-op, and `down` rolls back
-// exactly one step (0010 drops the fi tables; mortgages, dashboard_cards,
-// categorise_jobs, import_jobs' 0006 mapping column and
-// 0001+0002+0003+0004 stay in place, users keeps its 0004
+// exactly one step (0011 drops users.theme + its CHECK; the fi tables,
+// mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006 mapping
+// column and 0001+0002+0003+0004 stay in place, users keeps its 0004
 // onboarded_at column).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
@@ -146,8 +146,8 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 10 {
-		t.Fatalf("version after up = %d, want 10", ver)
+	if ver != 11 {
+		t.Fatalf("version after up = %d, want 11", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
@@ -180,19 +180,25 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 10 {
-		t.Fatalf("version after re-up = %d (err %v), want 10", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 11 {
+		t.Fatalf("version after re-up = %d (err %v), want 11", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0010) only —
-	// the fi tables go; mortgages (0009), dashboard_cards (0008),
-	// categorise_jobs, import_jobs' 0006 mapping column and the
-	// 0001+0002+0003+0004 tables stay.
+	// One-step down: goose rolls back the latest migration (0011) only —
+	// users.theme (plus its CHECK) goes; the fi tables (0010), mortgages
+	// (0009), dashboard_cards (0008), categorise_jobs, import_jobs' 0006
+	// mapping column and the 0001+0002+0003+0004 tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 9 {
-		t.Fatalf("version after down = %d (err %v), want 9", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 10 {
+		t.Fatalf("version after down = %d (err %v), want 10", ver, err)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'users'
+		    AND column_name = 'theme'`); n != 0 {
+		t.Fatalf("users.theme remaining after one-step down = %d, want 0 (only 0011 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
@@ -201,13 +207,13 @@ func TestGooseLifecycle(t *testing.T) {
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name = 'fi_institutions'`); n != 0 {
-		t.Fatalf("fi_institutions remaining after one-step down = %d, want 0 (only 0010 rolls back)", n)
+		  WHERE table_schema = 'public' AND table_name = 'fi_institutions'`); n != 1 {
+		t.Fatalf("fi_institutions remaining after one-step down = %d, want 1 (0010 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name = 'fi_credentials'`); n != 0 {
-		t.Fatalf("fi_credentials remaining after one-step down = %d, want 0 (only 0010 rolls back)", n)
+		  WHERE table_schema = 'public' AND table_name = 'fi_credentials'`); n != 1 {
+		t.Fatalf("fi_credentials remaining after one-step down = %d, want 1 (0010 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
@@ -253,25 +259,25 @@ func TestSchemaConstraints(t *testing.T) {
 	var (
 		userID     string
 		lang, cur  string
-		per        string
+		per, thm   string
 		mo, qu, an bool
 		createdAt  time.Time
 	)
 	err := db.QueryRowContext(ctx, `
 		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
 		VALUES ('sub-1', 'a@example.com', 'A', $1)
-		RETURNING id, language, default_currency, default_period,
+		RETURNING id, language, default_currency, default_period, theme,
 		          notify_monthly, notify_quarterly, notify_annual, created_at`,
-		[]byte("wrapped-dek-pack")).Scan(&userID, &lang, &cur, &per, &mo, &qu, &an, &createdAt)
+		[]byte("wrapped-dek-pack")).Scan(&userID, &lang, &cur, &per, &thm, &mo, &qu, &an, &createdAt)
 	if err != nil {
 		t.Fatalf("insert minimal user: %v", err)
 	}
 	if userID == "" {
 		t.Fatal("user id defaulted to empty, want a uuid")
 	}
-	if lang != "en" || cur != "USD" || per != "month" || mo || qu || an {
-		t.Fatalf("defaults = (%q, %q, %q, %v, %v, %v), want (en, USD, month, false, false, false)",
-			lang, cur, per, mo, qu, an)
+	if lang != "en" || cur != "USD" || per != "month" || thm != "system" || mo || qu || an {
+		t.Fatalf("defaults = (%q, %q, %q, %q, %v, %v, %v), want (en, USD, month, system, false, false, false)",
+			lang, cur, per, thm, mo, qu, an)
 	}
 	if createdAt.IsZero() {
 		t.Fatal("created_at defaulted to zero")
@@ -288,6 +294,12 @@ func TestSchemaConstraints(t *testing.T) {
 		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek, default_period)
 		VALUES ('sub-2', 'c@example.com', 'C', $1, 'week')`, []byte("x"))
 	assertViolation(t, err, codeCheckViolation, "default_period outside vocabulary")
+
+	// theme shares the same CHECK-defined vocabulary discipline (0011).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek, theme)
+		VALUES ('sub-2', 'c@example.com', 'C', $1, 'sepia')`, []byte("x"))
+	assertViolation(t, err, codeCheckViolation, "theme outside vocabulary")
 
 	// --- user_categories --------------------------------------------------
 

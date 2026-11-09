@@ -343,10 +343,10 @@
 
 <section class="space-y-3">
 	<h1 class="text-2xl font-semibold">{$_('imports.title')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('imports.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('imports.intro')}</p>
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('imports.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
@@ -354,11 +354,11 @@
 		<!-- Manual entry (4.7): its own section above the import flow. -->
 		<ManualEntry />
 
-		<div class="space-y-4 rounded-lg border border-zinc-200 bg-white p-5">
+		<div class="space-y-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<div class="flex flex-wrap items-end gap-4">
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('imports.account_label')}</span>
-					<select bind:value={accountId} class="w-64 rounded-md border border-zinc-300 px-3 py-1.5">
+					<select bind:value={accountId} class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5">
 						<option value="">{$_('imports.account_placeholder')}</option>
 						{#each accounts as a (a.id)}
 							<option value={a.id}>{a.name} ({a.currency})</option>
@@ -366,15 +366,15 @@
 					</select>
 				</label>
 				{#if accounts.length === 0 && !loadError}
-					<p class="pb-1.5 text-xs text-zinc-500">{$_('imports.no_accounts')}</p>
+					<p class="pb-1.5 text-xs text-zinc-500 dark:text-zinc-400">{$_('imports.no_accounts')}</p>
 				{/if}
 			</div>
 
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="rounded-md border-2 border-dashed p-6 text-center text-sm text-zinc-500 {dragOver
-					? 'border-zinc-400 bg-zinc-50'
-					: 'border-zinc-200'}"
+				class="rounded-md border-2 border-dashed p-6 text-center text-sm text-zinc-500 dark:text-zinc-400 {dragOver
+					? 'border-zinc-400 bg-zinc-50 dark:bg-zinc-950'
+					: 'border-zinc-200 dark:border-zinc-800'}"
 				ondragover={(e) => {
 					e.preventDefault();
 					if (accountId) dragOver = true;
@@ -415,28 +415,28 @@
 			{#if file}
 				<p class="text-sm">
 					{$_('imports.file_label')}:
-					<span class="font-medium text-zinc-900">{file.name}</span>
+					<span class="font-medium text-zinc-900 dark:text-zinc-100">{file.name}</span>
 				</p>
 			{/if}
 			{#if loadError}
-				<p class="text-sm text-red-600">{loadError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 			{/if}
 			{#if uploading}
-				<p class="text-sm text-zinc-600">{$_('imports.uploading')}</p>
+				<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('imports.uploading')}</p>
 			{/if}
 			{#if analyzing}
-				<p class="text-sm text-zinc-600">{$_('imports.analyzing')}</p>
+				<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('imports.analyzing')}</p>
 			{/if}
 			{#if error}
-				<p class="text-sm text-red-600">{error}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{error}</p>
 			{/if}
 		</div>
 
 		{#if job && analysis}
 			{#if confirmed}
-				<div class="space-y-3 rounded-lg border border-green-200 bg-green-50 p-5">
-					<h2 class="text-lg font-medium text-green-900">{$_('imports.confirmed_title')}</h2>
-					<p class="text-sm text-green-800">
+				<div class="space-y-3 rounded-lg border border-green-200 dark:border-green-900 bg-green-50 dark:bg-green-950 p-5">
+					<h2 class="text-lg font-medium text-green-900 dark:text-green-300">{$_('imports.confirmed_title')}</h2>
+					<p class="text-sm text-green-800 dark:text-green-300">
 						{$_('imports.confirmed_note')}
 						<span class="font-medium">{job.file_name}</span>
 					</p>
@@ -449,18 +449,18 @@
 					</button>
 				</div>
 			{:else}
-				<div class="space-y-3 rounded-lg border border-zinc-200 bg-white p-5">
+				<div class="space-y-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					{#if analysis.preset}
-						<p class="text-sm text-zinc-600">
+						<p class="text-sm text-zinc-600 dark:text-zinc-400">
 							{$_('imports.matched_preset')}:
-							<span class="font-medium text-zinc-900">{analysis.preset.name}</span>
+							<span class="font-medium text-zinc-900 dark:text-zinc-100">{analysis.preset.name}</span>
 						</p>
 					{/if}
 					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('imports.preset_label')}</span>
 						<select
 							bind:value={presetId}
-							class="w-72 rounded-md border border-zinc-300 px-3 py-1.5"
+							class="w-72 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 							onchange={() => void changePreset(presetId)}
 						>
 							<option value="">{$_('imports.preset_auto')}</option>
@@ -476,24 +476,24 @@
 					</label>
 				</div>
 
-				<div class="space-y-3 rounded-lg border border-zinc-200 bg-white p-5">
+				<div class="space-y-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<h2 class="text-lg font-medium">{$_('imports.mapping_title')}</h2>
 					{#if analysis.kind === 'csv'}
-						<p class="text-xs text-zinc-500">{$_('imports.mapping_csv_note')}</p>
+						<p class="text-xs text-zinc-500 dark:text-zinc-400">{$_('imports.mapping_csv_note')}</p>
 						<table class="w-full text-sm">
 							<thead>
-								<tr class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase">
+								<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
 									<th class="py-1.5 pr-4">{$_('imports.field_label')}</th>
 									<th class="py-1.5">{$_('imports.column_label')}</th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each FIELDS as f (f)}
-									<tr class="border-b border-zinc-100">
+									<tr class="border-b border-zinc-100 dark:border-zinc-800">
 										<td class="py-2 pr-4 font-medium">{$_(`imports.field_${f}`)}</td>
 										<td class="py-2">
 											<select
-												class="w-full rounded-md border border-zinc-300 px-2 py-1"
+												class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1"
 												value={String(indexByField[f] ?? -1)}
 												onchange={(e) => {
 													indexByField = {
@@ -515,33 +515,33 @@
 							</tbody>
 						</table>
 					{:else if analysis.kind === 'json'}
-						<p class="text-xs text-zinc-500">{$_('imports.mapping_json_note')}</p>
+						<p class="text-xs text-zinc-500 dark:text-zinc-400">{$_('imports.mapping_json_note')}</p>
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('imports.array_pointers_label')}</span>
 							<input
 								bind:value={arrayPointersText}
-								class="w-full rounded-md border border-zinc-300 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 								placeholder={$_('imports.array_pointers_placeholder')}
 								type="text"
 							/>
-							<span class="mt-1 block text-xs text-zinc-500">
+							<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">
 								{$_('imports.array_pointers_note')}
 							</span>
 						</label>
 						<table class="mt-4 w-full text-sm">
 							<thead>
-								<tr class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase">
+								<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
 									<th class="py-1.5 pr-4">{$_('imports.field_label')}</th>
 									<th class="py-1.5">{$_('imports.column_label')}</th>
 								</tr>
 							</thead>
 							<tbody>
 								{#each FIELDS as f (f)}
-									<tr class="border-b border-zinc-100">
+									<tr class="border-b border-zinc-100 dark:border-zinc-800">
 										<td class="py-2 pr-4 font-medium">{$_(`imports.field_${f}`)}</td>
 										<td class="py-2">
 											<input
-												class="w-full rounded-md border border-zinc-300 px-2 py-1"
+												class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1"
 												onchange={(e) => {
 													setPointer(f, e.currentTarget.value);
 												}}
@@ -555,12 +555,12 @@
 							</tbody>
 						</table>
 						{#if analysis.keys && analysis.keys.length > 0}
-							<p class="text-xs text-zinc-500">
+							<p class="text-xs text-zinc-500 dark:text-zinc-400">
 								{$_('imports.json_keys')}: {analysis.keys.join(', ')}
 							</p>
 						{/if}
 					{:else}
-						<p class="text-sm text-zinc-600">{$_('imports.ofx_note')}</p>
+						<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('imports.ofx_note')}</p>
 					{/if}
 					<button
 						class="mt-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
@@ -572,22 +572,22 @@
 					</button>
 				</div>
 
-				<div class="space-y-3 rounded-lg border border-zinc-200 bg-white p-5">
+				<div class="space-y-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<h2 class="text-lg font-medium">{$_('imports.preview_title')}</h2>
 					{#if !hasMappedFields}
-						<p class="text-sm text-zinc-500">{$_('imports.preview_empty')}</p>
+						<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('imports.preview_empty')}</p>
 					{:else}
 						{#if previewing}
-							<p class="text-sm text-zinc-500">{$_('imports.previewing')}</p>
+							<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('imports.previewing')}</p>
 						{/if}
 						{#if previewError}
-							<p class="text-sm text-red-600">{previewError}</p>
+							<p class="text-sm text-red-600 dark:text-red-400">{previewError}</p>
 						{/if}
 						{#if preview}
 							<div class="overflow-x-auto">
 								<table class="w-full text-sm">
 									<thead>
-										<tr class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase">
+										<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
 											{#each preview.columns as col (col)}
 												<th class="py-1.5 pr-4">{col}</th>
 											{/each}
@@ -595,7 +595,7 @@
 									</thead>
 									<tbody>
 										{#each preview.rows as row, i (i)}
-											<tr class="border-b border-zinc-100">
+											<tr class="border-b border-zinc-100 dark:border-zinc-800">
 												{#each row as cell, j (j)}
 													<td class="py-1.5 pr-4">{cell}</td>
 												{/each}
@@ -604,7 +604,7 @@
 									</tbody>
 								</table>
 							</div>
-							<p class="text-xs text-zinc-500">
+							<p class="text-xs text-zinc-500 dark:text-zinc-400">
 								{$_('imports.preview_rows', {
 									values: { n: preview.rows.length, total: preview.total }
 								})}
@@ -615,28 +615,28 @@
 
 				{#if analysis.kind !== 'ofx'}
 					<form
-						class="space-y-3 rounded-lg border border-zinc-200 bg-white p-5"
+						class="space-y-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5"
 						onsubmit={(e) => {
 							e.preventDefault();
 							void savePreset();
 						}}
 					>
 						<h2 class="text-lg font-medium">{$_('imports.save_preset_title')}</h2>
-						<p class="text-xs text-zinc-500">{$_('imports.save_preset_hint')}</p>
+						<p class="text-xs text-zinc-500 dark:text-zinc-400">{$_('imports.save_preset_hint')}</p>
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('imports.save_preset_name')}</span>
 							<input
 								bind:value={presetName}
-								class="w-72 rounded-md border border-zinc-300 px-3 py-1.5"
+								class="w-72 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 								required
 								type="text"
 							/>
 						</label>
 						{#if presetError}
-							<p class="text-sm text-red-600">{presetError}</p>
+							<p class="text-sm text-red-600 dark:text-red-400">{presetError}</p>
 						{/if}
 						{#if presetSaved}
-							<p class="text-sm text-green-600">{$_('imports.preset_saved')}</p>
+							<p class="text-sm text-green-600 dark:text-green-400">{$_('imports.preset_saved')}</p>
 						{/if}
 						<button
 							class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"

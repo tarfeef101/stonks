@@ -13,7 +13,14 @@
 		type LLMProvider,
 		type LLMTestResult
 	} from '#lib/api/llmcredentials';
-	import { loadSettings, settings } from '#lib/settings';
+	import {
+		createCategory,
+		deleteCategory,
+		listCategories,
+		patchCategory,
+		type Category
+	} from '#lib/api/categories';
+	import { CURRENCIES, loadSettings, settings, updateSettings } from '#lib/settings';
 
 	// LLM credentials (step 5.6): at most one credential per provider
 	// (self-hosted, OpenAI, custom endpoint) for the endpoint the
@@ -55,6 +62,145 @@
 	// Delete (the selected provider's stored row).
 	let deleting = $state(false);
 	let deleteError = $state<string | null>(null);
+
+	// Preferences: appearance theme and default currency. Both PATCH the
+	// users row (the layout's theme effect applies the theme live when the
+	// store updates).
+	let prefSaving = $state(false);
+	let prefError = $state<string | null>(null);
+
+	/** The currency picker offers the curated list; a stored currency
+	 * outside it (the backend accepts any ISO-4217 code) is kept as an
+	 * extra option so it can't be lost. */
+	const currencyOptions = $derived.by(() => {
+		const cur = $settings?.default_currency ?? '';
+		return cur && !CURRENCIES.includes(cur) ? [cur, ...CURRENCIES] : CURRENCIES;
+	});
+
+	async function changeTheme(theme: string): Promise<void> {
+		if (prefSaving) return;
+		prefSaving = true;
+		prefError = null;
+		try {
+			await updateSettings({ theme });
+		} catch (e) {
+			prefError = envelopeMessage(e);
+		} finally {
+			prefSaving = false;
+		}
+	}
+
+	async function changeCurrency(currency: string): Promise<void> {
+		if (prefSaving) return;
+		prefSaving = true;
+		prefError = null;
+		try {
+			await updateSettings({ default_currency: currency });
+		} catch (e) {
+			prefError = envelopeMessage(e);
+		} finally {
+			prefSaving = false;
+		}
+	}
+
+	// Categories: the classification vocabulary (add, rename, show/hide,
+	// remove). `active` is what the pickers (manual entry, review) offer;
+	// removing a category keeps its transactions (FK ON DELETE SET NULL —
+	// they become uncategorized).
+	let categories = $state<Category[]>([]);
+	let categoriesLoading = $state(true);
+	let categoriesError = $state<string | null>(null);
+
+	let newCategoryName = $state('');
+	let adding = $state(false);
+	let addError = $state<string | null>(null);
+
+	let editingId: string | null = $state(null);
+	let editName = $state('');
+	let renaming = $state(false);
+	let renameError = $state<string | null>(null);
+
+	let removingId: string | null = $state(null);
+	let removeError = $state<string | null>(null);
+
+	async function loadCategories(): Promise<void> {
+		categoriesLoading = true;
+		categoriesError = null;
+		try {
+			categories = await listCategories();
+		} catch (e) {
+			categoriesError = envelopeMessage(e);
+		} finally {
+			categoriesLoading = false;
+		}
+	}
+
+	/** Toggles whether the category is offered in the pickers. */
+	async function toggleActive(cat: Category): Promise<void> {
+		try {
+			const updated = await patchCategory(cat.id, { active: !cat.active });
+			categories = categories.map((c) => (c.id === updated.id ? updated : c));
+		} catch (e) {
+			categoriesError = envelopeMessage(e);
+		}
+	}
+
+	async function addCategory(): Promise<void> {
+		const name = newCategoryName.trim();
+		if (adding || name === '') return;
+		adding = true;
+		addError = null;
+		try {
+			const cat = await createCategory({ name });
+			categories = [...categories, cat];
+			newCategoryName = '';
+		} catch (e) {
+			addError = envelopeMessage(e);
+		} finally {
+			adding = false;
+		}
+	}
+
+	function startRename(cat: Category): void {
+		editingId = cat.id;
+		editName = cat.name;
+		renameError = null;
+	}
+
+	async function commitRename(): Promise<void> {
+		const name = editName.trim();
+		if (renaming || editingId === null || name === '') return;
+		renaming = true;
+		renameError = null;
+		try {
+			const updated = await patchCategory(editingId, { name });
+			categories = categories.map((c) => (c.id === updated.id ? updated : c));
+			editingId = null;
+		} catch (e) {
+			renameError = envelopeMessage(e);
+		} finally {
+			renaming = false;
+		}
+	}
+
+	function cancelRename(): void {
+		editingId = null;
+		renameError = null;
+	}
+
+	async function removeCategory(cat: Category): Promise<void> {
+		if (!confirm($_('settings.cat_delete_confirm', { values: { name: cat.name } }))) return;
+		removingId = cat.id;
+		removeError = null;
+		try {
+			await deleteCategory(cat.id);
+			categories = categories.filter((c) => c.id !== cat.id);
+		} catch (e) {
+			removeError = envelopeMessage(e);
+		} finally {
+			removingId = null;
+		}
+	}
 
 	/** The stored row for the selected provider, if any. */
 	const stored = $derived(credentials.find((c) => c.provider === provider) ?? null);
@@ -178,6 +324,7 @@
 		// Step 8.1: the mail_enabled flag drives the "email disabled"
 		// notice below; fail-open (a failed load just hides it).
 		void loadSettings();
+		void loadCategories();
 		void listLLMCredentials()
 			.then((rows) => {
 				credentials = rows;
@@ -195,32 +342,70 @@
 
 <section class="space-y-3">
 	<h1 class="text-2xl font-semibold">{$_('settings.title')}</h1>
-	<p class="max-w-2xl text-sm text-zinc-600">{$_('settings.intro')}</p>
+	<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('settings.intro')}</p>
 
 	{#if $settings && !$settings.mail_enabled}
-		<p class="text-sm text-zinc-500">{$_('settings.mail_disabled')}</p>
+		<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('settings.mail_disabled')}</p>
 	{/if}
 
 	{#if !$user}
-		<p class="text-sm text-zinc-600">
+		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('settings.sign_in_prompt')}
 			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
 		</p>
 	{:else}
+		{#if $settings}
+			<div class="space-y-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+				<h2 class="text-lg font-medium">{$_('settings.prefs_title')}</h2>
+
+				<label class="block text-sm">
+					<span class="mb-1 block font-medium">{$_('settings.theme_label')}</span>
+					<select
+						class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+						value={$settings.theme}
+						disabled={prefSaving}
+						onchange={(e) => void changeTheme(e.currentTarget.value)}
+					>
+						<option value="system">{$_('settings.theme.system')}</option>
+						<option value="light">{$_('settings.theme.light')}</option>
+						<option value="dark">{$_('settings.theme.dark')}</option>
+					</select>
+				</label>
+
+				<label class="block text-sm">
+					<span class="mb-1 block font-medium">{$_('settings.currency_label')}</span>
+					<select
+						class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+						value={$settings.default_currency}
+						disabled={prefSaving}
+						onchange={(e) => void changeCurrency(e.currentTarget.value)}
+					>
+						{#each currencyOptions as code (code)}
+							<option value={code}>{code}</option>
+						{/each}
+					</select>
+				</label>
+
+				{#if prefError}
+					<p class="text-sm text-red-600 dark:text-red-400">{prefError}</p>
+				{/if}
+			</div>
+		{/if}
+
 		{#if loading}
-			<p class="text-sm text-zinc-600">{$_('settings.loading')}</p>
+			<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('settings.loading')}</p>
 		{:else}
 			{#if loadError}
-				<p class="text-sm text-red-600">{loadError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 			{/if}
 
-			<div class="space-y-4 rounded-lg border border-zinc-200 bg-white p-5">
+			<div class="space-y-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 				<h2 class="text-lg font-medium">{$_('settings.llm_title')}</h2>
 
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('settings.provider_label')}</span>
 					<select
-						class="w-64 rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={provider}
 						onchange={(e) => selectProvider(e.currentTarget.value as LLMProvider)}
 					>
@@ -233,7 +418,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('settings.endpoint_label')}</span>
 					<input
-						class="w-full max-w-md rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-full max-w-md rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={endpoint}
 						oninput={(e) => {
 							endpoint = e.currentTarget.value;
@@ -246,7 +431,7 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('settings.api_key_label')}</span>
 					<input
-						class="w-full max-w-md rounded-md border border-zinc-300 px-3 py-1.5"
+						class="w-full max-w-md rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={apiKey}
 						oninput={(e) => {
 							apiKey = e.currentTarget.value;
@@ -255,7 +440,7 @@
 							saveError = null;
 						}}
 					/>
-					<span class="mt-1 block text-xs text-zinc-500">
+					<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">
 						{#if keyRequired}
 							{$_('settings.api_key_required_note')}
 						{:else}
@@ -265,7 +450,7 @@
 				</label>
 
 				{#if keyIsMask}
-					<p class="text-xs text-zinc-500">{$_('settings.mask_note')}</p>
+					<p class="text-xs text-zinc-500 dark:text-zinc-400">{$_('settings.mask_note')}</p>
 				{/if}
 
 				<div class="flex flex-wrap items-center gap-3">
@@ -278,7 +463,7 @@
 						{saving ? $_('settings.saving') : $_('settings.save')}
 					</button>
 					<button
-						class="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
 						disabled={testing || endpoint.trim() === ''}
 						type="button"
 						onclick={() => void testConnection()}
@@ -287,7 +472,7 @@
 					</button>
 					{#if stored}
 						<button
-							class="rounded-md border border-red-300 px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+							class="rounded-md border border-red-300 dark:border-red-900 px-4 py-2 text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 disabled:opacity-50"
 							disabled={deleting}
 							type="button"
 							onclick={() => void remove()}
@@ -298,16 +483,16 @@
 				</div>
 
 				{#if saveError}
-					<p class="text-sm text-red-600">{saveError}</p>
+					<p class="text-sm text-red-600 dark:text-red-400">{saveError}</p>
 				{/if}
 				{#if saved}
-					<p class="text-sm text-green-600">{$_('settings.saved')}</p>
+					<p class="text-sm text-green-600 dark:text-green-400">{$_('settings.saved')}</p>
 				{/if}
 				{#if testError}
-					<p class="text-sm text-red-600">{testError}</p>
+					<p class="text-sm text-red-600 dark:text-red-400">{testError}</p>
 				{/if}
 				{#if testResult}
-					<p class="text-sm text-green-600">
+					<p class="text-sm text-green-600 dark:text-green-400">
 						{$_('settings.test_ok', {
 							values: {
 								ms: testResult.latency_ms,
@@ -321,9 +506,132 @@
 					</p>
 				{/if}
 				{#if deleteError}
-					<p class="text-sm text-red-600">{deleteError}</p>
+					<p class="text-sm text-red-600 dark:text-red-400">{deleteError}</p>
 				{/if}
 			</div>
 		{/if}
+
+		<div class="space-y-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+			<h2 class="text-lg font-medium">{$_('settings.categories_title')}</h2>
+			<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('settings.categories_note')}</p>
+
+			{#if categoriesLoading}
+				<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('settings.cat_loading')}</p>
+			{:else}
+				{#if categoriesError}
+					<p class="text-sm text-red-600 dark:text-red-400">{categoriesError}</p>
+				{:else}
+					<ul class="overflow-hidden rounded-md border border-zinc-100 dark:border-zinc-800">
+						{#each categories as cat (cat.id)}
+							<li
+								class="flex items-center gap-3 border-b border-zinc-100 dark:border-zinc-800 px-3 py-2 last:border-b-0"
+							>
+								<input
+									type="checkbox"
+									class="size-4"
+									checked={cat.active}
+									aria-label={$_('settings.cat_active_aria', { values: { name: cat.name } })}
+									onchange={() => void toggleActive(cat)}
+								/>
+								{#if editingId === cat.id}
+									<input
+										class="flex-1 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+										value={editName}
+										oninput={(e) => {
+											editName = e.currentTarget.value;
+											renameError = null;
+										}}
+										onkeydown={(e) => {
+											if (e.key === 'Enter') void commitRename();
+											if (e.key === 'Escape') cancelRename();
+										}}
+									/>
+									<div class="flex gap-2">
+										<button
+											class="rounded-md bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
+											disabled={renaming || editName.trim() === ''}
+											type="button"
+											onclick={() => void commitRename()}
+										>
+											{$_('settings.save')}
+										</button>
+										<button
+											class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+											type="button"
+											onclick={() => cancelRename()}
+										>
+											{$_('settings.cancel')}
+										</button>
+									</div>
+									{#if renameError}
+										<p class="text-xs text-red-600 dark:text-red-400">{renameError}</p>
+									{/if}
+								{:else}
+									<span
+										class={
+											'flex-1 text-sm ' +
+											(cat.active
+												? 'text-zinc-900 dark:text-zinc-100'
+												: 'text-zinc-500 dark:text-zinc-400')
+										}
+									>
+										{cat.name}
+									</span>
+									<div class="flex gap-2">
+										<button
+											class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+											type="button"
+											onclick={() => startRename(cat)}
+										>
+											{$_('settings.cat_rename')}
+										</button>
+										<button
+											class="rounded-md border border-red-300 dark:border-red-900 px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 disabled:opacity-50"
+											disabled={removingId !== null}
+											type="button"
+											onclick={() => void removeCategory(cat)}
+										>
+											{removingId === cat.id ? $_('settings.cat_deleting') : $_('settings.cat_delete')}
+										</button>
+									</div>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+					{#if removeError}
+						<p class="text-sm text-red-600 dark:text-red-400">{removeError}</p>
+					{/if}
+				{/if}
+
+				<div class="flex flex-wrap items-end gap-3">
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('settings.cat_add_label')}</span>
+						<input
+							class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+							placeholder={$_('settings.cat_add_placeholder')}
+							value={newCategoryName}
+							oninput={(e) => {
+								newCategoryName = e.currentTarget.value;
+								addError = null;
+							}}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') void addCategory();
+							}}
+						/>
+					</label>
+					<button
+						class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
+						disabled={adding || newCategoryName.trim() === ''}
+						type="button"
+						onclick={() => void addCategory()}
+					>
+						{adding ? $_('settings.cat_adding') : $_('settings.cat_add')}
+					</button>
+				</div>
+				{#if addError}
+					<p class="text-sm text-red-600 dark:text-red-400">{addError}</p>
+				{/if}
+			{/if}
+		</div>
 	{/if}
 </section>
