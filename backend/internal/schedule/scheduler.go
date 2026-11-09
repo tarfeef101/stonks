@@ -127,11 +127,14 @@ func (s *Scheduler) runEntry(ctx context.Context, e Entry) {
 	}
 }
 
-// FiSyncHook is the phase-9 FI-sync placeholder: 9.2 fills it with the
-// real adapters; until then it only logs the pinned tick line, so the
-// hourly entry, its lock, and the wiring are exercised end to end.
+// FiSyncHook is the hourly FI-sync entry (step 9.2 fills the phase-9
+// placeholder): RunFI is one FI-sync pass; nil RunFI (nothing wired)
+// keeps the pinned no-op log line so the hourly entry, its lock, and
+// the wiring stay exercised end to end.
 type FiSyncHook struct {
-	Log *slog.Logger
+	Log   *slog.Logger
+	Clock Clock                                          // non-nil whenever RunFI is set
+	RunFI func(ctx context.Context, now time.Time) error // nil = placeholder no-op
 }
 
 // NewFiSyncHook returns a FiSyncHook (Log defaults to slog.Default()).
@@ -139,8 +142,12 @@ func NewFiSyncHook() *FiSyncHook {
 	return &FiSyncHook{Log: slog.Default()}
 }
 
-// Run logs the pinned no-op line (9.2 replaces the body).
+// Run is the fi-sync entry's Run: nil RunFI logs the pinned no-op
+// line, otherwise one FI-sync pass at the clock's current instant.
 func (h *FiSyncHook) Run(ctx context.Context) error {
-	h.Log.InfoContext(ctx, "fi sync tick (phase 9 hook, no adapters registered)")
-	return nil
+	if h.RunFI == nil {
+		h.Log.InfoContext(ctx, "fi sync tick (phase 9 hook, no adapters registered)")
+		return nil
+	}
+	return h.RunFI(ctx, h.Clock.Now())
 }

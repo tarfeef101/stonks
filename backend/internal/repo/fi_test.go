@@ -257,3 +257,144 @@ func TestFIStore(t *testing.T) {
 		}
 	})
 }
+
+// TestFICredentialListAll covers the 9.2 worker-enumeration path:
+// every user's ACTIVE-institution credentials, ordered by user then
+// institution code, packs ciphertext (never decrypted here), disabled
+// institutions skipped silently, last_synced_at round trip.
+func TestFICredentialListAll(t *testing.T) {
+	env := newTestEnv(t, "fi-all-a", "fi-all-b")
+	inst := NewInstitutionStore(env.pool)
+	creds := NewFICredentialStore(env.pool)
+	a := env.user(t, "fi-all-a")
+	b := env.user(t, "fi-all-b")
+	ctx := env.ctx
+
+	alpha, err := inst.Create(ctx, InstitutionIn{Code: "fi-all-alpha", Name: "Alpha All"})
+	if err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	zeta, err := inst.Create(ctx, InstitutionIn{Code: "fi-all-zeta", Name: "Zeta All"})
+	if err != nil {
+		t.Fatalf("create zeta: %v", err)
+	}
+	off, err := inst.Create(ctx, InstitutionIn{Code: "fi-all-off", Name: "Off Bank"})
+	if err != nil {
+		t.Fatalf("create off: %v", err)
+	}
+
+	// user a: two ACTIVE credentials; user b: one ACTIVE. The disabled
+	// institution's credential must never appear in ListAll.
+	credAAlpha, err := creds.Create(ctx, a.row.ID, FICredentialIn{
+		InstitutionID: alpha.ID, Token: "fi-all-a-alpha-token", RefreshToken: "fi-all-a-alpha-refresh",
+	}, a.dek)
+	if err != nil {
+		t.Fatalf("create a/alpha: %v", err)
+	}
+	if _, err := creds.Create(ctx, a.row.ID, FICredentialIn{
+		InstitutionID: zeta.ID, Token: "fi-all-a-zeta-token", RefreshToken: "fi-all-a-zeta-refresh",
+	}, a.dek); err != nil {
+		t.Fatalf("create a/zeta: %v", err)
+	}
+	credBAlpha, err := creds.Create(ctx, b.row.ID, FICredentialIn{
+		InstitutionID: alpha.ID, Token: "fi-all-b-alpha-token", RefreshToken: "fi-all-b-alpha-refresh",
+	}, b.dek)
+	if err != nil {
+		t.Fatalf("create b/alpha: %v", err)
+	}
+	if _, err := creds.Create(ctx, b.row.ID, FICredentialIn{
+		InstitutionID: off.ID, Token: "fi-all-b-off-token", RefreshToken: "fi-all-b-off-refresh",
+	}, b.dek); err != nil {
+		t.Fatalf("create b/off: %v", err)
+	}
+	if _, err := env.pool.Exec(ctx,
+		`UPDATE fi_institutions SET status = 'disabled' WHERE id = $1`, off.ID); err != nil {
+		t.Fatalf("disable off: %v", err)
+	}
+
+	out, err := creds.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("list all: got %d rows, want 3 (disabled institution skipped)", len(out))
+	}
+	// Order: by user_id first, institution code second (user_id is a
+	// random uuid, so assert the ordering property, not the user order).
+	for i := 1; i < len(out); i++ {
+		if out[i-1].UserID > out[i].UserID {
+			t.Fatalf("rows not ordered by user_id: %q before %q", out[i-1].UserID, out[i].UserID)
+		}
+		if out[i-1].UserID == out[i].UserID && out[i-1].InstitutionCode >= out[i].InstitutionCode {
+			t.Fatalf("rows not ordered by institution code within user %q", out[i].UserID)
+		}
+	}
+	wantPairs := map[string]map[string]bool{
+		a.row.ID: {"fi-all-alpha": true, "fi-all-zeta": true},
+		b.row.ID: {"fi-all-alpha": true},
+	}
+	seen := map[string]map[string]bool{a.row.ID: {}, b.row.ID: {}}
+	for _, r := range out {
+		// The join carries code + name for the job's notification titles.
+		wantName := map[string]string{"fi-all-alpha": "Alpha All", "fi-all-zeta": "Zeta All"}[r.InstitutionCode]
+		if r.InstitutionName != wantName {
+			t.Fatalf("row %s: institution name = %q, want %q", r.InstitutionCode, r.InstitutionName, wantName)
+		}
+		if !wantPairs[r.UserID][r.InstitutionCode] {
+			t.Fatalf("unexpected row: user %s institution %q", r.UserID, r.InstitutionCode)
+		}
+		seen[r.UserID][r.InstitutionCode] = true
+	}
+	if !seen[a.row.ID]["fi-all-alpha"] || !seen[a.row.ID]["fi-all-zeta"] || !seen[b.row.ID]["fi-all-alpha"] {
+		t.Fatalf("missing rows: %+v", out)
+	}
+	// Ciphertext: the returned packs hold no plaintext and open ONLY
+	// under the owning user's DEK (the job opens them per-user).
+	for _, r := range out {
+		ownerDek, otherDek := a.dek, b.dek
+		if r.UserID == b.row.ID {
+			ownerDek, otherDek = b.dek, a.dek
+		}
+		if _, err := crypto.Open(ownerDek, r.TokenPack); err != nil {
+			t.Fatalf("token pack for user %s does not open under its own DEK: %v", r.UserID, err)
+		}
+		if _, err := crypto.Open(ownerDek, r.RefreshTokenPack); err != nil {
+			t.Fatalf("refresh pack for user %s does not open under its own DEK: %v", r.UserID, err)
+		}
+		if _, err := crypto.Open(otherDek, r.TokenPack); err == nil {
+			t.Fatalf("token pack for user %s opened under the OTHER user's DEK", r.UserID)
+		}
+		if _, err := crypto.Open(otherDek, r.RefreshTokenPack); err == nil {
+			t.Fatalf("refresh pack for user %s opened under the OTHER user's DEK", r.UserID)
+		}
+	}
+	// last_synced_at: nil until the first MarkSynced, then stamped and
+	// carried back by ListAll (the job's dedup/telemetry surface).
+	for _, r := range out {
+		if r.LastSyncedAt != nil {
+			t.Fatalf("fresh row %s has last_synced_at = %v, want nil", r.ID, r.LastSyncedAt)
+		}
+	}
+	at := time.Date(2026, 11, 8, 9, 5, 0, 0, time.UTC)
+	if err := creds.MarkSynced(ctx, a.row.ID, credAAlpha.ID, at); err != nil {
+		t.Fatalf("mark synced: %v", err)
+	}
+	if err := creds.MarkSynced(ctx, b.row.ID, credBAlpha.ID, at); err != nil {
+		t.Fatalf("mark synced b: %v", err)
+	}
+	out, err = creds.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("list all after sync: %v", err)
+	}
+	for _, r := range out {
+		if r.ID == credAAlpha.ID || r.ID == credBAlpha.ID {
+			if r.LastSyncedAt == nil || !r.LastSyncedAt.Equal(at) {
+				t.Fatalf("row %s last_synced_at = %v, want %v", r.ID, r.LastSyncedAt, at)
+			}
+		} else {
+			if r.LastSyncedAt != nil {
+				t.Fatalf("row %s last_synced_at = %v, want nil", r.ID, r.LastSyncedAt)
+			}
+		}
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/fisync"
 	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
 	"finance-tracker/internal/report"
@@ -154,9 +155,26 @@ func main() {
 	)
 	dispatcher.Log = logger
 
-	// The hourly FI-sync hook (phase 9 placeholder until 9.2).
+	// FI sync (step 9.2): dev-only fake adapter behind an explicit env gate; real
+	// adapters are added per docs/ADDING-A-FI.md (no env gate).
+	var fiAdapters []fisync.InstitutionAdapter
+	if os.Getenv("FI_FAKE_ADAPTERS") == "1" {
+		fiAdapters = append(fiAdapters, fisync.NewFakeAdapter(os.Getenv("FI_FAKE_ADAPTER_FAIL") == "1"))
+	}
+	fiJob := fisync.NewJob(
+		repo.NewFICredentialStore(pool),
+		repo.NewInstitutionStore(pool),
+		repo.NewAccountStore(pool),
+		repo.NewTransactionStore(pool),
+		repo.NewNotificationStore(pool),
+		fisync.NewRegistry(fiAdapters...),
+		dekForUser, // the existing KEK-unwrap closure — reuse, don't duplicate
+	)
+
 	fiHook := schedule.NewFiSyncHook()
 	fiHook.Log = logger
+	fiHook.Clock = schedClock
+	fiHook.RunFI = fiJob.RunOnce
 
 	sched := schedule.NewScheduler(schedClock, schedule.NewAdvisoryLock(leaderConn), []schedule.Entry{
 		{Name: "report-dispatch", Spec: schedule.ReportDispatchSpec, Key: schedule.LockKeyReport, Run: dispatcher.Dispatch},

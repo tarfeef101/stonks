@@ -55,6 +55,20 @@ type FICredentialIn struct {
 	RefreshToken  string
 }
 
+// CredentialRow is the ciphertext form for worker enumeration: no DEK is available
+// at list time, so each user's two packs travel sealed and the caller opens them
+// per-user (the 9.2 job).
+type CredentialRow struct {
+	ID               string
+	UserID           string
+	InstitutionID    string
+	InstitutionCode  string
+	InstitutionName  string
+	TokenPack        []byte
+	RefreshTokenPack []byte
+	LastSyncedAt     *time.Time
+}
+
 // InstitutionStore persists the global institution registry.
 type InstitutionStore struct {
 	pool *pgxpool.Pool
@@ -324,4 +338,34 @@ func (s *FICredentialStore) MarkSynced(ctx context.Context, userID, id string, a
 		return ErrFICredentialNotFound
 	}
 	return nil
+}
+
+// ListAll returns every credential whose institution is status='active' (disabled
+// institutions are skipped silently by the sync job — documented in
+// docs/ADDING-A-FI.md), joined with the institution code/name, for worker
+// enumeration. Ciphertext: packs are returned sealed, never decrypted here.
+func (s *FICredentialStore) ListAll(ctx context.Context) ([]CredentialRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT c.id, c.user_id, c.institution_id, c.token_encrypted,
+		       c.refresh_token_encrypted, c.last_synced_at, i.code, i.name
+		FROM fi_credentials c JOIN fi_institutions i ON i.id = c.institution_id
+		WHERE i.status = 'active'
+		ORDER BY c.user_id, i.code`)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list all fi credentials: %w", err)
+	}
+	defer rows.Close()
+	out := make([]CredentialRow, 0, 2)
+	for rows.Next() {
+		var r CredentialRow
+		if err := rows.Scan(&r.ID, &r.UserID, &r.InstitutionID, &r.TokenPack,
+			&r.RefreshTokenPack, &r.LastSyncedAt, &r.InstitutionCode, &r.InstitutionName); err != nil {
+			return nil, fmt.Errorf("repo: scan fi credential row: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list all fi credentials: %w", err)
+	}
+	return out, nil
 }

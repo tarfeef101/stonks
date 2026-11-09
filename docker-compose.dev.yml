@@ -127,6 +127,10 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
+      # FI sync (step 9.2): dev-only fake adapter + the 8.3 clock override.
+      FI_FAKE_ADAPTERS: ${FI_FAKE_ADAPTERS:-}
+      FI_FAKE_ADAPTER_FAIL: ${FI_FAKE_ADAPTER_FAIL:-}
+      WORKER_FAKE_NOW: ${WORKER_FAKE_NOW:-}
     depends_on:
       postgres:
         condition: service_healthy
