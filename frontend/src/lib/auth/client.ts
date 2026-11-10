@@ -28,7 +28,7 @@
 // below (window access, localStorage) only ever runs in the browser.
 import { writable } from 'svelte/store';
 import { UserManager, WebStorageStateStore, type User } from 'oidc-client-ts';
-import { setTokenProvider } from '#lib/api/client';
+import { setTokenProvider, setUnauthorizedHandler } from '#lib/api/client';
 
 const ISSUER = import.meta.env.PUBLIC_AUTH0_ISSUER ?? 'http://localhost:18081/realms/finance';
 const CLIENT_ID = import.meta.env.PUBLIC_AUTH0_CLIENT_ID ?? 'finance-spa';
@@ -36,6 +36,15 @@ const AUDIENCE = import.meta.env.PUBLIC_AUTH0_AUDIENCE ?? 'finance-api';
 
 /** Reactive current user (null when signed out). */
 export const user = writable<User | null>(null);
+
+/** Reactive "session expired" flag (round 9). Set by the 401 handler below
+ * when a request 401s WHILE a session is present locally — i.e. the access
+ * token went stale (expired and the silent renewal could not save it).
+ * A signed-out load simply 401s with no local session, and those are the
+ * pages' normal fail-open sign-in prompts, not an expiry — so the flag is
+ * never raised for them. Rendered by the root layout as a global dialog
+ * with a button back to the IdP sign-in. */
+export const sessionExpired = writable(false);
 
 /** Non-reactive cache of the store value — read by the token provider. */
 let currentUser: User | null = null;
@@ -132,3 +141,9 @@ export async function logout(): Promise<void> {
 // Wire the access-token provider for the API client (see
 // src/lib/api/client.ts) — first import of this module activates it.
 setTokenProvider(() => currentUser?.access_token ?? null);
+
+// Wire the 401 handler: raise the "session expired" flag only when a
+// session is present locally (see the sessionExpired doc above).
+setUnauthorizedHandler(() => {
+	if (currentUser) sessionExpired.set(true);
+});

@@ -195,16 +195,32 @@
 	let gridEl = $state<HTMLDivElement | null>(null);
 
 	// The live drag-move (reorder) preview: while a header drag is in
-	// flight, the dragged card renders at the drop position in
-	// displayWidgets (the grid reflows around it); the stored widgets
-	// stay put until the pointerup PUT /order. from = the card's
-	// index in the STORED list at pointerdown; drop = a 0..n splice
-	// index into the non-dragged list.
-	let dragMove = $state<{ id: string; from: number; drop: number } | null>(null);
+	// flight, a light "ghost" clone follows the pointer (the ghost in
+	// the template) and the card itself renders as a dashed hole in
+	// the grid at the live drop position (its head/body/handles are
+	// hidden while moving). The stored widgets stay put until the
+	// pointerup PUT /order. from = the card's index in the STORED
+	// list at pointerdown; drop = a 0..n splice index into the
+	// non-dragged list. x/y = the pointer position; dx/dy = the grab
+	// offset from the card's top-left corner; width/height = the
+	// card's rect at pointerdown (the grid pitch is fixed, so the
+	// card's size can't change mid-move).
+	let dragMove = $state<{
+		id: string;
+		from: number;
+		drop: number;
+		x: number;
+		y: number;
+		dx: number;
+		dy: number;
+		width: number;
+		height: number;
+	} | null>(null);
 
 	// The display order: the stored widgets, with the dragged card
-	// spliced into its drop position while a drag-move is live (the
-	// card itself moves — no placeholder element).
+	// spliced into its drop position while a drag-move is live — its
+	// root stays in the grid flow (rendered as the dashed hole, see
+	// the template) while the ghost follows the pointer.
 	const displayWidgets = $derived.by((): DashboardWidget[] => {
 		const m = dragMove;
 		if (m === null) return widgets;
@@ -214,6 +230,14 @@
 		const arr = [...rest];
 		arr.splice(Math.min(Math.max(m.drop, 0), rest.length), 0, dragged);
 		return arr;
+	});
+
+	// The widget a drag-move is live for (the ghost's content) —
+	// null while no drag-move is in flight.
+	const draggedWidget = $derived.by((): DashboardWidget | null => {
+		const m = dragMove;
+		if (m === null) return null;
+		return widgets.find((x) => x.id === m.id) ?? null;
 	});
 
 	// The ⋯ overflow menu: at most one open at a time, keyed by the
@@ -327,12 +351,13 @@
 	/** Begins a drag-move from the card's header row: window-level
 	 * pointermove/pointerup/pointercancel — NO element capture,
 	 * because the card's node re-parents in the DOM mid-drag (the
-	 * reflow) and that would release a capture. While live, the card
-	 * renders at the drop position (displayWidgets); on release ONE
-	 * PUT /order, and the stored widgets are only rewritten on
-	 * success (a failure is opError + the preview dropping = the
-	 * revert). Skipped while that widget is in edit mode, a menu is
-	 * open, another drag is in flight, or the press starts on an
+	 * reflow) and that would release a capture. While live, a ghost
+	 * follows the pointer and the card renders as a dashed hole at
+	 * the drop position (displayWidgets); on release ONE PUT
+	 * /order, and the stored widgets are only rewritten on success
+	 * (a failure is opError + the preview dropping = the revert).
+	 * Skipped while that widget is in edit mode, a menu is open,
+	 * another drag is in flight, or the press starts on an
 	 * interactive element (the ⋯ button, the name input, …). */
 	function startMove(e: PointerEvent, w: DashboardWidget): void {
 		if (editingId === w.id || menuId !== null || dragging !== null || dragMove !== null) return;
@@ -341,13 +366,31 @@
 		const from = widgets.findIndex((x) => x.id === w.id);
 		if (from === -1) return;
 		e.preventDefault();
-		dragMove = { id: w.id, from, drop: from };
+		// Measure the card (the header row's parent) for the ghost:
+		// the grab offset keeps it pinned under the pointer, and the
+		// size is fixed for the whole move (the grid pitch is).
+		const cardEl = (e.currentTarget as HTMLElement).parentElement;
+		const rect = cardEl instanceof HTMLElement ? cardEl.getBoundingClientRect() : null;
+		dragMove = {
+			id: w.id,
+			from,
+			drop: from,
+			x: e.clientX,
+			y: e.clientY,
+			dx: e.clientX - (rect?.left ?? e.clientX),
+			dy: e.clientY - (rect?.top ?? e.clientY),
+			width: rect?.width ?? 0,
+			height: rect?.height ?? 0
+		};
 		const onMove = (ev: PointerEvent): void => {
 			ev.preventDefault();
 			const m = dragMove;
 			if (m === null) return;
+			// The ghost follows the pointer on every move; the drop
+			// slot only changes when the pointer is over a card
+			// (empty grid space keeps the current slot).
 			const idx = computeDropIndex(ev.clientX, ev.clientY, m.id);
-			if (idx !== null) dragMove = { ...m, drop: idx };
+			dragMove = { ...m, x: ev.clientX, y: ev.clientY, drop: idx === null ? m.drop : idx };
 		};
 		const finish = (commit: boolean): void => {
 			window.removeEventListener('pointermove', onMove);
@@ -383,6 +426,17 @@
 		} catch (e) {
 			opError = envelopeMessage(e);
 		}
+	}
+
+	/** The ghost's body preview for a markdown card: the first
+	 * non-empty line of the raw source (the ghost is a light clone —
+	 * the body is NOT re-rendered into it). */
+	function ghostLine(w: DashboardWidget): string {
+		for (const line of w.content.split('\n')) {
+			const t = line.trim();
+			if (t !== '') return t;
+		}
+		return '';
 	}
 
 	/** Renders a markdown widget's body: marked → DOMPurify
@@ -577,13 +631,20 @@
 		<div class="grid grid-cols-1 gap-4 md:grid-cols-12 md:auto-rows-[120px]" bind:this={gridEl}>
 			{#each displayWidgets as w (w.id)}
 				{@const fp = footprint(w)}
+				{@const moving = dragMove?.id === w.id}
+				<!-- The card root; while its drag-move is live it
+				     renders as the dashed hole at the live drop slot
+				     (head/body/handles hidden) and the ghost follows
+				     the pointer. It keeps its data-widget-id so
+				     computeDropIndex's skip-by-id still excludes it
+				     from the positional count. -->
 				<div
 					data-widget-id={w.id}
-					class="relative flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {dragging?.id === w.id
-						? 'ring-1 ring-sky-500/70'
-						: dragMove?.id === w.id
-							? 'ring-2 ring-sky-500/70'
-							: ''}"
+					class="relative flex flex-col rounded-lg {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {moving
+						? 'border-2 border-dashed border-sky-500/60 bg-sky-500/5'
+						: dragging?.id === w.id
+							? 'border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 ring-1 ring-sky-500/70'
+							: 'border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900'}"
 				>
 					<!-- Compact head (round 7): name (truncated) + kind
 					     badge, then the ⋯ overflow menu — the controls no
@@ -593,7 +654,9 @@
 					     drag-move surface (cursor-grab; startMove ignores
 					     presses on its interactive children). -->
 					<div
-						class="flex cursor-grab touch-none items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5 active:cursor-grabbing"
+						class="flex cursor-grab touch-none items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5 active:cursor-grabbing {moving
+							? 'hidden'
+							: ''}"
 						role="group"
 						aria-label={$_('dashboards.widget_drag_move')}
 						title={$_('dashboards.widget_drag_move')}
@@ -771,7 +834,7 @@
 							</div>
 						{/if}
 					</div>
-					<div class="min-h-0 flex-1 overflow-y-auto p-3">
+					<div class="min-h-0 flex-1 overflow-y-auto p-3 {moving ? 'hidden' : ''}">
 						{#if editingId === w.id && w.kind === 'markdown'}
 							<textarea
 								class="w-full min-h-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1.5 font-mono text-xs"
@@ -792,21 +855,27 @@
 					     overshoots stay inside the 16px grid gap; pointer
 					     capture + the grid-unit math live in startDrag. -->
 					<div
-						class="absolute inset-y-0 -right-[6px] w-3 cursor-ew-resize touch-none"
+						class="absolute inset-y-0 -right-[6px] w-3 cursor-ew-resize touch-none {moving
+							? 'hidden'
+							: ''}"
 						role="separator"
 						aria-orientation="vertical"
 						aria-label={$_('dashboards.handle_width')}
 						onpointerdown={(e) => startDrag(e, w, 'x')}
 					></div>
 					<div
-						class="absolute inset-x-0 -bottom-[6px] h-3 cursor-ns-resize touch-none"
+						class="absolute inset-x-0 -bottom-[6px] h-3 cursor-ns-resize touch-none {moving
+							? 'hidden'
+							: ''}"
 						role="separator"
 						aria-orientation="horizontal"
 						aria-label={$_('dashboards.handle_height')}
 						onpointerdown={(e) => startDrag(e, w, 'y')}
 					></div>
 					<div
-						class="absolute -bottom-[6px] -right-[6px] h-3 w-3 cursor-nwse-resize touch-none"
+						class="absolute -bottom-[6px] -right-[6px] h-3 w-3 cursor-nwse-resize touch-none {moving
+							? 'hidden'
+							: ''}"
 						role="separator"
 						aria-label={$_('dashboards.handle_corner')}
 						onpointerdown={(e) => startDrag(e, w, 'xy')}
@@ -818,6 +887,41 @@
 				>
 			{/each}
 		</div>
+		<!-- Drag ghost (round 9): a light clone of the dragged card
+		     that follows the pointer — the card itself sits in the
+		     grid as the dashed hole at the live drop slot. fixed
+		     (viewport-relative) positioning keeps it glued to the
+		     pointer; pointer-events: none so it never intercepts
+		     the grid's pointer targets; aria-hidden — it is a
+		     visual echo of a card the user already holds. -->
+		{#if dragMove !== null && draggedWidget !== null && dragMove.width > 0}
+			{@const preview = draggedWidget.kind === 'markdown' ? ghostLine(draggedWidget) : ''}
+			<div
+				class="pointer-events-none fixed z-40 flex flex-col overflow-hidden rounded-lg border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 opacity-90 shadow-lg"
+				style="left: {dragMove.x - dragMove.dx}px; top: {dragMove.y - dragMove.dy}px; width: {dragMove.width}px; height: {dragMove.height}px;"
+				aria-hidden="true"
+			>
+				<div class="flex min-w-0 items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5">
+					{#if draggedWidget.name === ''}
+						<h2 class="truncate text-sm font-semibold text-zinc-400 dark:text-zinc-500 italic">
+							{$_('dashboards.widget_untitled')}
+						</h2>
+					{:else}
+						<h2 class="truncate text-sm font-semibold">{draggedWidget.name}</h2>
+						<span
+							class="shrink-0 rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-500 dark:text-zinc-400"
+						>
+							{draggedWidget.kind === 'explore'
+								? $_('dashboards.kind_explore')
+								: $_('dashboards.kind_markdown')}
+						</span>
+					{/if}
+				</div>
+				{#if preview !== ''}
+					<p class="truncate px-3 py-1.5 text-sm text-zinc-500 dark:text-zinc-400">{preview}</p>
+				{/if}
+			</div>
+		{/if}
 		<!-- Add-widget row: a kind picker; picking one opens the add
 		     card (a name + — for markdown — a content textarea).
 		     New widgets span 4 columns. -->

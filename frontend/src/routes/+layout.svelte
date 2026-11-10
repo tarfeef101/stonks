@@ -4,8 +4,9 @@
 	import { BrowserAgent } from '@newrelic/browser-agent';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
+	import { _ } from 'svelte-i18n';
 	import AppShell from '#lib/components/AppShell.svelte';
-	import { initSession, user } from '#lib/auth/client';
+	import { initSession, login, sessionExpired, user } from '#lib/auth/client';
 	import { clearSettings, loadSettings, settings } from '#lib/settings';
 	import { queryClient } from '#lib/query';
 	import { waitLocale } from '#lib/i18n';
@@ -98,4 +99,46 @@
 			{@render children()}
 		</AppShell>
 	</QueryClientProvider>
+
+	<!-- Session-expired dialog (round 9): raised by the 401 handler in
+		lib/auth/client.ts when a request 401s while a session is present
+		locally — the access token went stale and the silent renewal could
+		not save it. Signed-out loads are NOT caught here: they have no
+		local session and each page renders its own fail-open sign-in
+		prompt. "Sign in" returns to the current URL (return_to) so the
+		user lands back where they were. -->
+	{#if $sessionExpired}
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/60 p-4">
+			<div
+				role="alertdialog"
+				aria-modal="true"
+				aria-labelledby="session-expired-title"
+				class="w-full max-w-sm rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-lg"
+			>
+				<h2 id="session-expired-title" class="text-base font-semibold">
+					{$_('auth.session_expired_title')}
+				</h2>
+				<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+					{$_('auth.session_expired_body')}
+				</p>
+				<div class="mt-4 flex justify-end gap-2">
+					<button
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
+						onclick={() => sessionExpired.set(false)}
+					>
+						{$_('auth.session_expired_dismiss')}
+					</button>
+					<button
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm font-medium hover:bg-zinc-50 dark:hover:bg-zinc-800"
+						onclick={() => {
+							sessionExpired.set(false);
+							login(page.url.pathname + page.url.search);
+						}}
+					>
+						{$_('auth.sign_in')}
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}

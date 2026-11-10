@@ -246,7 +246,10 @@
 		"signing_in": "Signing in…",
 		"error_title": "Sign-in failed",
 		"go_home": "Go home",
-		"complete_onboarding": "Complete onboarding"
+		"complete_onboarding": "Complete onboarding",
+		"session_expired_title": "Session expired",
+		"session_expired_body": "Your session has expired. Sign in again to continue.",
+		"session_expired_dismiss": "Not now"
 	},
 	"onboarding": {
 		"title": "Onboarding",

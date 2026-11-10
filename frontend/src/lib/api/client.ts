@@ -19,6 +19,19 @@ export function setTokenProvider(provider: TokenProvider): void {
 	getToken = provider;
 }
 
+// 401 hook (round 9): a stale access token used to surface as the raw
+// backend error body in whatever page happened to be loading. The API
+// client now reports every 401 to a handler installed by src/lib/auth/client.ts,
+// which raises the global "session expired" dialog (rendered by the root
+// layout) so an average user sees a way back in instead of red JSON.
+let onUnauthorized: (() => void) | null = null;
+
+/** Installs the 401 handler (called by src/lib/auth/client.ts on module
+ * load). */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+	onUnauthorized = handler;
+}
+
 export class ApiError extends Error {
 	readonly status: number;
 
@@ -56,6 +69,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
 	const res = await fetch(`${API_BASE}${path}`, { ...init, headers, body });
 
 	if (!res.ok) {
+		if (res.status === 401) onUnauthorized?.();
 		const text = await res.text().catch(() => '');
 		throw new ApiError(res.status, text);
 	}
