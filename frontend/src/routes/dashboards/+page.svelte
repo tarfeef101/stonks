@@ -11,16 +11,17 @@
 		type DashboardCard
 	} from '#lib/api/dashboardCards';
 	import { loadCatalogs } from '#lib/explore/catalogs';
-	import { parseState, type Names } from '#lib/explore/state';
+	import { parseState, serializeStateForLink, type Names } from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
 	// Dashboards page (step 6.5 C2): the caller's saved Explore views as
 	// a live card grid. Each card embeds the shared ExploreView over the
 	// card's stored (canonical) explore_state, and the whole card body
 	// is a CLICK-THROUGH: an <a> to the same view on the Explore page
-	// (the href uses the RAW stored string — '' is the default view;
-	// the controls stay OUTSIDE the link, since interactive content
-	// inside a link is invalid). Ops: inline rename, move up/down
+	// (the href re-serializes the stored state with the sign ALWAYS
+	// explicit — a bare /explore opens the remembered last view, not
+	// the card's; the controls stay OUTSIDE the link, since interactive
+	// content inside a link is invalid). Ops: inline rename, move up/down
 	// (reorder via PUT /order), confirm-gated delete. Every op surfaces
 	// a 3.1 envelope message verbatim in the shared opError note.
 	//
@@ -239,13 +240,14 @@
 
 					<!-- The view area, and the CLICK-THROUGH: the whole
 					     body links to the same view on the Explore page
-					     (the RAW stored explore_state — '' is the default
-					     view). The card's controls stay OUTSIDE the <a>. -->
+					     (the stored explore_state re-serialized with the
+					     sign always explicit — a bare /explore opens the
+					     remembered last view, not the card's). The card's
+					     controls stay OUTSIDE the <a>. -->
 					<a
 						class="block"
-						href={resolve(
-							card.explore_state === '' ? '/explore' : `/explore?${card.explore_state}`
-						)}
+						href={resolve(`/explore?${serializeStateForLink(parseState(card.explore_state))}`)}
+					>
 						aria-label={$_('dashboards.open', { values: { name: card.name } })}
 					>
 						<ExploreView state={parseState(card.explore_state)} {names} />

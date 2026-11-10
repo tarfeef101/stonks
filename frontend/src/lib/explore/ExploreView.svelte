@@ -9,9 +9,10 @@
 
 	// Explore view (step 6.5): the shared read-only render of an Explore
 	// state — the paged 3.2 List data loop, the client-side
-	// grouping/aggregation, and the chart/table markup, moved from the
-	// explore page so the dashboard cards can render saved views. Until
-	// C2 wires the pages, nothing imports this component.
+	// grouping/aggregation, and the chart/table markup (the pie with a
+	// legend table of the rendered slices' values beside it), moved from
+	// the explore page so the dashboard cards can render saved views.
+	// Until C2 wires the pages, nothing imports this component.
 	//
 	// Rendered-numbers contract: every displayed amount — table cells,
 	// axis ticks, tooltip values — is an aggregate INTEGER-CENTS sum run
@@ -42,6 +43,21 @@
 	const PAGE_SIZE = 100;
 	const MAX_PAGES = 10;
 
+	// The pie's slice colors: ECharts 5's default palette, pinned here so
+	// the slices and the legend table's swatches can't drift (row i
+	// shows PIE_COLORS[i % length] for slice i).
+	const PIE_COLORS = [
+		'#5470c6',
+		'#91cc75',
+		'#fac858',
+		'#ee6666',
+		'#73c0de',
+		'#3ba272',
+		'#fc8452',
+		'#9a60b4',
+		'#ea7ccc'
+	];
+
 	let rows = $state<Transaction[]>([]);
 	let capped = $state(false);
 	let loading = $state(true);
@@ -56,10 +72,15 @@
 	 * net): what the chart measures and the pie excludes. */
 	const metric = $derived(metricForSign(explore.sign));
 
-	/** Pie only: the groups hidden because the metric is not positive. */
-	const pieHidden = $derived(
-		explore.chart === 'pie' ? aggs.filter((g) => g[metric] <= 0).length : 0
+	/** The pie's rendered slices (the metric-positive groups, in order)
+	 * — the legend table beside the chart lists exactly these, with the
+	 * same colors. */
+	const pieAggs = $derived(
+		explore.chart === 'pie' ? aggs.filter((g) => g[metric] > 0) : []
 	);
+
+	/** Pie only: the groups hidden because the metric is not positive. */
+	const pieHidden = $derived(explore.chart === 'pie' ? aggs.length - pieAggs.length : 0);
 
 	/** The ECharts option for the current view, or null for the table
 	 * view / no rows. Tooltip and axis formatters run formatCents over
@@ -69,14 +90,21 @@
 		const fmt = (v: unknown): string => formatCents(Math.round(Number(v)));
 		if (explore.chart === 'pie') {
 			return {
+				// The pinned palette: the legend table's swatches reuse it,
+				// so slice i and row i always match.
+				color: PIE_COLORS,
 				tooltip: { valueFormatter: fmt },
 				series: [
 					{
 						type: 'pie',
 						radius: '65%',
-						data: aggs
-							.filter((g) => g[metric] > 0)
-							.map((g) => ({ name: g.label, value: g[metric] }))
+						// The outside labels' white text outlines are fuzzy
+						// and unreadable in dark mode — the legend table
+						// beside the chart IS the labels + values (the
+						// tooltip stays for hover).
+						label: { show: false },
+						labelLine: { show: false },
+						data: pieAggs.map((g) => ({ name: g.label, value: g[metric] }))
 					}
 				]
 			};
@@ -250,8 +278,9 @@
 	</div>
 {:else}
 	<!-- Chart view: svelte-echarts over the same grouped data
-	     (line/bar x = group labels, y = the metric in cents;
-	     the pie drops non-positive groups and says so). -->
+	     (line/bar x = group labels, y = the metric in cents; the
+	     pie drops non-positive groups, says so, and pairs the
+	     chart with a legend table of the rendered slices' values). -->
 	<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 		{#if explore.chart === 'pie' && pieHidden > 0}
 			<p class="mb-2 text-xs text-zinc-500 dark:text-zinc-400">
@@ -259,8 +288,47 @@
 			</p>
 		{/if}
 		{#if chartOptions !== null}
-			<div class="h-80">
-				<Chart init={echarts.init} options={chartOptions} class="h-full w-full" />
+			<div class={explore.chart === 'pie' ? 'flex flex-col gap-5 lg:flex-row' : ''}>
+				<div class={explore.chart === 'pie' ? 'h-80 w-full lg:w-1/2' : 'h-80'}>
+					<Chart init={echarts.init} options={chartOptions} class="h-full w-full" />
+				</div>
+				{#if explore.chart === 'pie' && pieAggs.length > 0}
+					<!-- The legend table: exactly the rendered slices,
+					     in slice order — the swatch carries the slice's
+					     color, the cell the metric value (the chart's own
+					     labels are off: their white outlines are unreadable
+					     in dark mode; the tooltip stays for hover). -->
+					<div class="w-full overflow-x-auto lg:w-1/2">
+						<table class="w-full text-sm">
+							<thead>
+								<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
+									<th class="px-4 py-2">{$_('explore.col_group')}</th>
+									<th class="px-4 py-2 text-right">
+										{$_(metric === 'spend' ? 'explore.col_spend' : metric === 'income' ? 'explore.col_income' : 'explore.col_net')}
+									</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each pieAggs as g, i (g.key)}
+									<tr class="border-b border-zinc-100 dark:border-zinc-800 last:border-0">
+										<td class="px-4 py-1.5">
+											<span class="flex items-center gap-2">
+												<span
+													class="h-3 w-3 shrink-0 rounded-full"
+													style="background: {PIE_COLORS[i % PIE_COLORS.length]}"
+												></span>
+												{g.label}
+											</span>
+										</td>
+										<td class="px-4 py-1.5 text-right tabular-nums">
+											{formatCents(g[metric])}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
 			</div>
 		{/if}
 	</div>

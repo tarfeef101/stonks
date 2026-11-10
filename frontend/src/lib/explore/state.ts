@@ -41,8 +41,8 @@ export interface ExploreState {
 	max: string;
 	/** Description-substring search (any non-empty string), or ''. */
 	q: string;
-	/** '' = any; 'spending' = negative amounts only; 'income' = positive
-	 * amounts only. */
+	/** '' = any (all amounts); 'spending' = negative amounts only (the
+	 * default view); 'income' = positive amounts only. */
 	sign: string;
 	chart: ChartKind;
 	group: GroupBy;
@@ -124,7 +124,7 @@ export function parseState(qs: string): ExploreState {
 		min: '',
 		max: '',
 		q: '',
-		sign: '',
+		sign: 'spending',
 		chart: 'pie',
 		group: 'category'
 	};
@@ -144,15 +144,25 @@ export function parseState(qs: string): ExploreState {
 	state.min = firstValid('min', (v) => AMOUNT_RE.test(v));
 	state.max = firstValid('max', (v) => AMOUNT_RE.test(v));
 	state.q = params.getAll('q').find((v) => v !== '') ?? '';
-	state.sign = firstValid('sign', (v) => v === 'spending' || v === 'income');
-	// Legacy URLs (before the metric moved into the Type filter) carried a
-	// `metric` param. Map it onto the sign — only when no explicit sign is
-	// present (an explicit sign always wins); 'net' / invalid values are
-	// dropped.
-	if (state.sign === '') {
+	// The sign: 'spending' (the default view) | 'income' | 'all' (any
+	// amounts). An absent or invalid param falls through to the legacy
+	// `metric` mapping below, then to the default.
+	const signParam = firstValid(
+		'sign',
+		(v) => v === 'spending' || v === 'income' || v === 'all'
+	);
+	if (signParam !== '') {
+		state.sign = signParam === 'all' ? '' : signParam;
+	} else {
+		// Legacy URLs (before the sign param) carried a `metric` param.
+		// Map it onto the sign — spend → spending, income → income,
+		// net → '' (all — PRESERVED as the all view, since the new
+		// default is spending, not all).
 		const m = firstValid('metric', (v) => v === 'spend' || v === 'income' || v === 'net');
 		if (m === 'spend') state.sign = 'spending';
 		else if (m === 'income') state.sign = 'income';
+		else if (m === 'net') state.sign = '';
+		// else: no sign info at all → the default, 'spending'
 	}
 	// With sign 'spending' the bounds are absolute magnitudes: normalize
 	// any legacy negative bounds (min=-10 → min=10) so the stored state is
@@ -166,13 +176,12 @@ export function parseState(qs: string): ExploreState {
 	return state;
 }
 
-/** Serializes the state to the canonical query string (no leading '?').
- * Defaults are omitted: chart=pie / group=category and every absent
- * filter. With sign 'spending', min/max are canonicalized to absolute
- * magnitudes (a leading '-' is stripped). Canonical param order:
- * from,to,account,category,min,max,q,sign,chart,group. */
-export function serializeState(s: ExploreState): string {
-	const params = new URLSearchParams();
+/** The canonical serialization core: every present field, in the pinned
+ * param order (from,to,account,category,min,max,q,sign,chart,group).
+ * `alwaysSign` also emits the default sign (spending) as an explicit
+ * token — for click-through hrefs, where a bare /explore opens the
+ * remembered last view, not the card's. */
+function appendCanonical(s: ExploreState, params: URLSearchParams, alwaysSign: boolean): void {
 	if (s.from !== '') params.append('from', s.from);
 	if (s.to !== '') params.append('to', s.to);
 	for (const a of s.account) params.append('account', a);
@@ -188,9 +197,32 @@ export function serializeState(s: ExploreState): string {
 	if (min !== '') params.append('min', min);
 	if (max !== '') params.append('max', max);
 	if (s.q !== '') params.append('q', s.q);
-	if (s.sign !== '') params.append('sign', s.sign);
+	// The default sign (spending) is omitted; the all view ('') is the
+	// explicit `sign=all` token.
+	if (s.sign === 'income') params.append('sign', 'income');
+	else if (s.sign === '') params.append('sign', 'all');
+	else if (alwaysSign) params.append('sign', 'spending');
 	if (s.chart !== 'pie') params.append('chart', s.chart);
 	if (s.group !== 'category') params.append('group', s.group);
+}
+
+/** Serializes the state to the canonical query string (no leading '?').
+ * Defaults are omitted: chart=pie / group=category, the default sign
+ * (spending), and every absent filter — the all view is the explicit
+ * `sign=all` token. With sign 'spending', min/max are canonicalized to
+ * absolute magnitudes (a leading '-' is stripped). */
+export function serializeState(s: ExploreState): string {
+	const params = new URLSearchParams();
+	appendCanonical(s, params, false);
+	return params.toString();
+}
+
+/** Like serializeState, but the sign is ALWAYS explicit (even the
+ * default spending) — for click-through hrefs, where a bare /explore
+ * would open the remembered last view instead of the card's. */
+export function serializeStateForLink(s: ExploreState): string {
+	const params = new URLSearchParams();
+	appendCanonical(s, params, true);
 	return params.toString();
 }
 

@@ -11,7 +11,9 @@
 
 	// Explore page (step 6.4, refactored in 6.5 C2): a filterable,
 	// groupable view of the caller's transactions. The filter state
-	// lives in the URL (every view is shareable); the row data loop,
+	// lives in the URL (every view is shareable) AND is remembered as
+	// the page's last settings (localStorage), so a bare /explore
+	// reopens the user's last view; the row data loop,
 	// the grouping/aggregation, and the table/chart render live in the
 	// shared ExploreView component (lib/explore), which the dashboard
 	// cards embed too. The page owns the filter bar, the view bar
@@ -28,9 +30,31 @@
 	// (catalogs / URL), a seq guard drops stale responses,
 	// envelopeMessage carves the 3.1 envelope out of ApiError.
 
-	/** The URL's state IS the page's state (init once on load; every
-	 * change flows back to the address bar via the sync effect). */
-	let explore = $state<ExploreState>(parseState(window.location.search.slice(1)));
+	/** The page-scoped "last settings" (house ftrk- prefix): the full
+	 * canonical state string this page last held — a bare /explore
+	 * reopens it. The URL-sync effect rewrites it on every change;
+	 * Reset restores the defaults, which serialize to '' and are
+	 * rewritten by the same effect. */
+	const EXPLORE_STATE_KEY = 'ftrk-explore-state';
+
+	/** The page's state: URL params WIN (a shared/explicit link is
+	 * deterministic — it never merges with the remembered settings);
+	 * else the remembered last settings; else the defaults (sign
+	 * spending, chart pie, group category). Init once on load; every
+	 * change flows back to the address bar via the sync effect. */
+	let explore = $state<ExploreState>(initExploreState());
+
+	function initExploreState(): ExploreState {
+		const qs = window.location.search.slice(1);
+		if (qs !== '') return parseState(qs);
+		let stored = '';
+		try {
+			stored = window.localStorage.getItem(EXPLORE_STATE_KEY) ?? '';
+		} catch {
+			// storage unavailable (private mode) — the defaults
+		}
+		return parseState(stored);
+	}
 
 	let accounts = $state<Account[]>([]);
 	let categories = $state<Category[]>([]);
@@ -73,8 +97,9 @@
 
 	// The URL is the state: after every change, replace the history
 	// entry with the canonical serialized form (shareable; no history
-	// spam). Runs once on load too — it canonicalizes whatever URL the
-	// page opened with.
+	// spam) and remember it as the page's last settings (a bare
+	// /explore reopens this view). Runs once on load too — it
+	// canonicalizes whatever URL the page opened with.
 	$effect(() => {
 		const qs = serializeState({
 			from: explore.from,
@@ -90,6 +115,15 @@
 		});
 		const path = window.location.pathname;
 		window.history.replaceState(window.history.state, '', qs !== '' ? `${path}?${qs}` : path);
+		// Remember the full last settings (the canonical string of ALL
+		// fields; '' reopens the defaults). A write failure (private
+		// mode) is a silent no-op — the URL stays the shareable source
+		// of truth.
+		try {
+			window.localStorage.setItem(EXPLORE_STATE_KEY, qs);
+		} catch {
+			// storage unavailable — skip the remember
+		}
 	});
 
 	/** The backend answers 4xx with the 3.1 envelope {error: {code,
@@ -243,7 +277,7 @@
 			min: '',
 			max: '',
 			q: '',
-			sign: '',
+			sign: 'spending',
 			chart: 'pie',
 			group: 'category'
 		};
