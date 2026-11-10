@@ -43,7 +43,10 @@ export const user = writable<User | null>(null);
  * A signed-out load simply 401s with no local session, and those are the
  * pages' normal fail-open sign-in prompts, not an expiry — so the flag is
  * never raised for them. Rendered by the root layout as a global dialog
- * with a button back to the IdP sign-in. */
+ * with a button back to the IdP sign-in. Cleared by signInCallback() when
+ * the redirect exchange succeeds (round 10): a 401 racing that exchange
+ * belongs to the pre-login token, not to the session that just completed.
+ */
 export const sessionExpired = writable(false);
 
 /** Non-reactive cache of the store value — read by the token provider. */
@@ -100,26 +103,122 @@ export function displayName(u: User | null): string {
 	return (typeof name === 'string' && name) || (typeof email === 'string' && email) || '';
 }
 
+// "Return to where you were" (round 10): the target CANNOT ride the
+// authorize/callback redirect — Keycloak drops custom authorize query
+// params (a live probe confirmed the callback URL carries only
+// code/state/session_state/iss), so the round-9 `return_to` param was dead
+// weight and post-login navigation always fell back to '/'. The target is
+// instead stashed in localStorage before the redirect and read back by the
+// /auth/callback page after a successful exchange.
+const RETURN_TO_KEY = 'ftrk-return-to';
+
+function stashReturnTo(returnTo: string | undefined): void {
+	try {
+		if (returnTo) window.localStorage.setItem(RETURN_TO_KEY, returnTo);
+		else window.localStorage.removeItem(RETURN_TO_KEY);
+	} catch {
+		/* storage unavailable: the callback falls back to '/' */
+	}
+}
+
+/** The stashed post-login target, or null. Enforces the same-origin
+ * relative-path rule (rejects absolute URLs, protocol-relative
+ * '//evil.com', and non-relative junk). */
+export function readReturnTo(): string | null {
+	try {
+		const raw = window.localStorage.getItem(RETURN_TO_KEY);
+		return raw && raw.startsWith('/') && !raw.startsWith('//') ? raw : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Drops the stash — the callback calls this right before the successful
+ * navigation. A failed exchange KEEPS it so a retry still lands the user
+ * where they were; a later login() without a target clears it. */
+export function clearReturnTo(): void {
+	try {
+		window.localStorage.removeItem(RETURN_TO_KEY);
+	} catch {
+		/* ignore */
+	}
+}
+
+// Double-click guard (round 10): signinRedirect is async (OIDC discovery
+// before it writes the state and navigates), so a second click inside that
+// window overwrites the stateStore entry with a NEW state while the browser
+// commits to the FIRST navigation — the callback then sees a state
+// mismatch, the exchange throws, and the stale (expired) user stays
+// persisted, re-raising the "session expired" dialog on every reload.
+// Ignore clicks while a redirect is in flight; the timer is a backstop for
+// paths where the promise never settles in this document.
+let redirectInFlight = false;
+let redirectInFlightTimer: ReturnType<typeof setTimeout> | undefined;
+
 /**
  * Redirect to the IdP login screen. `returnTo` (a same-origin relative
- * path) is sent as an authorize query param — Keycloak echoes it back on
- * the callback URL so the app can return the user to where they came from.
+ * path) is stashed in localStorage for the /auth/callback page to read —
+ * see the RETURN_TO_KEY note above.
  */
 export function login(returnTo?: string): void {
-	void client().signinRedirect({
-		// Per-call params so both are guaranteed on the authorize request
-		// regardless of settings-merge semantics.
-		extraQueryParams: {
-			audience: AUDIENCE,
-			...(returnTo ? { return_to: returnTo } : {})
-		}
-	});
+	if (redirectInFlight) return;
+	redirectInFlight = true;
+	if (redirectInFlightTimer) clearTimeout(redirectInFlightTimer);
+	redirectInFlightTimer = setTimeout(() => {
+		redirectInFlight = false;
+		redirectInFlightTimer = undefined;
+	}, 5000);
+	stashReturnTo(returnTo);
+	client()
+		.signinRedirect({
+			// Per-call so the audience is guaranteed on the authorize
+			// request regardless of settings-merge semantics.
+			extraQueryParams: { audience: AUDIENCE }
+		})
+		.catch(() => {
+			redirectInFlight = false;
+			if (redirectInFlightTimer) {
+				clearTimeout(redirectInFlightTimer);
+				redirectInFlightTimer = undefined;
+			}
+		});
 }
+
+// Suppress the 401 handler while the callback exchange is in flight and
+// briefly after it succeeds (round 10): on the callback document the
+// layout's initSession() first restores the PRE-LOGIN persisted user (its
+// token expired — that is why we are re-authenticating), and the
+// sub-keyed settings effect fires a GET with that stale token. A 401 in
+// that window is expected, not an expiry — raising the dialog there is the
+// "popup comes right back after re-login" bug.
+let signInInFlight = false;
+let suppressUntil = 0;
 
 /** Finish the redirect flow — called from the /auth/callback page. */
 export async function signInCallback(): Promise<void> {
 	const c = client();
-	setStoreUser(await c.signinRedirectCallback(window.location.href));
+	signInInFlight = true;
+	try {
+		setStoreUser(await c.signinRedirectCallback(window.location.href));
+		// The exchange succeeded: clear any dialog the race above raised,
+		// and keep 401s from re-raising it for a short grace window while
+		// the layout settles on the new user (a late 401 from the
+		// stale-token settings GET can still land after the exchange).
+		sessionExpired.set(false);
+		suppressUntil = Date.now() + 5000;
+	} catch (e) {
+		// The exchange failed (state mismatch, direct visit, …). Clear the
+		// stale persisted user: otherwise every reload restores the expired
+		// token, the settings 401 re-raises the "session expired" dialog,
+		// and the user is stuck behind a popup for a session that is
+		// already dead (round 10). A clean signed-out state shows the
+		// pages' normal fail-open sign-in prompts instead.
+		await c.removeUser();
+		setStoreUser(null);
+		throw e;
+	} finally {
+		signInInFlight = false;
+	}
 }
 
 /**
@@ -143,7 +242,11 @@ export async function logout(): Promise<void> {
 setTokenProvider(() => currentUser?.access_token ?? null);
 
 // Wire the 401 handler: raise the "session expired" flag only when a
-// session is present locally (see the sessionExpired doc above).
+// session is present locally (see the sessionExpired doc above). Never
+// raise it while the callback exchange is in flight or within the
+// post-exchange grace window — those 401s belong to the pre-login token,
+// not to the session that just completed (round 10).
 setUnauthorizedHandler(() => {
+	if (signInInFlight || Date.now() < suppressUntil) return;
 	if (currentUser) sessionExpired.set(true);
 });

@@ -1,26 +1,24 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/state';
 	import type { RouteId } from '$app/types';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
-	import { signInCallback } from '#lib/auth/client';
+	import { clearReturnTo, readReturnTo, signInCallback } from '#lib/auth/client';
 	import { loadSettings } from '#lib/settings';
 
 	// OIDC redirect callback (step 1.2): the IdP lands the browser here
-	// with ?code=...&state=... (plus the echoed authorize query params).
-	// The root layout is ssr = false, so this page is client-only: the
-	// exchange happens in onMount.
+	// with ?code=...&state=... (and nothing else — Keycloak drops custom
+	// authorize query params). The root layout is ssr = false, so this
+	// page is client-only: the exchange happens in onMount.
 
-	// `return_to` is echoed back by Keycloak from the authorize request.
-	// Only same-origin relative paths are honoured (reject absolute URLs,
-	// protocol-relative '//evil.com', and non-relative junk).
-	const rawReturnTo = new URLSearchParams(page.url.search).get('return_to');
-	const returnTo =
-		rawReturnTo && rawReturnTo.startsWith('/') && !rawReturnTo.startsWith('//')
-			? rawReturnTo
-			: null;
+	// The post-login target is the localStorage stash written by login()
+	// before the redirect (round 10): the callback URL can never carry
+	// return_to. readReturnTo() enforces the same-origin relative-path
+	// rule (rejects absolute URLs, protocol-relative '//evil.com', and
+	// non-relative junk); the stash is cleared right before the
+	// successful navigation, so a failed exchange keeps it for a retry.
+	const returnTo = readReturnTo();
 
 	let error = $state<string | null>(null);
 
@@ -38,8 +36,9 @@
 			// Both targets are internal paths — resolve() keeps base-path
 			// deployments working. `target` is typed as a parameterless
 			// route id with an optional query string: login() only ever
-			// sends page.url.pathname + page.url.search, so the echoed
-			// return_to is one of this app's own routes. The parameterized
+			// stashes page.url.pathname + page.url.search, and
+			// readReturnTo() re-validates the relative-path rule, so the
+			// target is one of this app's own routes. The parameterized
 			// route id is EXCLUDED from the cast because SvelteKit 3's
 			// typed resolve() demands a second params argument for those
 			// (ResolveArgs in $app/paths); a plain string or the full
@@ -51,9 +50,13 @@
 			const target = (st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')) as
 				| Exclude<RouteId, '/dashboards/[id]'>
 				| `${Exclude<RouteId, '/dashboards/[id]'>}?${string}`;
+			clearReturnTo();
 			goto(resolve(target), { replaceState: true });
 		} catch (e) {
-			// e.g. visiting /auth/callback directly with no pending state.
+			// e.g. visiting /auth/callback directly with no pending state,
+			// or a state mismatch (double-clicked sign-in): the stale user
+			// was already cleared by signInCallback, so this renders the
+			// error card over a clean signed-out state.
 			error = e instanceof Error ? e.message : String(e);
 		}
 	});
