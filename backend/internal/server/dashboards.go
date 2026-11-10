@@ -63,6 +63,11 @@ const (
 
 	maxExploreContentLen  = 1024
 	maxMarkdownContentLen = 16384
+
+	// maxWidgetRowSpan is the 0014 row_span CHECK ceiling: a widget can
+	// occupy at most 8 fixed-height grid rows (taller = scroll inside
+	// the card).
+	maxWidgetRowSpan = 8
 )
 
 // Wire DTOs (RAW, no envelope, NO timestamps — 3.1 convention).
@@ -82,6 +87,7 @@ type widgetOut struct {
 	Kind      string `json:"kind"`
 	Content   string `json:"content"`
 	Span      int    `json:"span"`
+	RowSpan   int    `json:"row_span"`
 	SortOrder int    `json:"sort_order"`
 }
 
@@ -92,6 +98,7 @@ func toWidgetOut(w repo.DashboardWidget) widgetOut {
 		Kind:      w.Kind,
 		Content:   w.Content,
 		Span:      w.Span,
+		RowSpan:   w.RowSpan,
 		SortOrder: w.SortOrder,
 	}
 }
@@ -108,13 +115,15 @@ type dashboardPatch struct {
 }
 
 // widgetIn is the POST widgets body. Content is a plain string: ""
-// (absent) IS the default all-time view for explore widgets. Span is a
-// pointer: absent = the default 6.
+// (absent) IS the default all-time view for explore widgets. Span and
+// RowSpan are pointers: absent = the default 6 and the per-kind default
+// (explore 4, markdown 2).
 type widgetIn struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
 	Content string `json:"content"`
 	Span    *int   `json:"span"`
+	RowSpan *int   `json:"row_span"`
 }
 
 // widgetPatch is the PATCH widgets body, mirroring
@@ -126,6 +135,7 @@ type widgetPatch struct {
 	Kind    *string `json:"kind"`
 	Content *string `json:"content"`
 	Span    *int    `json:"span"`
+	RowSpan *int    `json:"row_span"`
 }
 
 // validKind reports whether kind is one of the 0013 enum values.
@@ -158,6 +168,15 @@ func validateSpan(span int) error {
 	return nil
 }
 
+// validateRowSpan enforces the 1..maxWidgetRowSpan grid-row span (0014
+// CHECK).
+func validateRowSpan(rowSpan int) error {
+	if rowSpan < 1 || rowSpan > maxWidgetRowSpan {
+		return fmt.Errorf("row_span must be between 1 and %d", maxWidgetRowSpan)
+	}
+	return nil
+}
+
 // validateWidgetIn checks every POST field so a bad value is a 400
 // before any store call; all problems are collected and joined with
 // "; " (the settings convention, like validateCardIn). A non-string
@@ -177,6 +196,11 @@ func (h *handler) validateWidgetIn(in *widgetIn) error {
 	}
 	if in.Span != nil {
 		if err := validateSpan(*in.Span); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if in.RowSpan != nil {
+		if err := validateRowSpan(*in.RowSpan); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -218,6 +242,11 @@ func (h *handler) validateWidgetPatch(p *widgetPatch, existingKind, existingCont
 	}
 	if p.Span != nil {
 		if err := validateSpan(*p.Span); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	if p.RowSpan != nil {
+		if err := validateRowSpan(*p.RowSpan); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}
@@ -388,7 +417,8 @@ func (h *handler) widgetsList(w http.ResponseWriter, r *http.Request) {
 
 // widgetsCreate serves POST /api/v1/dashboards/{id}/widgets and
 // answers 201 with the created row (appended at the end of the grid;
-// an absent span is the default 6).
+// an absent span is the default 6, an absent row_span the per-kind
+// default — explore 4, markdown 2).
 func (h *handler) widgetsCreate(w http.ResponseWriter, r *http.Request) {
 	if h.widgets == nil {
 		notConfigured(w)
@@ -416,11 +446,19 @@ func (h *handler) widgetsCreate(w http.ResponseWriter, r *http.Request) {
 	if in.Span != nil {
 		span = *in.Span
 	}
+	rowSpan := 4
+	if in.Kind == kindMarkdown {
+		rowSpan = 2
+	}
+	if in.RowSpan != nil {
+		rowSpan = *in.RowSpan
+	}
 	created, err := h.widgets.Create(r.Context(), c.row.ID, dashID, repo.DashboardWidgetIn{
 		Name:    in.Name,
 		Kind:    in.Kind,
 		Content: in.Content,
 		Span:    span,
+		RowSpan: rowSpan,
 	}, c.dek)
 	if err != nil {
 		h.dashboardError(w, "create widget", err)
@@ -460,7 +498,7 @@ func (h *handler) widgetsUpdate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "body must be a JSON object: "+err.Error())
 		return
 	}
-	if p.Name == nil && p.Kind == nil && p.Content == nil && p.Span == nil {
+	if p.Name == nil && p.Kind == nil && p.Content == nil && p.Span == nil && p.RowSpan == nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "empty patch: provide at least one field")
 		return
 	}
@@ -478,6 +516,7 @@ func (h *handler) widgetsUpdate(w http.ResponseWriter, r *http.Request) {
 		Kind:    p.Kind,
 		Content: p.Content,
 		Span:    p.Span,
+		RowSpan: p.RowSpan,
 	}, c.dek)
 	if err != nil {
 		h.dashboardError(w, "update widget", err)

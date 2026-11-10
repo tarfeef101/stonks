@@ -228,6 +228,7 @@ func (s *memWidgetStore) Create(_ context.Context, userID, dashboardID string, i
 		Kind:      in.Kind,
 		Content:   in.Content,
 		Span:      in.Span,
+		RowSpan:   in.RowSpan,
 		SortOrder: max + 1,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -270,6 +271,9 @@ func (s *memWidgetStore) Update(_ context.Context, userID, dashboardID, widgetID
 	}
 	if p.Span != nil {
 		s.world.widgets[i].w.Span = *p.Span
+	}
+	if p.RowSpan != nil {
+		s.world.widgets[i].w.RowSpan = *p.RowSpan
 	}
 	s.world.widgets[i].w.UpdatedAt = time.Now()
 	return s.world.widgets[i].w, nil
@@ -442,11 +446,12 @@ func TestDashboardsCRUD(t *testing.T) {
 }
 
 // TestDashboardWidgetsCRUD walks the widget routes on one dashboard:
-// create with the explore defaults ("" content, span 6), MAX+1
+// create with the explore defaults ("" content, span 6, row_span 4),
+// an explicit row_span, the markdown row_span default (2), MAX+1
 // sort_order, widget_count tracking, rename/content PATCHes that keep
-// the other fields, a kind swap carrying fresh in-cap content, span
-// edits, delete (204, count back down, 404 re-delete) and MAX+1 after
-// a gap.
+// the other fields, a kind swap carrying fresh in-cap content, span and
+// row_span edits, delete (204, count back down, 404 re-delete) and
+// MAX+1 after a gap.
 func TestDashboardWidgetsCRUD(t *testing.T) {
 	dash, wid := newMemDashStores()
 	h, key := newDashServer(t, dash, wid)
@@ -459,14 +464,15 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 	}
 	d := idFrom(t, out)
 
-	// Explore with no content and no span: the defaults "" and 6, sort 1.
+	// Explore with no content, no span and no row_span: the defaults
+	// "", 6 and 4, sort 1.
 	code, out = doReq(t, h, http.MethodPost, "/api/v1/dashboards/"+d+"/widgets", `{"name":"All","kind":"explore"}`, hdr)
 	if code != http.StatusCreated {
 		t.Fatalf("create widget: %d (%s)", code, out)
 	}
 	w1 := dashJSON(t, out)
 	if w1["name"] != "All" || w1["kind"] != "explore" || w1["content"] != "" ||
-		w1["span"] != float64(6) || w1["sort_order"] != float64(1) {
+		w1["span"] != float64(6) || w1["row_span"] != float64(4) || w1["sort_order"] != float64(1) {
 		t.Fatalf("widget 1 = %v, want the explore defaults", w1)
 	}
 	if _, ok := w1["created_at"]; ok {
@@ -474,24 +480,29 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 	}
 	id1 := idFrom(t, out)
 
-	// Explore with a query codec: the content round-trips verbatim.
+	// Explore with a query codec and an explicit row_span: both
+	// round-trip verbatim.
 	code, out = doReq(t, h, http.MethodPost, "/api/v1/dashboards/"+d+"/widgets",
-		`{"name":"Savings bar","kind":"explore","content":"from=2025-01-01&to=2025-02-01&chart=bar&group=month","span":4}`, hdr)
+		`{"name":"Savings bar","kind":"explore","content":"from=2025-01-01&to=2025-02-01&chart=bar&group=month","span":4,"row_span":3}`, hdr)
 	if code != http.StatusCreated {
 		t.Fatalf("create widget 2: %d (%s)", code, out)
 	}
 	w2 := dashJSON(t, out)
 	if w2["content"] != "from=2025-01-01&to=2025-02-01&chart=bar&group=month" ||
-		w2["span"] != float64(4) || w2["sort_order"] != float64(2) {
+		w2["span"] != float64(4) || w2["row_span"] != float64(3) || w2["sort_order"] != float64(2) {
 		t.Fatalf("widget 2 = %v", w2)
 	}
 	id2 := idFrom(t, out)
 
-	// Markdown: sort 3; the dashboard reports widget_count 3.
+	// Markdown: the row_span default is 2 (explore is 4); the
+	// dashboard reports widget_count 3.
 	code, out = doReq(t, h, http.MethodPost, "/api/v1/dashboards/"+d+"/widgets",
 		`{"name":"Notes","kind":"markdown","content":"# hi","span":12}`, hdr)
 	if code != http.StatusCreated {
 		t.Fatalf("create widget 3: %d (%s)", code, out)
+	}
+	if w3 := dashJSON(t, out); w3["span"] != float64(12) || w3["row_span"] != float64(2) || w3["sort_order"] != float64(3) {
+		t.Fatalf("widget 3 = %v, want the markdown row_span default 2", w3)
 	}
 	code, out = doReq(t, h, http.MethodGet, "/api/v1/dashboards", "", hdr)
 	if code != http.StatusOK {
@@ -519,6 +530,7 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 		Name      string `json:"name"`
 		Content   string `json:"content"`
 		Span      int    `json:"span"`
+		RowSpan   int    `json:"row_span"`
 		SortOrder int    `json:"sort_order"`
 	}
 	var wrows []widgetRow
@@ -529,14 +541,14 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 		t.Fatalf("widget list = %+v, want [w1 w2 w3] in sort order", wrows)
 	}
 
-	// Rename: content, span and sort_order are untouched.
+	// Rename: content, span, row_span and sort_order are untouched.
 	code, out = doReq(t, h, http.MethodPatch, "/api/v1/dashboards/"+d+"/widgets/"+id1, `{"name":"All (renamed)"}`, hdr)
 	if code != http.StatusOK {
 		t.Fatalf("rename: %d (%s)", code, out)
 	}
 	w1 = dashJSON(t, out)
 	if w1["name"] != "All (renamed)" || w1["content"] != "" ||
-		w1["span"] != float64(6) || w1["sort_order"] != float64(1) {
+		w1["span"] != float64(6) || w1["row_span"] != float64(4) || w1["sort_order"] != float64(1) {
 		t.Fatalf("after rename = %v", w1)
 	}
 
@@ -568,6 +580,16 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 	code, out = doReq(t, h, http.MethodPatch, "/api/v1/dashboards/"+d+"/widgets/"+id1, `{"span":1}`, hdr)
 	if code != http.StatusOK || dashJSON(t, out)["span"] != float64(1) {
 		t.Fatalf("patch span 1: %d (%s)", code, out)
+	}
+
+	// RowSpan edits: 8 (the ceiling) and 1 are both valid.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/dashboards/"+d+"/widgets/"+id1, `{"row_span":8}`, hdr)
+	if code != http.StatusOK || dashJSON(t, out)["row_span"] != float64(8) {
+		t.Fatalf("patch row_span 8: %d (%s)", code, out)
+	}
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/dashboards/"+d+"/widgets/"+id1, `{"row_span":1}`, hdr)
+	if code != http.StatusOK || dashJSON(t, out)["row_span"] != float64(1) {
+		t.Fatalf("patch row_span 1: %d (%s)", code, out)
 	}
 
 	// Delete: 204, widget_count back to 2; re-delete: 404.
@@ -605,9 +627,9 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 
 // TestDashboardValidation pins the 400 surface: the name rules, the
 // kind enum, the kind-dependent content caps (1024 explore / 16384
-// markdown, counted in runes), the span range, the empty patch, the
-// non-object body, and the combined error (all failures joined with
-// "; ").
+// markdown, counted in runes), the span and row_span ranges, the empty
+// patch, the non-object body, and the combined error (all failures
+// joined with "; ").
 func TestDashboardValidation(t *testing.T) {
 	dash, wid := newMemDashStores()
 	h, key := newDashServer(t, dash, wid)
@@ -635,6 +657,8 @@ func TestDashboardValidation(t *testing.T) {
 		{"markdown over content cap", wpath, `{"name":"W","kind":"markdown","content":"` + strings.Repeat("b", 16385) + `"}`, "content must be at most 16384 characters"},
 		{"span zero", wpath, `{"name":"W","kind":"explore","span":0}`, "span must be between 1 and 12"},
 		{"span thirteen", wpath, `{"name":"W","kind":"explore","span":13}`, "span must be between 1 and 12"},
+		{"row_span zero", wpath, `{"name":"W","kind":"explore","row_span":0}`, "row_span must be between 1 and 8"},
+		{"row_span nine", wpath, `{"name":"W","kind":"explore","row_span":9}`, "row_span must be between 1 and 8"},
 		{"empty widget name", wpath, `{"name":"  ","kind":"explore"}`, "name must not be empty"},
 	}
 	for _, tc := range cases {
@@ -650,12 +674,13 @@ func TestDashboardValidation(t *testing.T) {
 	}
 
 	// Every validation runs before the store: the combined error joins
-	// all failures with "; " (name, kind, span; content is in-cap).
-	code, out = doReq(t, h, http.MethodPost, wpath, `{"name":"  ","kind":"chart","span":13}`, hdr)
+	// all failures with "; " (name, kind, span, row_span; content is
+	// in-cap).
+	code, out = doReq(t, h, http.MethodPost, wpath, `{"name":"  ","kind":"chart","span":13,"row_span":9}`, hdr)
 	if code != http.StatusBadRequest {
 		t.Fatalf("combined: status = %d (body %s)", code, out)
 	}
-	want := `name must not be empty; kind must be "explore" or "markdown"; span must be between 1 and 12`
+	want := `name must not be empty; kind must be "explore" or "markdown"; span must be between 1 and 12; row_span must be between 1 and 8`
 	if _, m := apiErr(t, out); m != want {
 		t.Fatalf("combined message = %q, want %q", m, want)
 	}

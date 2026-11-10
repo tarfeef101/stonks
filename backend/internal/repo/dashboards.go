@@ -7,10 +7,13 @@
 // string, "" = the default all-time view) or 'markdown' (content = the
 // markdown source), name AND content each ONE DEK-encrypted pack (content
 // can carry the free-text q search term, like explore_state did). span is
-// the 1..12 grid column span; sort_order is the display order, rewritten
-// atomically by SetOrder (the PUT /order endpoint); new rows take
-// MAX(sort_order)+1 over the dashboard. Like the old cards there is NO
-// unique constraint on names (duplicate labels allowed).
+// the 1..12 grid column span; row_span is the 1..8 fixed-row span (0014 —
+// the editor's grid has fixed-height rows, so a widget whose content
+// overflows its row_span scrolls inside the card); sort_order is the
+// display order, rewritten atomically by SetOrder (the PUT /order
+// endpoint); new rows take MAX(sort_order)+1 over the dashboard. Like the
+// old cards there is NO unique constraint on names (duplicate labels
+// allowed).
 //
 // Backfill is the one-time app-level data migration that moves the old
 // dashboard_cards rows in (DEK encryption is app-layer — SQL cannot
@@ -62,19 +65,22 @@ type DashboardWidget struct {
 	Kind      string
 	Content   string
 	Span      int
+	RowSpan   int
 	SortOrder int
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
 
 // DashboardWidgetIn is the Create input. Span 0 (absent) means the
-// default 6. Kind is the server-validated enum value; the server has
-// already applied the content cap for the kind.
+// default 6; RowSpan 0 (absent) means the per-kind default (explore 4,
+// markdown 2 — defaultRowSpan). Kind is the server-validated enum value;
+// the server has already applied the content cap for the kind.
 type DashboardWidgetIn struct {
 	Name    string
 	Kind    string
 	Content string
 	Span    int
+	RowSpan int
 }
 
 // DashboardWidgetPatch is the Update input; nil = untouched.
@@ -83,6 +89,7 @@ type DashboardWidgetPatch struct {
 	Kind    *string
 	Content *string
 	Span    *int
+	RowSpan *int
 }
 
 // DashboardStore persists dashboards. One store serves every user; each
@@ -306,7 +313,7 @@ func (s *DashboardWidgetStore) List(ctx context.Context, userID, dashboardID str
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, kind, name_encrypted, content_encrypted, span, sort_order, created_at, updated_at
+		SELECT id, kind, name_encrypted, content_encrypted, span, row_span, sort_order, created_at, updated_at
 		FROM dashboard_widgets
 		WHERE user_id = $1 AND dashboard_id = $2
 		ORDER BY sort_order, id`, userID, dashboardID)
@@ -321,7 +328,7 @@ func (s *DashboardWidgetStore) List(ctx context.Context, userID, dashboardID str
 			namePack    []byte
 			contentPack []byte
 		)
-		if err := rows.Scan(&w.ID, &w.Kind, &namePack, &contentPack, &w.Span, &w.SortOrder, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Kind, &namePack, &contentPack, &w.Span, &w.RowSpan, &w.SortOrder, &w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("repo: scan dashboard widget: %w", err)
 		}
 		if err := w.decrypt(namePack, contentPack, dek); err != nil {
@@ -346,10 +353,10 @@ func (s *DashboardWidgetStore) Get(ctx context.Context, userID, dashboardID, wid
 		contentPack []byte
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT kind, name_encrypted, content_encrypted, span, sort_order, created_at, updated_at
+		SELECT kind, name_encrypted, content_encrypted, span, row_span, sort_order, created_at, updated_at
 		FROM dashboard_widgets
 		WHERE user_id = $1 AND dashboard_id = $2 AND id = $3`, userID, dashboardID, widgetID).
-		Scan(&w.Kind, &namePack, &contentPack, &w.Span, &w.SortOrder, &w.CreatedAt, &w.UpdatedAt)
+		Scan(&w.Kind, &namePack, &contentPack, &w.Span, &w.RowSpan, &w.SortOrder, &w.CreatedAt, &w.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DashboardWidget{}, ErrDashboardWidgetNotFound
 	}
@@ -361,6 +368,16 @@ func (s *DashboardWidgetStore) Get(ctx context.Context, userID, dashboardID, wid
 		return DashboardWidget{}, err
 	}
 	return w, nil
+}
+
+// defaultRowSpan is the row span a new widget gets when the create omits
+// row_span: explore views chart over a wider canvas than markdown notes
+// (0014), so they start taller.
+func defaultRowSpan(kind string) int {
+	if kind == "markdown" {
+		return 2
+	}
+	return 4
 }
 
 // Create inserts a widget into the user's dashboard and returns it. The
@@ -378,6 +395,10 @@ func (s *DashboardWidgetStore) Create(ctx context.Context, userID, dashboardID s
 	if span <= 0 {
 		span = 6 // absent on the wire = the DB default
 	}
+	rowSpan := in.RowSpan
+	if rowSpan <= 0 {
+		rowSpan = defaultRowSpan(in.Kind) // absent on the wire = the per-kind default
+	}
 	namePack, err := crypto.Seal(dek, []byte(strings.TrimSpace(in.Name)))
 	if err != nil {
 		return DashboardWidget{}, fmt.Errorf("repo: seal dashboard widget name: %w", err)
@@ -389,11 +410,11 @@ func (s *DashboardWidgetStore) Create(ctx context.Context, userID, dashboardID s
 	var id string
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO dashboard_widgets
-			(user_id, dashboard_id, kind, name_encrypted, content_encrypted, span, sort_order)
-		VALUES ($1, $2, $3, $4, $5, $6,
+			(user_id, dashboard_id, kind, name_encrypted, content_encrypted, span, row_span, sort_order)
+		VALUES ($1, $2, $3, $4, $5, $6, $7,
 			COALESCE((SELECT MAX(sort_order) FROM dashboard_widgets WHERE user_id = $1 AND dashboard_id = $2), 0) + 1)
 		RETURNING id`,
-		userID, dashboardID, in.Kind, namePack, contentPack, span).Scan(&id)
+		userID, dashboardID, in.Kind, namePack, contentPack, span, rowSpan).Scan(&id)
 	if err != nil {
 		return DashboardWidget{}, fmt.Errorf("repo: create dashboard widget: %w", err)
 	}
@@ -402,9 +423,9 @@ func (s *DashboardWidgetStore) Create(ctx context.Context, userID, dashboardID s
 
 // Update applies the non-nil fields of p to the user's widget in the
 // named dashboard and returns the updated row. Changed name / content
-// are re-sealed under the same DEK (kind and span are plaintext
-// columns). An unchanged patch is a no-op: the row comes back without an
-// UPDATE, so updated_at stays put (the budgets no-op rule).
+// are re-sealed under the same DEK (kind, span and row_span are
+// plaintext columns). An unchanged patch is a no-op: the row comes back
+// without an UPDATE, so updated_at stays put (the budgets no-op rule).
 func (s *DashboardWidgetStore) Update(ctx context.Context, userID, dashboardID, widgetID string, p DashboardWidgetPatch, dek []byte) (DashboardWidget, error) {
 	cur, err := s.Get(ctx, userID, dashboardID, widgetID, dek)
 	if err != nil {
@@ -435,8 +456,9 @@ func (s *DashboardWidgetStore) Update(ctx context.Context, userID, dashboardID, 
 	}
 	kindChanged := p.Kind != nil && *p.Kind != cur.Kind
 	spanChanged := p.Span != nil && *p.Span != cur.Span
+	rowSpanChanged := p.RowSpan != nil && *p.RowSpan != cur.RowSpan
 
-	if !nameChanged && !contentChanged && !kindChanged && !spanChanged {
+	if !nameChanged && !contentChanged && !kindChanged && !spanChanged && !rowSpanChanged {
 		// No-op patch: return the current row without an UPDATE.
 		return cur, nil
 	}
@@ -456,18 +478,21 @@ func (s *DashboardWidgetStore) Update(ctx context.Context, userID, dashboardID, 
 		}
 	}
 
-	kind, span := cur.Kind, cur.Span
+	kind, span, rowSpan := cur.Kind, cur.Span, cur.RowSpan
 	if kindChanged {
 		kind = *p.Kind
 	}
 	if spanChanged {
 		span = *p.Span
 	}
+	if rowSpanChanged {
+		rowSpan = *p.RowSpan
+	}
 	cmdTag, err := s.pool.Exec(ctx,
 		"UPDATE dashboard_widgets SET name_encrypted = $4, content_encrypted = $5, "+
-			"kind = $6, span = $7, updated_at = now() "+
+			"kind = $6, span = $7, row_span = $8, updated_at = now() "+
 			"WHERE user_id = $1 AND dashboard_id = $2 AND id = $3",
-		userID, dashboardID, widgetID, namePack, contentPack, kind, span)
+		userID, dashboardID, widgetID, namePack, contentPack, kind, span, rowSpan)
 	if err != nil {
 		return DashboardWidget{}, fmt.Errorf("repo: update dashboard widget: %w", err)
 	}
