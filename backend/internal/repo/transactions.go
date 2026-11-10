@@ -64,6 +64,7 @@ type Transaction struct {
 	DatePosted    time.Time
 	Amount        string
 	CategoryID    string
+	OffsetGroupID *string
 	Description   string
 	Notes         string
 	Raw           string
@@ -424,7 +425,7 @@ func (s *TransactionStore) findByDedup(ctx context.Context, userID, accountID st
 
 // txSelect is the shared column list (order = txScanFields order).
 const txSelect = `SELECT id, account_id, date_executed, date_posted, amount, category_id,
-               description_encrypted, notes_encrypted, raw_encrypted,
+               offset_group_id, description_encrypted, notes_encrypted, raw_encrypted,
                dedup_hash, review_pending, created_at, updated_at
 		FROM transactions`
 
@@ -435,19 +436,21 @@ func txScanFields(tx *Transaction) []any {
 	tx.scan = txScan{}
 	return []any{
 		&tx.ID, &tx.AccountID, &tx.scan.dateExecuted, &tx.DatePosted,
-		&tx.Amount, &tx.scan.categoryID, &tx.scan.descEnc, &tx.scan.notesEnc,
-		&tx.scan.rawEnc, &tx.DedupHash, &tx.ReviewPending, &tx.CreatedAt, &tx.UpdatedAt,
+		&tx.Amount, &tx.scan.categoryID, &tx.scan.offsetGroupID, &tx.scan.descEnc,
+		&tx.scan.notesEnc, &tx.scan.rawEnc, &tx.DedupHash, &tx.ReviewPending,
+		&tx.CreatedAt, &tx.UpdatedAt,
 	}
 }
 
 // txScan is the scratch for one scanned row (the public Transaction
 // keeps "" / nil for unset values, which SQL returns as NULL).
 type txScan struct {
-	dateExecuted sql.NullTime
-	categoryID   sql.NullString
-	descEnc      []byte
-	notesEnc     []byte
-	rawEnc       []byte
+	dateExecuted  sql.NullTime
+	categoryID    sql.NullString
+	offsetGroupID sql.NullString
+	descEnc       []byte
+	notesEnc      []byte
+	rawEnc        []byte
 }
 
 // decrypt opens the three encrypted fields and reassembles the public
@@ -491,6 +494,10 @@ func (tx *Transaction) decrypt(dek []byte) error {
 		tx.DateExecuted = &t
 	}
 	tx.CategoryID = tx.scan.categoryID.String
+	if tx.scan.offsetGroupID.Valid {
+		s := tx.scan.offsetGroupID.String
+		tx.OffsetGroupID = &s
+	}
 	return nil
 }
 
@@ -517,7 +524,10 @@ func (s *TransactionStore) List(ctx context.Context, userID string, f Transactio
 		f.Offset = 0
 	}
 
-	where := []string{"user_id = $1"}
+	// offset_group_id IS NULL hides rows grouped as offsets (migration
+	// 0012): they net each other out and are not real money flow. The
+	// review queue and uncategorized views deliberately keep them.
+	where := []string{"user_id = $1", "offset_group_id IS NULL"}
 	args := []any{userID}
 	add := func(cond string, val any) {
 		args = append(args, val)
@@ -672,7 +682,9 @@ type CategorySpend struct {
 // preserving scale (a 0.00 sum comes back as "0") — so the output
 // always matches the 2-decimal form the rest of the API speaks.
 func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]CategorySpend, error) {
-	where := []string{"user_id = $1"}
+	// offset_group_id IS NULL: grouped rows net each other out and must
+	// not count toward the summary (see List).
+	where := []string{"user_id = $1", "offset_group_id IS NULL"}
 	args := []any{userID}
 	add := func(cond string, val any) {
 		args = append(args, val)

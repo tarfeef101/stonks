@@ -66,6 +66,12 @@ var (
 	ErrInstitutionCodeTaken = errors.New("repo: institution code already taken")
 	ErrFICredentialNotFound = errors.New("repo: fi credential not found")
 	ErrFICredentialExists   = errors.New("repo: a fi credential for this institution already exists")
+
+	// Offsets (migration 0012): transactions that net each other out.
+	ErrOffsetSuggestionNotFound = errors.New("repo: offset suggestion not found")
+	ErrOffsetGroupNotFound      = errors.New("repo: offset group not found")
+	ErrOffsetAlreadyGrouped     = errors.New("repo: a transaction is already in an offset group")
+	ErrOffsetNotBalanced        = errors.New("repo: the offset transactions do not net to zero")
 )
 
 // hashName computes the §5 plaintext name_hash.

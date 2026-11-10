@@ -323,6 +323,23 @@
 		"applying_all": "Applying to all…",
 		"applied_all": "Applied to {n} transactions."
 	},
+	"offsets": {
+		"title": "Offsets",
+		"intro": "Money that simply moved between your own accounts (like paying a credit card from chequing) should not count as spend in one and income in the other. The scan finds pairs that net out to zero; accepting one removes both legs from the transaction lists and the aggregates.",
+		"scan": "Scan for offsets",
+		"scanning": "Scanning…",
+		"scanned": "{n} new pair(s) proposed.",
+		"suggestions_label": "Proposed pairs",
+		"no_suggestions": "No pending proposals.",
+		"accept": "Accept",
+		"accepting": "Accepting…",
+		"dismiss": "Dismiss",
+		"dismissing": "Dismissing…",
+		"groups_label": "Grouped offsets",
+		"no_groups": "No grouped offsets yet.",
+		"clear": "Ungroup",
+		"clearing": "Ungrouping…"
+	},
 	"notifications": {
 		"title": "Notifications",
 		"intro": "Alerts from the app — right now, a reminder when a categorise run finishes and transactions need your review.",

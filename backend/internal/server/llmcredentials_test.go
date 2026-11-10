@@ -161,7 +161,7 @@ func newCredServer(t *testing.T, store LLMCredentialStore, stub *credTestStub, f
 			return stub, nil
 		},
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil, nil, false, nil, nil), key, calls
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil, nil, false, nil, nil, nil), key, calls
 }
 
 // credHdr is the Authorization header for a fresh identity token on
@@ -726,5 +726,5 @@ func newCredServerLLMNil(t *testing.T, store LLMCredentialStore) (http.Handler, 
 		t.Fatalf("bootstrap: %v", err)
 	}
 	wrap := &LLMCredentials{Store: store, Env: categorize.LLMEnv{Model: "test-env-model"}}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil, nil, false, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, wrap, nil, nil, nil, false, nil, nil, nil), key
 }

@@ -114,6 +114,7 @@ type handler struct {
 	mailEnabled   bool
 	institutions  InstitutionStore
 	fiCredentials FICredentialStore
+	offsets       OffsetStore
 	m             *httpMetrics
 }
 
@@ -156,11 +157,16 @@ type handler struct {
 // and those routes answer 503. fiCredentials serves the FI credential
 // routes (plan 9.1: GET/POST /api/v1/fi/credentials, DELETE
 // /api/v1/fi/credentials/{id}); nil and those routes answer 503.
+// offsets serves the offset (net-to-zero) routes (migration 0012:
+// POST /api/v1/offsets/scan, GET /api/v1/offsets/suggestions, the
+// suggestion accept/dismiss writes, POST/GET /api/v1/offsets/groups
+// and DELETE /api/v1/offsets/groups/{id}); nil and those routes answer
+// 503.
 // mailer
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
 // reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -186,6 +192,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		mailEnabled:   mailEnabled,
 		institutions:  institutions,
 		fiCredentials: fiCredentials,
+		offsets:       offsets,
 		m:             newHTTPMetrics(),
 	}
 
@@ -323,6 +330,16 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/review/accept-all", h.reviewAcceptAll)
 		r.Post("/v1/review/{id}/accept", h.reviewAccept)
 		r.Post("/v1/review/{id}/reprompt", h.reviewReprompt)
+		// Offsets (migration 0012): the scan that proposes net-to-zero
+		// pairs, the pending suggestions and their accept/dismiss
+		// writes, and the hand-picked groups (create, list, dissolve).
+		r.Post("/v1/offsets/scan", h.offsetsScan)
+		r.Get("/v1/offsets/suggestions", h.offsetsSuggestionList)
+		r.Post("/v1/offsets/suggestions/{id}/accept", h.offsetsSuggestionAccept)
+		r.Post("/v1/offsets/suggestions/{id}/dismiss", h.offsetsSuggestionDismiss)
+		r.Post("/v1/offsets/groups", h.offsetsGroupCreate)
+		r.Get("/v1/offsets/groups", h.offsetsGroupList)
+		r.Delete("/v1/offsets/groups/{id}", h.offsetsGroupClear)
 		// LLM credentials (plan 5.6): the caller's per-provider LLM
 		// endpoint and encrypted API key (key masked on read), plus the
 		// test-connection probe. The static /test segment wins over

@@ -544,7 +544,7 @@ func TestCategoriesAuthAndConfig(t *testing.T) {
 	})
 	t.Run("nil bootstrap", func(t *testing.T) {
 		key := mintKey(t)
-		h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), nil, nil, nil, &memCategoryStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), nil, nil, nil, &memCategoryStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil)
 		token := mintIdentityToken(t, key, "cnb-sub", "cnb@localhost", "C", "cnb")
 		code, body := doReq(t, h, http.MethodGet, "/api/v1/categories", "", authHdr(token))
 		if code != http.StatusServiceUnavailable {

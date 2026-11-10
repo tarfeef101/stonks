@@ -248,6 +248,7 @@ func (h *handler) importRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := importRunResult{Errors: []rowError{}}
+	var offMin, offMax *time.Time // posted-date range of the inserted rows
 	for i, row := range rows {
 		dateCell := cell(row, dateIdx)
 		date, err := parseImportDate(normalizeOFXZone(dateCell), layouts...)
@@ -282,6 +283,12 @@ func (h *handler) importRun(w http.ResponseWriter, r *http.Request) {
 		}
 		if inserted {
 			res.Inserted++
+			if offMin == nil || date.Before(*offMin) {
+				offMin = &date
+			}
+			if offMax == nil || date.After(*offMax) {
+				offMax = &date
+			}
 		} else {
 			res.Skipped++
 		}
@@ -307,6 +314,22 @@ func (h *handler) importRun(w http.ResponseWriter, r *http.Request) {
 		if _, cerr := h.jobs.Create(ctx, c.row.ID, "import", &finished.ID); cerr != nil {
 			slog.Warn("create chained categorise job failed",
 				"import_job", finished.ID, "error", cerr)
+		}
+	}
+	// Offset scan (migration 0012): the inserted rows may net out
+	// against each other or against older rows (a credit-card payment
+	// imported from two institutions) — the window spans the inserted
+	// date range so the older leg can fall outside it. Best effort
+	// like the categorise chain: on error the import stays "done" and
+	// a manual scan (POST /api/v1/offsets/scan) can retry.
+	if h.offsets != nil && res.Inserted > 0 && offMin != nil {
+		cands, oerr := h.offsets.FindOffsetCandidates(ctx, c.row.ID, c.dek, offMin, offMax, offsetScanWindowDays)
+		if oerr != nil {
+			slog.Warn("chained offset scan failed",
+				"import_job", finished.ID, "error", oerr)
+		} else if n, ierr := h.offsets.InsertOffsetSuggestions(ctx, c.row.ID, cands); ierr != nil {
+			slog.Warn("chained offset suggestions failed",
+				"import_job", finished.ID, "error", ierr, "suggestions", n)
 		}
 	}
 	writeJSON(w, http.StatusOK, toImportOut(finished))

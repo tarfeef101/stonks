@@ -184,7 +184,7 @@ func newMortgageServer(t *testing.T, accounts AccountStore, store MortgageStore)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil, false, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil, false, nil, nil, nil), key
 }
 
 // baseMortgageBody is the full 9-field create body with every value
