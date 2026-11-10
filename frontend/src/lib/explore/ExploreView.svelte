@@ -5,7 +5,7 @@
 	import { user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
 	import { listTransactions, type Transaction, type ListParams } from '#lib/api/transactions';
-	import { aggregate, formatCents, type ExploreState, type Names } from './state';
+	import { aggregate, formatCents, metricForSign, type ExploreState, type Names } from './state';
 
 	// Explore view (step 6.5): the shared read-only render of an Explore
 	// state — the paged 3.2 List data loop, the client-side
@@ -52,9 +52,13 @@
 	/** The current grouping of the loaded rows (integer cents). */
 	const aggs = $derived(aggregate(rows, explore.group, names));
 
+	/** The derived metric (Type spending → spend, income → income, all →
+	 * net): what the chart measures and the pie excludes. */
+	const metric = $derived(metricForSign(explore.sign));
+
 	/** Pie only: the groups hidden because the metric is not positive. */
 	const pieHidden = $derived(
-		explore.chart === 'pie' ? aggs.filter((g) => g[explore.metric] <= 0).length : 0
+		explore.chart === 'pie' ? aggs.filter((g) => g[metric] <= 0).length : 0
 	);
 
 	/** The ECharts option for the current view, or null for the table
@@ -71,14 +75,14 @@
 						type: 'pie',
 						radius: '65%',
 						data: aggs
-							.filter((g) => g[explore.metric] > 0)
-							.map((g) => ({ name: g.label, value: g[explore.metric] }))
+							.filter((g) => g[metric] > 0)
+							.map((g) => ({ name: g.label, value: g[metric] }))
 					}
 				]
 			};
 		}
 		const labels = aggs.map((g) => g.label);
-		const values = aggs.map((g) => g[explore.metric]);
+		const values = aggs.map((g) => g[metric]);
 		if (explore.chart === 'line') {
 			return {
 				tooltip: { trigger: 'axis', valueFormatter: fmt },
@@ -98,11 +102,11 @@
 	// --- Loading (filter-driven) ----------------------------------------
 
 	/** The server-side filter fields only: the view fields (chart /
-	 * group / metric) are deliberately excluded — they re-render the
-	 * view without a refetch and are NEVER sent to the API. */
+	 * group) are deliberately excluded — they re-render the view without
+	 * a refetch and are NEVER sent to the API. */
 	type FilterFields = Pick<
 		ExploreState,
-		'from' | 'to' | 'account' | 'category' | 'min' | 'max' | 'q'
+		'from' | 'to' | 'account' | 'category' | 'min' | 'max' | 'q' | 'sign'
 	>;
 
 	/** One page's 3.2 List params (absent = omitted; 'none' =
@@ -116,6 +120,7 @@
 		if (s.min !== '') p.min_amount = s.min;
 		if (s.max !== '') p.max_amount = s.max;
 		if (s.q !== '') p.search = s.q;
+		if (s.sign !== '') p.sign = s.sign;
 		return p;
 	}
 
@@ -148,7 +153,7 @@
 		if (seq === fetchSeq) loading = false;
 	}
 
-	// One load per (identity, filter fields) change. The seven filter
+	// One load per (identity, filter fields) change. The eight filter
 	// fields are read synchronously below — those are the tracked deps.
 	$effect(() => {
 		const sub = $user?.profile.sub ?? null;
@@ -159,7 +164,8 @@
 			category: explore.category,
 			min: explore.min,
 			max: explore.max,
-			q: explore.q
+			q: explore.q,
+			sign: explore.sign
 		};
 		if (sub === null) {
 			fetchSeq++; // invalidate any in-flight load

@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
 	import { _ } from 'svelte-i18n';
-	import { user } from '#lib/auth/client';
+	import { login, user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
 	import { listAccounts, type Account } from '#lib/api/accounts';
 	import { listCategories, type Category } from '#lib/api/categories';
@@ -84,9 +84,9 @@
 			min: explore.min,
 			max: explore.max,
 			q: explore.q,
+			sign: explore.sign,
 			chart: explore.chart,
-			group: explore.group,
-			metric: explore.metric
+			group: explore.group
 		});
 		const path = window.location.pathname;
 		window.history.replaceState(window.history.state, '', qs !== '' ? `${path}?${qs}` : path);
@@ -243,9 +243,9 @@
 			min: '',
 			max: '',
 			q: '',
-			chart: 'table',
-			group: 'month',
-			metric: 'net'
+			sign: '',
+			chart: 'pie',
+			group: 'category'
 		};
 	}
 </script>
@@ -257,14 +257,19 @@
 	{#if !$user}
 		<p class="text-sm text-zinc-600 dark:text-zinc-400">
 			{$_('explore.sign_in_prompt')}
-			<a class="underline" href={resolve('/')}>{$_('auth.sign_in')}</a>
+			<button class="underline" onclick={() => login(page.url.pathname + page.url.search)}>
+				{$_('auth.sign_in')}
+			</button>
 		</p>
 	{:else}
-		<!-- Filter bar: the seven server-side filters. The state is
+		<!-- Filter bar: the eight server-side filters. The state is
 		     mirrored into the URL by the sync effect; the preset select
 		     is a convenience over from/to (a hand-picked range shows
-		     "Custom" and selecting it is a no-op). min/max are raw
-		     text — a bad value is a server 400 shown verbatim. -->
+		     "Custom" and selecting it is a no-op). The Type select
+		     doubles as the metric: spending → spend, income → income,
+		     all → net (derived in the ExploreView). min/max are raw
+		     text — a bad value is a server 400 shown verbatim; with a
+		     Type set they are absolute magnitudes. -->
 		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('explore.filter_title')}</p>
 			<div class="mt-3 flex flex-wrap items-end gap-4">
@@ -325,7 +330,7 @@
 					</select>
 				</label>
 				<label class="block text-sm">
-					<span class="mb-1 block font-medium">{$_('explore.min_label')}</span>
+					<span class="mb-1 block font-medium">{$_(explore.sign === 'spending' ? 'explore.min_spend_label' : explore.sign === 'income' ? 'explore.min_income_label' : 'explore.min_label')}</span>
 					<input
 						class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						inputmode="decimal"
@@ -333,12 +338,24 @@
 					/>
 				</label>
 				<label class="block text-sm">
-					<span class="mb-1 block font-medium">{$_('explore.max_label')}</span>
+					<span class="mb-1 block font-medium">{$_(explore.sign === 'spending' ? 'explore.max_spend_label' : explore.sign === 'income' ? 'explore.max_income_label' : 'explore.max_label')}</span>
 					<input
 						class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						inputmode="decimal"
 						bind:value={explore.max}
 					/>
+				</label>
+				<label class="block text-sm">
+					<span class="mb-1 block font-medium">{$_('explore.type_label')}</span>
+					<select
+						class="w-36 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						value={explore.sign}
+						onchange={(e) => (explore = { ...explore, sign: e.currentTarget.value })}
+					>
+						<option value="">{$_('explore.type_all')}</option>
+						<option value="spending">{$_('explore.type_spending')}</option>
+						<option value="income">{$_('explore.type_income')}</option>
+					</select>
 				</label>
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.search_label')}</span>
@@ -357,10 +374,10 @@
 			</div>
 		</div>
 
-		<!-- View bar: chart kind / grouping / metric (URL-only fields —
-		     they never refetch) plus the "Save as card" button. The row
-		     count and the 1000-row cap note render inside the
-		     ExploreView (below). -->
+		<!-- View bar: chart kind / grouping (URL-only fields — they never
+		     refetch; the metric is derived from the Type filter above)
+		     plus the "Save as card" button. The row count and the 1000-row
+		     cap note render inside the ExploreView (below). -->
 		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<div class="flex flex-wrap items-end gap-4">
 				<p class="self-center text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
@@ -392,19 +409,6 @@
 						<option value="week">{$_('explore.group_week')}</option>
 						<option value="category">{$_('explore.group_category')}</option>
 						<option value="account">{$_('explore.group_account')}</option>
-					</select>
-				</label>
-				<label class="block text-sm">
-					<span class="mb-1 block font-medium">{$_('explore.metric_label')}</span>
-					<select
-						class="w-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
-						value={explore.metric}
-						onchange={(e) =>
-							(explore = { ...explore, metric: e.currentTarget.value as ExploreState['metric'] })}
-					>
-						<option value="net">{$_('explore.metric_net')}</option>
-						<option value="spend">{$_('explore.metric_spend')}</option>
-						<option value="income">{$_('explore.metric_income')}</option>
 					</select>
 				</label>
 				<button

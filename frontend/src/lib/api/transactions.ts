@@ -66,6 +66,8 @@ export interface ListParams {
 	max_amount?: string;
 	/** Case-insensitive description substring. */
 	search?: string;
+	/** 'spending' = negative amounts only; 'income' = positive amounts only. */
+	sign?: string;
 	limit?: number;
 	offset?: number;
 }
@@ -82,6 +84,7 @@ export function listTransactions(params: ListParams = {}): Promise<Transaction[]
 	if (params.min_amount !== undefined) q.append('min_amount', params.min_amount);
 	if (params.max_amount !== undefined) q.append('max_amount', params.max_amount);
 	if (params.search !== undefined) q.append('search', params.search);
+	if (params.sign !== undefined) q.append('sign', params.sign);
 	if (params.limit !== undefined) q.append('limit', String(params.limit));
 	if (params.offset !== undefined) q.append('offset', String(params.offset));
 	const qs = q.toString();

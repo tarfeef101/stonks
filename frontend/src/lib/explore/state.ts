@@ -16,12 +16,13 @@
 export type ChartKind = 'line' | 'bar' | 'pie' | 'table';
 /** Grouping keys (URL `group` param; never sent to the API). */
 export type GroupBy = 'month' | 'week' | 'category' | 'account';
-/** The metric a chart or table measures (URL `metric` param). */
+/** The metric a chart or table measures. DERIVED from the Type filter
+ * (sign) via metricForSign — not a URL field of its own. */
 export type Metric = 'net' | 'spend' | 'income';
 
 /** The full Explore state (flat; every field always holds a value: empty
- * string = absent, empty `account` = none, chart/group/metric hold their
- * defaults when unchosen). */
+ * string = absent, empty `account` = none, chart/group hold their defaults
+ * when unchosen). */
 export interface ExploreState {
 	/** YYYY-MM-DD, or '' when absent. */
 	from: string;
@@ -32,15 +33,19 @@ export interface ExploreState {
 	account: string[];
 	/** '' = any category; 'none' = uncategorized only; else a category id. */
 	category: string;
-	/** Min amount in the server grammar, or '' when absent. */
+	/** Min amount in the server grammar, or '' when absent. With sign
+	 * 'spending' this is an ABSOLUTE magnitude (no leading '-'). */
 	min: string;
-	/** Max amount in the server grammar, or '' when absent. */
+	/** Max amount in the server grammar, or '' when absent. With sign
+	 * 'spending' this is an ABSOLUTE magnitude (no leading '-'). */
 	max: string;
 	/** Description-substring search (any non-empty string), or ''. */
 	q: string;
+	/** '' = any; 'spending' = negative amounts only; 'income' = positive
+	 * amounts only. */
+	sign: string;
 	chart: ChartKind;
 	group: GroupBy;
-	metric: Metric;
 }
 
 /** A transaction row as this module consumes it — structurally compatible
@@ -81,7 +86,6 @@ export interface Names {
 
 const CHARTS: readonly ChartKind[] = ['line', 'bar', 'pie', 'table'];
 const GROUPS: readonly GroupBy[] = ['month', 'week', 'category', 'account'];
-const METRICS: readonly Metric[] = ['net', 'spend', 'income'];
 const UNCATEGORIZED = 'Uncategorized';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -120,9 +124,9 @@ export function parseState(qs: string): ExploreState {
 		min: '',
 		max: '',
 		q: '',
-		chart: 'table',
-		group: 'month',
-		metric: 'net'
+		sign: '',
+		chart: 'pie',
+		group: 'category'
 	};
 	const firstValid = (key: string, ok: (v: string) => boolean): string => {
 		for (const v of params.getAll(key)) if (ok(v)) return v;
@@ -140,36 +144,61 @@ export function parseState(qs: string): ExploreState {
 	state.min = firstValid('min', (v) => AMOUNT_RE.test(v));
 	state.max = firstValid('max', (v) => AMOUNT_RE.test(v));
 	state.q = params.getAll('q').find((v) => v !== '') ?? '';
-	state.chart = pick('chart', CHARTS, 'table');
-	state.group = pick('group', GROUPS, 'month');
-	state.metric = pick('metric', METRICS, 'net');
+	state.sign = firstValid('sign', (v) => v === 'spending' || v === 'income');
+	// Legacy URLs (before the metric moved into the Type filter) carried a
+	// `metric` param. Map it onto the sign — only when no explicit sign is
+	// present (an explicit sign always wins); 'net' / invalid values are
+	// dropped.
+	if (state.sign === '') {
+		const m = firstValid('metric', (v) => v === 'spend' || v === 'income' || v === 'net');
+		if (m === 'spend') state.sign = 'spending';
+		else if (m === 'income') state.sign = 'income';
+	}
+	// With sign 'spending' the bounds are absolute magnitudes: normalize
+	// any legacy negative bounds (min=-10 → min=10) so the stored state is
+	// canonical.
+	if (state.sign === 'spending') {
+		if (state.min.startsWith('-')) state.min = state.min.slice(1);
+		if (state.max.startsWith('-')) state.max = state.max.slice(1);
+	}
+	state.chart = pick('chart', CHARTS, 'pie');
+	state.group = pick('group', GROUPS, 'category');
 	return state;
 }
 
 /** Serializes the state to the canonical query string (no leading '?').
- * Defaults are omitted: chart=table / group=month / metric=net and every
- * absent filter. Canonical param order:
- * from,to,account,category,min,max,q,chart,group,metric. */
+ * Defaults are omitted: chart=pie / group=category and every absent
+ * filter. With sign 'spending', min/max are canonicalized to absolute
+ * magnitudes (a leading '-' is stripped). Canonical param order:
+ * from,to,account,category,min,max,q,sign,chart,group. */
 export function serializeState(s: ExploreState): string {
 	const params = new URLSearchParams();
 	if (s.from !== '') params.append('from', s.from);
 	if (s.to !== '') params.append('to', s.to);
 	for (const a of s.account) params.append('account', a);
 	if (s.category !== '') params.append('category', s.category);
-	if (s.min !== '') params.append('min', s.min);
-	if (s.max !== '') params.append('max', s.max);
+	let min = s.min;
+	let max = s.max;
+	if (s.sign === 'spending') {
+		// Absolute magnitudes: a negative bound with a spending sign is
+		// a server 400, so never serialize one.
+		if (min.startsWith('-')) min = min.slice(1);
+		if (max.startsWith('-')) max = max.slice(1);
+	}
+	if (min !== '') params.append('min', min);
+	if (max !== '') params.append('max', max);
 	if (s.q !== '') params.append('q', s.q);
-	if (s.chart !== 'table') params.append('chart', s.chart);
-	if (s.group !== 'month') params.append('group', s.group);
-	if (s.metric !== 'net') params.append('metric', s.metric);
+	if (s.sign !== '') params.append('sign', s.sign);
+	if (s.chart !== 'pie') params.append('chart', s.chart);
+	if (s.group !== 'category') params.append('group', s.group);
 	return params.toString();
 }
 
 /** The exact API query params for one page of the 3.2 List endpoint, in
  * the pinned wire order: date_from,date_to,account_id(repeated),
- * category_id,min_amount,max_amount,search,limit=100,offset. `category`
- * 'none' becomes an EMPTY category_id (uncategorized-only).
- * chart/group/metric are view-only — never present. */
+ * category_id,min_amount,max_amount,search,sign,limit=100,offset.
+ * `category` 'none' becomes an EMPTY category_id (uncategorized-only).
+ * chart/group are view-only — never present. */
 export function apiQuery(s: ExploreState, offset: number): URLSearchParams {
 	const params = new URLSearchParams();
 	if (s.from !== '') params.append('date_from', s.from);
@@ -179,9 +208,19 @@ export function apiQuery(s: ExploreState, offset: number): URLSearchParams {
 	if (s.min !== '') params.append('min_amount', s.min);
 	if (s.max !== '') params.append('max_amount', s.max);
 	if (s.q !== '') params.append('search', s.q);
+	if (s.sign !== '') params.append('sign', s.sign);
 	params.append('limit', '100');
 	params.append('offset', String(offset));
 	return params;
+}
+
+/** The metric a chart/table measures, DERIVED from the Type filter:
+ * 'spending' → 'spend', 'income' → 'income', anything else (incl. '' =
+ * all) → 'net'. */
+export function metricForSign(sign: string): Metric {
+	if (sign === 'spending') return 'spend';
+	if (sign === 'income') return 'income';
+	return 'net';
 }
 
 /** Integer cents for a canonical amount string (integer arithmetic only —

@@ -238,8 +238,10 @@ func buildTxPatch(b transactionPatch) (repo.TransactionPatch, error) {
 // txFilterFromQuery builds the List query from the query string.
 // account_id is repeatable; category_id's first value applies ("" =
 // uncategorized only); date_from/date_to bound date_posted inclusively;
-// min/max_amount are canonicalized; limit/offset are integers >= 0.
-// Empty-string params are treated as absent.
+// min/max_amount are canonicalized; sign is "spending" (amount < 0) or
+// "income" (amount > 0) — with sign set, min/max_amount are absolute
+// magnitudes and a negative value is a 400; limit/offset are integers
+// >= 0. Empty-string params are treated as absent.
 func txFilterFromQuery(q url.Values) (repo.TransactionFilter, error) {
 	var f repo.TransactionFilter
 	for _, a := range q["account_id"] {
@@ -289,6 +291,22 @@ func txFilterFromQuery(q url.Values) (repo.TransactionFilter, error) {
 			return f, err
 		}
 		f.MaxAmount = &v
+	}
+	if s := q.Get("sign"); s != "" {
+		if s != "spending" && s != "income" {
+			return f, errors.New(`sign must be "spending" or "income"`)
+		}
+		f.Sign = s
+	}
+	// With a sign, the amount bounds are absolute magnitudes (spending
+	// matches -max..-min, income matches min..max); negatives are a 400.
+	if f.Sign != "" {
+		if f.MinAmount != nil && strings.HasPrefix(*f.MinAmount, "-") {
+			return f, errors.New("min_amount must be non-negative when sign is set")
+		}
+		if f.MaxAmount != nil && strings.HasPrefix(*f.MaxAmount, "-") {
+			return f, errors.New("max_amount must be non-negative when sign is set")
+		}
 	}
 	f.Search = q.Get("search")
 	if s := q.Get("limit"); s != "" {

@@ -111,9 +111,12 @@ type TransactionPatch struct {
 // TransactionFilter is the List query. nil/empty fields = unfiltered.
 // CategoryID "" = uncategorized only (IS NULL). DateFrom/DateTo bound
 // date_posted (inclusive). MinAmount/MaxAmount are canonicalized
-// (inclusive). Search is a case-insensitive description substring over
-// the candidate window (see package doc). Limit defaults to 50, capped
-// at 100. Rows come back ordered date_posted DESC, id DESC.
+// (inclusive); with Sign set they are absolute magnitudes — spending
+// matches -max..-min (amount < 0), income matches min..max (amount >
+// 0). Sign is "spending" (amount < 0) or "income" (amount > 0); "" =
+// any. Search is a case-insensitive description substring over the
+// candidate window (see package doc). Limit defaults to 50, capped at
+// 100. Rows come back ordered date_posted DESC, id DESC.
 type TransactionFilter struct {
 	AccountIDs []string
 	CategoryID *string
@@ -121,6 +124,7 @@ type TransactionFilter struct {
 	DateTo     *time.Time
 	MinAmount  *string
 	MaxAmount  *string
+	Sign       string
 	Search     string
 	Limit      int
 	Offset     int
@@ -540,19 +544,49 @@ func (s *TransactionStore) List(ctx context.Context, userID string, f Transactio
 	if f.DateTo != nil {
 		add("date_posted <=", dateStr(*f.DateTo))
 	}
+	var minCan, maxCan string
+	hasMin, hasMax := false, false
 	if f.MinAmount != nil {
 		can, err := canonicalAmount(*f.MinAmount)
 		if err != nil {
 			return nil, err
 		}
-		add("amount >=", can)
+		minCan, hasMin = can, true
 	}
 	if f.MaxAmount != nil {
 		can, err := canonicalAmount(*f.MaxAmount)
 		if err != nil {
 			return nil, err
 		}
-		add("amount <=", can)
+		maxCan, hasMax = can, true
+	}
+	// With Sign set the bounds are absolute magnitudes: spending rows
+	// (amount < 0) fall in -max..-min, income rows (amount > 0) in
+	// min..max.
+	switch f.Sign {
+	case "spending":
+		if hasMin {
+			add("amount <=", "-"+minCan)
+		}
+		if hasMax {
+			add("amount >=", "-"+maxCan)
+		}
+		add("amount <", 0)
+	case "income":
+		if hasMin {
+			add("amount >=", minCan)
+		}
+		if hasMax {
+			add("amount <=", maxCan)
+		}
+		add("amount >", 0)
+	default:
+		if hasMin {
+			add("amount >=", minCan)
+		}
+		if hasMax {
+			add("amount <=", maxCan)
+		}
 	}
 
 	base := txSelect + " WHERE " + strings.Join(where, " AND ") +

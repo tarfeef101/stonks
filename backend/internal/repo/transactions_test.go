@@ -391,6 +391,27 @@ func TestTransactionStore(t *testing.T) {
 			{"negative amount bound", TransactionFilter{
 				DateFrom: ptrDate("2026-03-01"), MinAmount: strPtr("-100"), MaxAmount: strPtr("-5"),
 			}, []string{fIDs["Filter Alpha Mart"]}},
+			{"sign spending", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), Sign: "spending",
+			}, []string{fIDs["Filter Alpha Mart"]}},
+			{"sign income", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), Sign: "income",
+			}, []string{fIDs["Filter Delta Deli"], fIDs["Filter Gamma Grocer"],
+				fIDs["Filter Alpha Studio"], fIDs["Filter Beta Cafe"]}},
+			{"sign spending, absolute bounds", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), Sign: "spending",
+				MinAmount: strPtr("5"), MaxAmount: strPtr("15"),
+			}, []string{fIDs["Filter Alpha Mart"]}},
+			{"sign spending, max below every magnitude", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), Sign: "spending", MaxAmount: strPtr("5"),
+			}, []string{}},
+			{"sign income, absolute bounds", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), Sign: "income",
+				MinAmount: strPtr("8"), MaxAmount: strPtr("50"),
+			}, []string{fIDs["Filter Beta Cafe"]}},
+			{"sign income, min only", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), Sign: "income", MinAmount: strPtr("20"),
+			}, []string{fIDs["Filter Gamma Grocer"], fIDs["Filter Beta Cafe"]}},
 			{"account match", TransactionFilter{
 				DateFrom: ptrDate("2026-03-01"), AccountIDs: []string{aAcct.ID},
 			}, wantAll},

@@ -324,10 +324,21 @@ func (m *memTxStore) List(_ context.Context, userID string, f repo.TransactionFi
 		if f.DateTo != nil && d > dateOnly(*f.DateTo) {
 			continue
 		}
-		if hasMin || hasMax {
+		if hasMin || hasMax || f.Sign != "" {
 			c, err := parseCents(r.tx.Amount)
 			if err != nil {
 				return nil, err
+			}
+			switch f.Sign {
+			case "spending":
+				if c >= 0 {
+					continue
+				}
+				c = -c // absolute magnitude
+			case "income":
+				if c <= 0 {
+					continue
+				}
 			}
 			if hasMin && c < minCents {
 				continue
@@ -946,6 +957,38 @@ func TestTransactionsList(t *testing.T) {
 		}
 	})
 
+	t.Run("sign: spending and income", func(t *testing.T) {
+		if code, out := get("?sign=spending"); code != http.StatusOK ||
+			!sameIDs(ids(out), t3.ID, t1.ID, t4.ID) {
+			t.Errorf("spending: status=%d ids=%v", code, ids(out))
+		}
+		if code, out := get("?sign=income"); code != http.StatusOK ||
+			!sameIDs(ids(out), t2.ID) {
+			t.Errorf("income: status=%d ids=%v", code, ids(out))
+		}
+	})
+
+	t.Run("sign composes with absolute min/max bounds", func(t *testing.T) {
+		// With sign set the bounds are ABSOLUTE magnitudes: the -50.25
+		// spending row has magnitude 50.25.
+		if code, out := get("?sign=spending&min_amount=3"); code != http.StatusOK ||
+			!sameIDs(ids(out), t3.ID, t1.ID) {
+			t.Errorf("spending+min: status=%d ids=%v", code, ids(out))
+		}
+		if code, out := get("?sign=spending&max_amount=10"); code != http.StatusOK ||
+			!sameIDs(ids(out), t3.ID, t4.ID) {
+			t.Errorf("spending+max: status=%d ids=%v", code, ids(out))
+		}
+		if code, out := get("?sign=spending&min_amount=3&max_amount=10"); code != http.StatusOK ||
+			!sameIDs(ids(out), t3.ID) {
+			t.Errorf("spending+min+max: status=%d ids=%v", code, ids(out))
+		}
+		if code, out := get("?sign=income&min_amount=5&max_amount=20"); code != http.StatusOK ||
+			!sameIDs(ids(out), t2.ID) {
+			t.Errorf("income+bounds: status=%d ids=%v", code, ids(out))
+		}
+	})
+
 	t.Run("search is case-insensitive over description", func(t *testing.T) {
 		if code, out := get("?search=GROCERIES"); code != http.StatusOK ||
 			!sameIDs(ids(out), t1.ID, t4.ID) {
@@ -987,6 +1030,9 @@ func TestTransactionsList(t *testing.T) {
 			{"?date_to=2026-13-01", "date_to must be a YYYY-MM-DD date"},
 			{"?min_amount=abc", `amount "abc" is not a valid decimal`},
 			{"?max_amount=1.234", `amount "1.234" has more than 2 decimal places`},
+			{"?sign=both", `sign must be "spending" or "income"`},
+			{"?min_amount=-10&sign=spending", "min_amount must be non-negative when sign is set"},
+			{"?max_amount=-1&sign=income", "max_amount must be non-negative when sign is set"},
 			{"?limit=-1", "limit must be an integer >= 0"},
 			{"?offset=xyz", "offset must be an integer >= 0"},
 		}
