@@ -88,13 +88,13 @@
 		"col_income": "Income",
 		"col_net": "Net",
 		"row_count": "{n} transactions",
-		"save_as_card": "Save as card",
-		"save_prompt": "Card name:",
-		"saved": "Card saved"
+		"save_as_card": "Save as dashboard card",
+		"save_prompt": "Dashboard card name:",
+		"saved": "Dashboard card saved"
 	},
 	"dashboards": {
 		"heading": "Dashboards",
-		"empty": "No cards yet — each saved Explore view appears here.",
+		"empty": "No cards yet — use “Save as dashboard card” on the Explore page to add one.",
 		"empty_cta": "Save a view from the Explore page",
 		"sign_in": "Sign in to see your dashboards.",
 		"loading": "Loading cards…",

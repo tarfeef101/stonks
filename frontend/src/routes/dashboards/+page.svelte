@@ -171,7 +171,7 @@
 	{:else if loadError}
 		<p class="text-sm text-red-600 dark:text-red-400">{loadError}</p>
 	{:else if cards.length === 0}
-		<!-- No cards yet: point at the Explore page's "Save as card". -->
+		<!-- No cards yet: point at the Explore page's "Save as dashboard card". -->
 		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('dashboards.empty')}</p>
 			<a href={resolve('/explore')} class="underline">{$_('dashboards.empty_cta')}</a>
@@ -247,7 +247,6 @@
 					<a
 						class="block"
 						href={resolve(`/explore?${serializeStateForLink(parseState(card.explore_state))}`)}
-					>
 						aria-label={$_('dashboards.open', { values: { name: card.name } })}
 					>
 						<ExploreView state={parseState(card.explore_state)} {names} />

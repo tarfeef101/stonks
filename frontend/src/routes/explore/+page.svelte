@@ -18,7 +18,7 @@
 	// the grouping/aggregation, and the table/chart render live in the
 	// shared ExploreView component (lib/explore), which the dashboard
 	// cards embed too. The page owns the filter bar, the view bar
-	// (with "Save as card"), the catalogs, and the URL sync.
+	// (with "Save as dashboard card"), the catalogs, and the URL sync.
 	//
 	// Rendered-numbers contract: every displayed amount — table cells,
 	// axis ticks, tooltip values — is an aggregate INTEGER-CENTS sum run
@@ -151,7 +151,7 @@
 
 	// --- Save as card -----------------------------------------------------
 
-	// The view bar's "Save as card": prompt for a name, then POST the
+	// The view bar's "Save as dashboard card": prompt for a name, then POST the
 	// current view — the RAW canonical serializeState(explore) string
 	// (no trim or transform; '' is the default view). A cancelled
 	// prompt (null) is a no-op; an empty/whitespace name is a server
@@ -414,7 +414,7 @@
 
 		<!-- View bar: chart kind / grouping (URL-only fields — they never
 		     refetch; the metric is derived from the Type filter above)
-		     plus the "Save as card" button. The row count and the 1000-row
+		     plus the "Save as dashboard card" button. The row count and the 1000-row
 		     cap note render inside the ExploreView (below). -->
 		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<div class="flex flex-wrap items-end gap-4">
