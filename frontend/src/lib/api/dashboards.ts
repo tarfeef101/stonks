@@ -23,13 +23,16 @@ export type WidgetKind = 'explore' | 'markdown';
 /** One widget row (backend widgetOut). content = the raw stored text
  * (explore: the canonical serialized explore state, '' = the default
  * view; markdown: the markdown source). span = 1..12 grid columns;
- * sort_order = the 1-based position within the dashboard. */
+ * row_span = 1..8 fixed grid rows (round 7 — the editor's rows have a
+ * fixed height, overflow scrolls inside the card); sort_order = the
+ * 1-based position within the dashboard. */
 export interface DashboardWidget {
 	id: string;
 	name: string;
 	kind: WidgetKind;
 	content: string;
 	span: number;
+	row_span: number;
 	sort_order: number;
 }
 
@@ -66,10 +69,11 @@ export function listWidgets(dashboardId: string): Promise<DashboardWidget[]> {
 /** Creates a widget (POST /v1/dashboards/{id}/widgets — 201 + the
  * created row). content: explore = the serialized state ('' = the
  * default view), markdown = the source text (1024 / 16384 char caps);
- * span defaults to 6 when omitted. */
+ * span defaults to 6 when omitted, row_span to the per-kind default
+ * (explore 4, markdown 2). */
 export function createWidget(
 	dashboardId: string,
-	input: { name: string; kind: WidgetKind; content: string; span?: number }
+	input: { name: string; kind: WidgetKind; content: string; span?: number; row_span?: number }
 ): Promise<DashboardWidget> {
 	return api<DashboardWidget>(`/v1/dashboards/${dashboardId}/widgets`, {
 		method: 'POST',
@@ -83,7 +87,7 @@ export function createWidget(
 export function updateWidget(
 	dashboardId: string,
 	widgetId: string,
-	patch: { name?: string; kind?: WidgetKind; content?: string; span?: number }
+	patch: { name?: string; kind?: WidgetKind; content?: string; span?: number; row_span?: number }
 ): Promise<DashboardWidget> {
 	return api<DashboardWidget>(`/v1/dashboards/${dashboardId}/widgets/${widgetId}`, {
 		method: 'PATCH',

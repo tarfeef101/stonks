@@ -115,7 +115,6 @@
 		"no_widgets": "No widgets yet — add your first one below.",
 		"kind_explore": "Explore",
 		"kind_markdown": "Markdown",
-		"widget_size": "Widget size",
 		"size_n": "{n} columns",
 		"widget_move_left": "Move left",
 		"widget_move_right": "Move right",
@@ -131,7 +130,14 @@
 		"widget_add": "Add a widget:",
 		"widget_add_explore": "Explore view",
 		"widget_add_markdown": "Text (markdown)",
-		"widget_add_button": "Add"
+		"widget_add_button": "Add",
+		"widget_menu": "Widget actions",
+		"widget_width": "Width",
+		"widget_height": "Height",
+		"height_n": "{n} rows",
+		"handle_width": "Drag to change the widget's width",
+		"handle_height": "Drag to change the widget's height",
+		"handle_corner": "Drag to change the widget's width and height"
 	},
 	"budgets": {
 		"heading": "Budgets",

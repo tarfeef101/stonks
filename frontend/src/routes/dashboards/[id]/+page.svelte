@@ -21,16 +21,21 @@
 	import { parseState, serializeStateForLink, type Names } from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
-	// Dashboard editor (round 6): one dashboard's 12-col widget grid.
-	// A widget is either a card whose body is the shared ExploreView
-	// over the widget's stored (canonical) explore state, or a
-	// markdown text card (marked → DOMPurify → @html — user text is
-	// untrusted). Widget ops: resize (span presets), move left/right
-	// (swap + PUT /order — the round-5 cards page pattern), edit
-	// (rename for explore widgets; rename + content for markdown),
-	// confirm-gated delete. "Open in Explore" re-serializes the stored
-	// state with the sign ALWAYS explicit — a bare /explore opens the
-	// remembered last view, not the widget's.
+	// Dashboard editor (rounds 6–7): one dashboard's 12-col × N-row
+	// widget grid (fixed 120px row pitch at md+ — the card bodies
+	// scroll inside). A widget is either a card whose body is the
+	// shared ExploreView over the widget's stored (canonical) explore
+	// state, or a markdown text card (marked → DOMPurify → @html —
+	// user text is untrusted). Resize is desktop-window-style drag:
+	// the right edge (width), the bottom edge (height), the corner
+	// (both) — pointer-captured, live-previewed, one PATCH on
+	// release — with the ⋯ menu's width/height selects as the a11y
+	// fallback. Other ops: move left/right (swap + PUT /order — the
+	// round-5 cards page pattern), edit (rename for explore widgets;
+	// rename + content for markdown), confirm-gated delete. "Open in
+	// Explore" re-serializes the stored state with the sign ALWAYS
+	// explicit — a bare /explore opens the remembered last view, not
+	// the widget's.
 	//
 	// There is no GET /v1/dashboards/{id} route — the dashboard row is
 	// resolved by id from the list; an unknown id means "not found".
@@ -131,12 +136,18 @@
 		return e instanceof Error ? e.message : String(e);
 	}
 
-	// --- Grid ---------------------------------------------------------------
+	// --- Grid (round 7: 2D — fixed row pitch + drag-resize) ----------------
 
-	// The widget's grid footprint: TAILWIND JIT needs the class
-	// literals spelled out (a runtime-built 'col-span-' + n would be
-	// purged). The size select's presets are 3/4/6/8/12; any other
-	// stored span (the API allows 1..12) still gets its class.
+	// The md+ grid geometry the drag-resize math uses: 12 columns,
+	// gap-4 (16px), and a fixed 120px row pitch (the grid div's
+	// md:auto-rows-[120px] — keep the class and the constant in
+	// sync). TAILWIND JIT needs the span class literals spelled out
+	// (a runtime-built 'col-span-' + n would be purged); any stored
+	// span/row_span (the API allows 1..12 / 1..8) still gets its
+	// class.
+	const GRID_COLS = 12;
+	const GRID_GAP = 16;
+	const GRID_ROW_PITCH = 120;
 	const SPAN_CLASSES: Record<number, string> = {
 		1: 'md:col-span-1',
 		2: 'md:col-span-2',
@@ -151,18 +162,121 @@
 		11: 'md:col-span-11',
 		12: 'md:col-span-12'
 	};
-	const SPAN_PRESETS = [3, 4, 6, 8, 12];
+	const ROW_SPAN_CLASSES: Record<number, string> = {
+		1: 'md:row-span-1',
+		2: 'md:row-span-2',
+		3: 'md:row-span-3',
+		4: 'md:row-span-4',
+		5: 'md:row-span-5',
+		6: 'md:row-span-6',
+		7: 'md:row-span-7',
+		8: 'md:row-span-8'
+	};
+	// The ⋯ menu's width/height selects — the a11y fallback for the
+	// drag handles — cover the FULL ranges: a drag can land on any
+	// value, so the selects must be able to show the truth.
+	const WIDTH_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+	const HEIGHT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 
-	function spanClass(w: DashboardWidget): string {
-		return SPAN_CLASSES[w.span] ?? 'md:col-span-6';
+	function clampSpan(n: number): number {
+		return Math.min(GRID_COLS, Math.max(1, n));
+	}
+	function clampRows(n: number): number {
+		return Math.min(HEIGHT_OPTIONS.length, Math.max(1, n));
 	}
 
-	/** The size select's options: the presets, plus the widget's own
-	 * span when it is not a preset (the select must show the truth). */
-	function spanOptions(span: number): number[] {
-		return SPAN_PRESETS.includes(span)
-			? SPAN_PRESETS
-			: [...SPAN_PRESETS, span].sort((a, b) => a - b);
+	// The live drag-resize preview: while a handle drag is in flight,
+	// the dragged card previews its candidate span/row_span here (the
+	// stored widgets stay put until the pointerup PATCH); null = no
+	// drag. gridEl binds the grid div (the unit math's reference).
+	let dragging = $state<{ id: string; span: number; rowSpan: number } | null>(null);
+	let gridEl = $state<HTMLDivElement | null>(null);
+
+	// The ⋯ overflow menu: at most one open at a time, keyed by the
+	// widget's id; closed by the fixed inset-0 click-catcher, by an
+	// item click, or by Escape (window keydown while open).
+	let menuId = $state<string | null>(null);
+
+	$effect(() => {
+		if (menuId === null) return;
+		const onKey = (e: KeyboardEvent): void => {
+			if (e.key === 'Escape') menuId = null;
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	});
+
+	/** The widget's current grid footprint: the stored span/row_span,
+	 * overridden while its drag-resize is live-previewing. */
+	function footprint(w: DashboardWidget): { span: number; rowSpan: number } {
+		if (dragging !== null && dragging.id === w.id)
+			return { span: dragging.span, rowSpan: dragging.rowSpan };
+		return { span: w.span, rowSpan: w.row_span };
+	}
+
+	function spanClass(span: number): string {
+		return SPAN_CLASSES[span] ?? 'md:col-span-6';
+	}
+	function rowSpanClass(rows: number): string {
+		return ROW_SPAN_CLASSES[rows] ?? 'md:row-span-4';
+	}
+
+	/** Begins a drag-resize from a card edge/corner handle: pointer
+	 * capture on the handle element, deltas converted to grid units,
+	 * the live preview in `dragging`, and ONE {span, row_span} PATCH
+	 * on release. The stored widgets are never mutated mid-drag, so a
+	 * failed PATCH simply drops the preview + sets opError (the
+	 * "revert"). mode: 'x' = right edge (width), 'y' = bottom edge
+	 * (height), 'xy' = the corner (both). */
+	function startDrag(e: PointerEvent, w: DashboardWidget, mode: 'x' | 'y' | 'xy'): void {
+		const grid = gridEl;
+		const handle = e.currentTarget as HTMLElement;
+		if (grid === null) return;
+		e.preventDefault();
+		const rect = grid.getBoundingClientRect();
+		const colUnit = (rect.width + GRID_GAP) / GRID_COLS;
+		const rowUnit = GRID_ROW_PITCH + GRID_GAP;
+		const startX = e.clientX;
+		const startY = e.clientY;
+		const startSpan = w.span;
+		const startRows = w.row_span;
+		handle.setPointerCapture(e.pointerId);
+		const onMove = (ev: PointerEvent): void => {
+			let span = startSpan;
+			let rows = startRows;
+			if (mode === 'x' || mode === 'xy')
+				span = clampSpan(startSpan + Math.round((ev.clientX - startX) / colUnit));
+			if (mode === 'y' || mode === 'xy')
+				rows = clampRows(startRows + Math.round((ev.clientY - startY) / rowUnit));
+			dragging = { id: w.id, span, rowSpan: rows };
+		};
+		const finish = (commit: boolean): void => {
+			handle.removeEventListener('pointermove', onMove);
+			handle.removeEventListener('pointerup', onUp);
+			handle.removeEventListener('pointercancel', onCancel);
+			if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+			const d = dragging;
+			dragging = null;
+			if (commit && d !== null && (d.span !== startSpan || d.rowSpan !== startRows))
+				void persistResize(w, d.span, d.rowSpan);
+		};
+		const onUp = (): void => finish(true);
+		const onCancel = (): void => finish(false);
+		handle.addEventListener('pointermove', onMove);
+		handle.addEventListener('pointerup', onUp);
+		handle.addEventListener('pointercancel', onCancel);
+	}
+
+	/** Persists a drag-resize: one PATCH of both dimensions; the
+	 * returned row replaces the widget in place. */
+	async function persistResize(w: DashboardWidget, span: number, rows: number): Promise<void> {
+		opError = null;
+		try {
+			const updated = await updateWidget(dashboardId, w.id, { span, row_span: rows });
+			widgets = widgets.map((x) => (x.id === w.id ? updated : x));
+		} catch (e) {
+			opError = envelopeMessage(e);
+		}
 	}
 
 	/** Renders a markdown widget's body: marked → DOMPurify
@@ -176,13 +290,26 @@
 
 	// --- Widget ops ---------------------------------------------------------
 
-	/** Resizes the widget (the size select); the returned row
-	 * replaces it in place. */
+	/** Resizes the widget's width (the ⋯ menu's width select — the
+	 * a11y fallback for the drag handle); the returned row replaces
+	 * it in place. */
 	async function resize(w: DashboardWidget, span: number): Promise<void> {
 		if (span === w.span) return;
 		opError = null;
 		try {
 			const updated = await updateWidget(dashboardId, w.id, { span });
+			widgets = widgets.map((x) => (x.id === w.id ? updated : x));
+		} catch (e) {
+			opError = envelopeMessage(e);
+		}
+	}
+
+	/** Resizes the widget's height (the ⋯ menu's height select). */
+	async function resizeHeight(w: DashboardWidget, rows: number): Promise<void> {
+		if (rows === w.row_span) return;
+		opError = null;
+		try {
+			const updated = await updateWidget(dashboardId, w.id, { row_span: rows });
 			widgets = widgets.map((x) => (x.id === w.id ? updated : x));
 		} catch (e) {
 			opError = envelopeMessage(e);
@@ -273,7 +400,9 @@
 	}
 
 	/** Creates the widget from the add card (new widgets span 4
-	 * columns); the returned row is appended to the grid. */
+	 * columns; row_span is left to the server's per-kind default —
+	 * explore 4, markdown 2); the returned row is appended to the
+	 * grid. */
 	async function submitAdd(): Promise<void> {
 		if (addKind === null) return;
 		addError = null;
@@ -327,18 +456,27 @@
 			<p class="text-sm text-red-600 dark:text-red-400">{opError}</p>
 		{/if}
 
-		<!-- The widget grid: 12 columns at md+, stacked on small
-		     screens. Each card's head carries the name (kind badge),
-		     the size select, move / open / edit / delete; the body is
-		     the live Explore view, the sanitized markdown, or the
-		     markdown edit textarea. -->
-		<div class="grid grid-cols-1 gap-4 md:grid-cols-12">
+		<!-- The widget grid (round 7): 12 columns at md+, stacked on
+		     small screens, with a fixed 120px row pitch at md+ (the
+		     card bodies scroll inside). Each card's head carries the
+		     name (kind badge) + the ⋯ menu (open in Explore, width /
+		     height selects, move, edit, delete); the right edge,
+		     bottom edge and corner are drag-resize handles (width /
+		     height / both); the body is the live Explore view, the
+		     sanitized markdown, or the markdown edit textarea. -->
+		<div class="grid grid-cols-1 gap-4 md:grid-cols-12 md:auto-rows-[120px]" bind:this={gridEl}>
 			{#each widgets as w (w.id)}
+				{@const fp = footprint(w)}
 				<div
-					class="flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 {spanClass(w)}"
+					class="relative flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {dragging?.id === w.id ? 'ring-1 ring-sky-500/70' : ''}"
 				>
+					<!-- Compact head (round 7): name (truncated) + kind
+					     badge, then the ⋯ overflow menu — the controls no
+					     longer bleed out of a narrow card. In edit mode the
+					     name input + Save / Cancel take the right side and
+					     the ⋯ button hides. -->
 					<div
-						class="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-2"
+						class="flex items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5"
 					>
 						<div class="flex min-w-0 flex-1 items-center gap-2">
 							{#if editingId === w.id}
@@ -363,79 +501,149 @@
 								</span>
 							{/if}
 						</div>
-						<div class="flex shrink-0 flex-wrap items-center gap-3 text-sm">
-							{#if editingId === w.id}
+						{#if editingId === w.id}
+							<button
+								class="shrink-0 font-medium text-emerald-600 dark:text-emerald-400 underline"
+								type="button"
+								onclick={() => void saveEdit(w)}
+							>
+								{$_('dashboards.widget_save')}
+							</button>
+							<button
+								class="shrink-0 font-medium text-zinc-600 dark:text-zinc-400 underline"
+								type="button"
+								onclick={cancelEdit}
+							>
+								{$_('dashboards.widget_cancel')}
+							</button>
+						{:else}
+							<div class="relative shrink-0">
 								<button
-									class="font-medium text-emerald-600 dark:text-emerald-400 underline"
+									class="rounded-md px-1.5 py-0.5 text-base leading-none text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
 									type="button"
-									onclick={() => void saveEdit(w)}
+									aria-label={$_('dashboards.widget_menu')}
+									aria-expanded={menuId === w.id}
+									onclick={() => (menuId = menuId === w.id ? null : w.id)}
 								>
-									{$_('dashboards.widget_save')}
+									⋯
 								</button>
-								<button
-									class="font-medium text-zinc-600 dark:text-zinc-400 underline"
-									type="button"
-									onclick={cancelEdit}
-								>
-									{$_('dashboards.widget_cancel')}
-								</button>
-							{:else}
-								<select
-									class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-1 text-xs"
-									value={w.span}
-									aria-label={$_('dashboards.widget_size')}
-									onchange={(e) => void resize(w, Number(e.currentTarget.value))}
-								>
-									{#each spanOptions(w.span) as n (n)}
-										<option value={n}>{$_('dashboards.size_n', { values: { n } })}</option>
-									{/each}
-								</select>
-								<button
-									class="font-medium text-zinc-600 dark:text-zinc-400 underline"
-									type="button"
-									aria-label={$_('dashboards.widget_move_left')}
-									disabled={widgets[0]?.id === w.id}
-									onclick={() => void move(w, -1)}
-								>
-									{$_('dashboards.widget_move_left')}
-								</button>
-								<button
-									class="font-medium text-zinc-600 dark:text-zinc-400 underline"
-									type="button"
-									aria-label={$_('dashboards.widget_move_right')}
-									disabled={widgets.at(-1)?.id === w.id}
-									onclick={() => void move(w, 1)}
-								>
-									{$_('dashboards.widget_move_right')}
-								</button>
-								{#if w.kind === 'explore'}
-									<a
-										href={resolve('/explore') + '?' + serializeStateForLink(parseState(w.content))}
-										class="font-medium text-zinc-600 dark:text-zinc-400 underline"
+								{#if menuId === w.id}
+									<!-- Click-catcher: any click outside the panel
+									     closes the menu (z-20, below the z-30 panel). -->
+									<div
+										class="fixed inset-0 z-20"
+										aria-hidden="true"
+										onclick={() => (menuId = null)}
+									></div>
+									<div
+										class="absolute right-0 top-full z-30 mt-1 w-48 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 py-1 shadow-lg"
+										role="menu"
 									>
-										{$_('dashboards.widget_open_explore')}
-									</a>
+										{#if w.kind === 'explore'}
+											<a
+												href={resolve('/explore') + '?' + serializeStateForLink(parseState(w.content))}
+												class="block px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+												role="menuitem"
+												onclick={() => (menuId = null)}
+											>
+												{$_('dashboards.widget_open_explore')}
+											</a>
+											<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
+										{/if}
+										<label
+											class="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300"
+										>
+											{$_('dashboards.widget_width')}
+											<select
+												class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5 text-xs"
+												value={fp.span}
+												aria-label={$_('dashboards.widget_width')}
+												onchange={(e) => {
+													menuId = null;
+													void resize(w, Number(e.currentTarget.value));
+												}}
+											>
+												{#each WIDTH_OPTIONS as n (n)}
+													<option value={n}>{$_('dashboards.size_n', { values: { n } })}</option>
+												{/each}
+											</select>
+										</label>
+										<label
+											class="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300"
+										>
+											{$_('dashboards.widget_height')}
+											<select
+												class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5 text-xs"
+												value={fp.rowSpan}
+												aria-label={$_('dashboards.widget_height')}
+												onchange={(e) => {
+													menuId = null;
+													void resizeHeight(w, Number(e.currentTarget.value));
+												}}
+											>
+												{#each HEIGHT_OPTIONS as n (n)}
+													<option value={n}>{$_('dashboards.height_n', { values: { n } })}</option>
+												{/each}
+											</select>
+										</label>
+										<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
+										<button
+											class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:text-zinc-400 disabled:hover:bg-transparent dark:disabled:text-zinc-600"
+											type="button"
+											role="menuitem"
+											aria-label={$_('dashboards.widget_move_left')}
+											disabled={widgets[0]?.id === w.id}
+											onclick={() => {
+												menuId = null;
+												void move(w, -1);
+											}}
+										>
+											{$_('dashboards.widget_move_left')}
+										</button>
+										<button
+											class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:text-zinc-400 disabled:hover:bg-transparent dark:disabled:text-zinc-600"
+											type="button"
+											role="menuitem"
+											aria-label={$_('dashboards.widget_move_right')}
+											disabled={widgets.at(-1)?.id === w.id}
+											onclick={() => {
+												menuId = null;
+												void move(w, 1);
+											}}
+										>
+											{$_('dashboards.widget_move_right')}
+										</button>
+										<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
+										<button
+											class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+											type="button"
+											role="menuitem"
+											aria-label={$_('dashboards.widget_edit')}
+											onclick={() => {
+												menuId = null;
+												startEdit(w);
+											}}
+										>
+											{$_('dashboards.widget_edit')}
+										</button>
+										<button
+											class="block w-full px-3 py-1.5 text-left text-sm text-red-600 dark:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+											type="button"
+											role="menuitem"
+											aria-label={$_('dashboards.widget_delete')}
+											onclick={() => {
+												menuId = null;
+												void removeWidget(w);
+											}}
+										>
+											{$_('dashboards.widget_delete')}
+										</button>
+									</div>
 								{/if}
-								<button
-									class="font-medium text-zinc-600 dark:text-zinc-400 underline"
-									type="button"
-									aria-label={$_('dashboards.widget_edit')}
-									onclick={() => startEdit(w)}
-								>
-									{$_('dashboards.widget_edit')}
-								</button>
-								<button
-									class="font-medium text-red-600 dark:text-red-400 underline"
-									type="button"
-									aria-label={$_('dashboards.widget_delete')}
-									onclick={() => void removeWidget(w)}
-								>
-									{$_('dashboards.widget_delete')}
-								</button>
-							{/if}
-						</div>
+							</div>
+						{/if}
 					</div>
-					<div class="flex-1 p-3">
+					<div class="min-h-0 flex-1 overflow-y-auto p-3">
 						{#if editingId === w.id && w.kind === 'markdown'}
 							<textarea
 								class="w-full min-h-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1.5 font-mono text-xs"
@@ -451,6 +659,30 @@
 							<article class="text-sm">{@html renderMarkdown(w.content)}</article>
 						{/if}
 					</div>
+					<!-- Drag-resize handles (round 7): right edge = width,
+					     bottom edge = height, the corner = both. The 6px
+					     overshoots stay inside the 16px grid gap; pointer
+					     capture + the grid-unit math live in startDrag. -->
+					<div
+						class="absolute inset-y-0 -right-[6px] w-3 cursor-ew-resize touch-none"
+						role="separator"
+						aria-orientation="vertical"
+						aria-label={$_('dashboards.handle_width')}
+						onpointerdown={(e) => startDrag(e, w, 'x')}
+					></div>
+					<div
+						class="absolute inset-x-0 -bottom-[6px] h-3 cursor-ns-resize touch-none"
+						role="separator"
+						aria-orientation="horizontal"
+						aria-label={$_('dashboards.handle_height')}
+						onpointerdown={(e) => startDrag(e, w, 'y')}
+					></div>
+					<div
+						class="absolute -bottom-[6px] -right-[6px] h-3 w-3 cursor-nwse-resize touch-none"
+						role="separator"
+						aria-label={$_('dashboards.handle_corner')}
+						onpointerdown={(e) => startDrag(e, w, 'xy')}
+					></div>
 				</div>
 			{:else}
 				<p class="text-sm text-zinc-500 dark:text-zinc-400 md:col-span-12"
