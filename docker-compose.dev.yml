@@ -230,6 +230,13 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "false"
       FTRK_TEST_USER_PASSWORD: ${FTRK_TEST_USER_PASSWORD:-test1234}
+      # Realm 'finance' access-token lifespan in seconds (round 9). Keycloak's
+      # default is 60s, which made SPA sessions expire constantly — a stale
+      # token 401s on the next API call and the page shows raw error JSON.
+      # 604800 = one week. dev-init.sh syncs it to the persisted realm on
+      # EVERY boot (the first-boot offline import does not re-apply env), so
+      # changing this in .env takes effect on the next `docker compose up`.
+      FTRK_ACCESS_TOKEN_LIFESPAN: ${FTRK_ACCESS_TOKEN_LIFESPAN:-604800}
     ports:
       - "18081:8080"
     volumes:
