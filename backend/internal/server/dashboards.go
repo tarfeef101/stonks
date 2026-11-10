@@ -138,6 +138,17 @@ type widgetPatch struct {
 	RowSpan *int    `json:"row_span"`
 }
 
+// checkWidgetName mirrors repo.validateWidgetName (message strings
+// included): like checkName, a name over 255 runes is a 400, but an
+// empty name is ALLOWED — a widget may be nameless (its title can live
+// in the markdown body; the client shows a placeholder).
+func checkWidgetName(name string) error {
+	if utf8.RuneCountInString(name) > maxNameLen {
+		return fmt.Errorf("name must be at most %d characters", maxNameLen)
+	}
+	return nil
+}
+
 // validKind reports whether kind is one of the 0013 enum values.
 func validKind(kind string) bool {
 	return kind == kindExplore || kind == kindMarkdown
@@ -185,7 +196,7 @@ func validateRowSpan(rowSpan int) error {
 // problem itself is already in the joined list).
 func (h *handler) validateWidgetIn(in *widgetIn) error {
 	var problems []string
-	if err := checkName(in.Name); err != nil {
+	if err := checkWidgetName(in.Name); err != nil {
 		problems = append(problems, err.Error())
 	}
 	if !validKind(in.Kind) {
@@ -227,7 +238,7 @@ func (h *handler) validateWidgetPatch(p *widgetPatch, existingKind, existingCont
 		}
 	}
 	if p.Name != nil {
-		if err := checkName(*p.Name); err != nil {
+		if err := checkWidgetName(*p.Name); err != nil {
 			problems = append(problems, err.Error())
 		}
 	}

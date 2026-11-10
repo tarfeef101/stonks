@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"finance-tracker/internal/crypto"
 
@@ -370,6 +371,17 @@ func (s *DashboardWidgetStore) Get(ctx context.Context, userID, dashboardID, wid
 	return w, nil
 }
 
+// validateWidgetName is validateName minus the non-empty rule: a widget
+// may be nameless (its "title" can live in the markdown body instead,
+// where it renders as a real heading; the client shows a placeholder in
+// the card head). A non-empty name still obeys the 255-rune cap.
+func validateWidgetName(name string) error {
+	if utf8.RuneCountInString(name) > 255 {
+		return errors.New("name must be at most 255 characters")
+	}
+	return nil
+}
+
 // defaultRowSpan is the row span a new widget gets when the create omits
 // row_span: explore views chart over a wider canvas than markdown notes
 // (0014), so they start taller.
@@ -388,7 +400,7 @@ func (s *DashboardWidgetStore) Create(ctx context.Context, userID, dashboardID s
 	if err := s.checkDashboard(ctx, userID, dashboardID); err != nil {
 		return DashboardWidget{}, err
 	}
-	if err := validateName(in.Name); err != nil {
+	if err := validateWidgetName(in.Name); err != nil {
 		return DashboardWidget{}, fmt.Errorf("repo: %w", err)
 	}
 	span := in.Span
@@ -435,7 +447,7 @@ func (s *DashboardWidgetStore) Update(ctx context.Context, userID, dashboardID, 
 	var namePack, contentPack []byte
 	nameChanged := false
 	if p.Name != nil {
-		if err := validateName(*p.Name); err != nil {
+		if err := validateWidgetName(*p.Name); err != nil {
 			return DashboardWidget{}, fmt.Errorf("repo: %w", err)
 		}
 		if n := strings.TrimSpace(*p.Name); n != cur.Name {

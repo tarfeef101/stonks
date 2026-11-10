@@ -211,8 +211,10 @@ func (s *memWidgetStore) Create(_ context.Context, userID, dashboardID string, i
 	if !s.world.hasDashboard(userID, dashboardID) {
 		return repo.DashboardWidget{}, repo.ErrDashboardNotFound
 	}
+	// Widget names are optional (a markdown "title" can live in the
+	// body); only the 255-rune cap is enforced.
 	name := strings.TrimSpace(in.Name)
-	if name == "" || len([]rune(name)) > 255 {
+	if len([]rune(name)) > 255 {
 		return repo.DashboardWidget{}, errors.New("repo: invalid widget name")
 	}
 	max := 0
@@ -258,7 +260,7 @@ func (s *memWidgetStore) Update(_ context.Context, userID, dashboardID, widgetID
 	}
 	if p.Name != nil {
 		name := strings.TrimSpace(*p.Name)
-		if name == "" || len([]rune(name)) > 255 {
+		if len([]rune(name)) > 255 {
 			return repo.DashboardWidget{}, errors.New("repo: invalid widget name")
 		}
 		s.world.widgets[i].w.Name = name
@@ -623,6 +625,24 @@ func TestDashboardWidgetsCRUD(t *testing.T) {
 	if w := dashJSON(t, out); w["sort_order"] != float64(4) {
 		t.Fatalf("late widget sort_order = %v, want 4 (MAX 3 + 1)", w["sort_order"])
 	}
+
+	// Nameless widget: an empty name is legal (the markdown body can
+	// carry the "title"); "" round-trips and a blank patch trims to "".
+	code, out = doReq(t, h, http.MethodPost, "/api/v1/dashboards/"+d+"/widgets", `{"name":"","kind":"markdown","content":"# hi"}`, hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("create nameless widget: %d (%s)", code, out)
+	}
+	idLess := idFrom(t, out)
+	if w := dashJSON(t, out); w["name"] != "" {
+		t.Fatalf("nameless widget name = %q, want empty", w["name"])
+	}
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/dashboards/"+d+"/widgets/"+idLess, `{"name":"  "}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("blank-name patch: %d (%s)", code, out)
+	}
+	if w := dashJSON(t, out); w["name"] != "" {
+		t.Fatalf("after blank patch name = %q, want empty (trimmed)", w["name"])
+	}
 }
 
 // TestDashboardValidation pins the 400 surface: the name rules, the
@@ -659,7 +679,7 @@ func TestDashboardValidation(t *testing.T) {
 		{"span thirteen", wpath, `{"name":"W","kind":"explore","span":13}`, "span must be between 1 and 12"},
 		{"row_span zero", wpath, `{"name":"W","kind":"explore","row_span":0}`, "row_span must be between 1 and 8"},
 		{"row_span nine", wpath, `{"name":"W","kind":"explore","row_span":9}`, "row_span must be between 1 and 8"},
-		{"empty widget name", wpath, `{"name":"  ","kind":"explore"}`, "name must not be empty"},
+		{"long widget name", wpath, `{"name":"` + strings.Repeat("y", 256) + `","kind":"explore"}`, "name must be at most 255 characters"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -674,13 +694,13 @@ func TestDashboardValidation(t *testing.T) {
 	}
 
 	// Every validation runs before the store: the combined error joins
-	// all failures with "; " (name, kind, span, row_span; content is
-	// in-cap).
-	code, out = doReq(t, h, http.MethodPost, wpath, `{"name":"  ","kind":"chart","span":13,"row_span":9}`, hdr)
+	// all failures with "; " (name over cap, kind, span, row_span;
+	// content is in-cap).
+	code, out = doReq(t, h, http.MethodPost, wpath, `{"name":"`+strings.Repeat("y", 256)+`","kind":"chart","span":13,"row_span":9}`, hdr)
 	if code != http.StatusBadRequest {
 		t.Fatalf("combined: status = %d (body %s)", code, out)
 	}
-	want := `name must not be empty; kind must be "explore" or "markdown"; span must be between 1 and 12; row_span must be between 1 and 8`
+	want := `name must be at most 255 characters; kind must be "explore" or "markdown"; span must be between 1 and 12; row_span must be between 1 and 8`
 	if _, m := apiErr(t, out); m != want {
 		t.Fatalf("combined message = %q, want %q", m, want)
 	}
