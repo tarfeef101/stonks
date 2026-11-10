@@ -108,7 +108,8 @@ type handler struct {
 	review        ReviewStore
 	reprompt      *Reprompter
 	llmCreds      *LLMCredentials
-	cards         CardStore
+	dashboards    DashboardStore
+	widgets       DashboardWidgetStore
 	mortgages     MortgageStore
 	mailer        mail.Sender
 	mailEnabled   bool
@@ -146,10 +147,13 @@ type handler struct {
 // and that route answers 503. llmCreds serves the LLM credential routes
 // (plan 5.6: GET /api/v1/llm-credentials, PUT and DELETE
 // /api/v1/llm-credentials/{provider}, POST /api/v1/llm-credentials/test);
-// nil and those routes answer 503. cards serves the dashboard card
-// routes (plan 6.5: GET/POST /api/v1/dashboard-cards, GET/PATCH/DELETE
-// /api/v1/dashboard-cards/{id}, PUT /api/v1/dashboard-cards/order);
-// nil and those routes answer 503. mortgages serves the mortgage routes
+// nil and those routes answer 503. dashboards and widgets serve the
+// dashboard routes (round 6 rework, migration 0013: GET/POST
+// /api/v1/dashboards, PATCH/DELETE /api/v1/dashboards/{id},
+// GET/POST /api/v1/dashboards/{id}/widgets, PATCH/DELETE
+// /api/v1/dashboards/{id}/widgets/{wid}, PUT
+// /api/v1/dashboards/{id}/widgets/order); either nil and the affected
+// routes answer 503. mortgages serves the mortgage routes
 // (plan 7.1: GET/POST /api/v1/mortgages, GET/PATCH/DELETE
 // /api/v1/mortgages/{id}); nil and those routes answer 503.
 // institutions serves the FI institution registry routes (plan 9.1:
@@ -166,7 +170,7 @@ type handler struct {
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
 // reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, cards CardStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -186,7 +190,8 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		review:        review,
 		reprompt:      reprompt,
 		llmCreds:      llmCreds,
-		cards:         cards,
+		dashboards:    dashboards,
+		widgets:       widgets,
 		mortgages:     mortgages,
 		mailer:        mailer,
 		mailEnabled:   mailEnabled,
@@ -258,15 +263,20 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/budgets", h.budgetsCreate)
 		r.Patch("/v1/budgets/{id}", h.budgetsUpdate)
 		r.Delete("/v1/budgets/{id}", h.budgetsDelete)
-		// Dashboard cards (plan 6.5, migration 0008): saved Explore
-		// views. Unlike budgets there IS a single-GET route; the static
-		// /order segment wins over /{id} (chi routing).
-		r.Get("/v1/dashboard-cards", h.cardsList)
-		r.Post("/v1/dashboard-cards", h.cardsCreate)
-		r.Get("/v1/dashboard-cards/{id}", h.cardsGet)
-		r.Patch("/v1/dashboard-cards/{id}", h.cardsUpdate)
-		r.Delete("/v1/dashboard-cards/{id}", h.cardsDelete)
-		r.Put("/v1/dashboard-cards/order", h.cardsSetOrder)
+		// Dashboards (round 6 rework, migration 0013): named
+		// dashboards of widgets, each widget a saved Explore view or a
+		// markdown note. The /widgets segment and the /widgets/order
+		// static tail win over /{wid} (chi routing); the order endpoint
+		// re-sorts a dashboard's whole widget set in one write.
+		r.Get("/v1/dashboards", h.dashboardsList)
+		r.Post("/v1/dashboards", h.dashboardsCreate)
+		r.Patch("/v1/dashboards/{id}", h.dashboardsUpdate)
+		r.Delete("/v1/dashboards/{id}", h.dashboardsDelete)
+		r.Get("/v1/dashboards/{id}/widgets", h.widgetsList)
+		r.Post("/v1/dashboards/{id}/widgets", h.widgetsCreate)
+		r.Patch("/v1/dashboards/{id}/widgets/{wid}", h.widgetsUpdate)
+		r.Delete("/v1/dashboards/{id}/widgets/{wid}", h.widgetsDelete)
+		r.Put("/v1/dashboards/{id}/widgets/order", h.widgetsSetOrder)
 		// Mortgages (plan 7.1, migration 0009): the mortgage CRUD over a
 		// single mortgage-typed account (existence/type checked in the
 		// handler). No PUT; account_id is immutable (absent from the

@@ -55,8 +55,9 @@ var (
 	ErrCategoriseJobNotFound  = errors.New("repo: categorise job not found")
 	ErrNoPendingCategoriseJob = errors.New("repo: no pending categorise job")
 
-	// 6.5 dashboard cards.
-	ErrDashboardCardNotFound = errors.New("repo: dashboard card not found")
+	// 6.5 dashboards + widgets (round 6 rework of dashboard cards, migration 0013).
+	ErrDashboardNotFound       = errors.New("repo: dashboard not found")
+	ErrDashboardWidgetNotFound = errors.New("repo: dashboard widget not found")
 
 	// 7.1 mortgages.
 	ErrMortgageNotFound = errors.New("repo: mortgage not found")

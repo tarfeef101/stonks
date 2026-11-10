@@ -131,13 +131,15 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 12 (all fifteen tables present, offset_suggestions +
+// version 13 (all seventeen tables present, dashboards +
+// dashboard_widgets from 0013 on top of offset_suggestions +
 // transactions.offset_group_id from 0012 on top of users.theme from 0011 on
 // top of fi_institutions + fi_credentials from 0010 on top of mortgages
 // from 0009 + dashboard_cards from 0008 + categorise_jobs from 0007 +
 // import_jobs' 0006 mapping column), a second `up` is a no-op, and `down`
-// rolls back exactly one step (0012 drops offset_suggestions +
-// transactions.offset_group_id; users keeps its 0011 theme, and the fi
+// rolls back exactly one step (0013 drops dashboards +
+// dashboard_widgets; offset_suggestions keeps 0012's
+// transactions.offset_group_id, users keeps its 0011 theme, and the fi
 // tables, mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006
 // mapping column and 0001+0002+0003+0004 stay in place, users keeps its
 // 0004 onboarded_at column).
@@ -148,14 +150,15 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 12 {
-		t.Fatalf("version after up = %d, want 12", ver)
+	if ver != 13 {
+		t.Fatalf("version after up = %d, want 13", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
 		"accounts", "transactions", "budgets", "llm_credentials",
 		"import_jobs", "categorise_jobs", "dashboard_cards", "mortgages",
 		"fi_institutions", "fi_credentials", "offset_suggestions",
+		"dashboards", "dashboard_widgets",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -188,31 +191,42 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 12 {
-		t.Fatalf("version after re-up = %d (err %v), want 12", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 13 {
+		t.Fatalf("version after re-up = %d (err %v), want 13", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0012) only —
-	// offset_suggestions (plus transactions.offset_group_id) goes; users
-	// keeps its 0011 theme, and the fi tables (0010), mortgages (0009),
-	// dashboard_cards (0008), categorise_jobs, import_jobs' 0006 mapping
-	// column and the 0001+0002+0003+0004 tables stay.
+	// One-step down: goose rolls back the latest migration (0013) only —
+	// dashboards + dashboard_widgets go; 0012 stays (offset_suggestions
+	// plus transactions.offset_group_id), users keeps its 0011 theme, and
+	// the fi tables (0010), mortgages (0009), dashboard_cards (0008),
+	// categorise_jobs, import_jobs' 0006 mapping column and the
+	// 0001+0002+0003+0004 tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 11 {
-		t.Fatalf("version after down = %d (err %v), want 11", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 12 {
+		t.Fatalf("version after down = %d (err %v), want 12", ver, err)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name = 'offset_suggestions'`); n != 0 {
-		t.Fatalf("offset_suggestions remaining after one-step down = %d, want 0 (only 0012 rolls back)", n)
+		  WHERE table_schema = 'public' AND table_name = 'dashboards'`); n != 0 {
+		t.Fatalf("dashboards remaining after one-step down = %d, want 0 (only 0013 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'dashboard_widgets'`); n != 0 {
+		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 0 (only 0013 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'offset_suggestions'`); n != 1 {
+		t.Fatalf("offset_suggestions remaining after one-step down = %d, want 1 (0012 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns
 		  WHERE table_schema = 'public' AND table_name = 'transactions'
-		    AND column_name = 'offset_group_id'`); n != 0 {
-		t.Fatalf("transactions.offset_group_id remaining after one-step down = %d, want 0 (only 0012 rolls back)", n)
+		    AND column_name = 'offset_group_id'`); n != 1 {
+		t.Fatalf("transactions.offset_group_id remaining after one-step down = %d, want 1 (0012 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns

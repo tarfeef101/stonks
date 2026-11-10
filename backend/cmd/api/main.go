@@ -86,7 +86,8 @@ func main() {
 		review        server.ReviewStore
 		reprompt      *server.Reprompter
 		llmCreds      *server.LLMCredentials
-		cards         server.CardStore
+		dashboards    server.DashboardStore
+		widgets       server.DashboardWidgetStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -138,6 +139,21 @@ func main() {
 			logger.Error("user bootstrap init failed", "error", err)
 			os.Exit(1)
 		}
+		// Dashboard cards backfill (round 6 rework): one-time startup
+		// migration moving 0008 dashboard_cards rows into the new
+		// dashboards/dashboard_widgets tables (one "Default" dashboard
+		// per user, cards become explore widgets), dropping the old
+		// table once every user's cards have moved. Deliberately
+		// non-fatal: there is no restart policy here, so a failure
+		// (e.g. the goose migrate service still applying 0013) is
+		// logged and retried on the next boot — the backfill is
+		// idempotent and a silent no-op once the cards table is gone
+		// or empty.
+		bctx, bcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := repo.Backfill(bctx, pool, kek); err != nil {
+			logger.Error("dashboard cards backfill failed", "error", err)
+		}
+		bcancel()
 		// User settings (step 1.4a): same pool, no KEK of its own — the
 		// settings columns are plaintext.
 		settings = server.NewPGSettingsStore(pool)
@@ -197,13 +213,15 @@ func main() {
 				return llm.New(baseURL, apiKey, model, llm.WithTimeout(20*time.Second)), nil
 			},
 		}
-		// Dashboard cards (plan 6.5, migration 0008): same pool; name +
-		// explore_state are DEK-encrypted by the repo layer, the handlers
-		// pass the per-user DEK from bootstrap (like every other store).
-		cards = repo.NewDashboardCardStore(pool)
+		// Dashboards + widgets (round 6 rework, migration 0013): same
+		// pool; widget names and content are DEK-encrypted by the repo
+		// layer, the handlers pass the per-user DEK from bootstrap
+		// (like every other store).
+		dashboards = repo.NewDashboardStore(pool)
+		widgets = repo.NewDashboardWidgetStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, cards, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.
