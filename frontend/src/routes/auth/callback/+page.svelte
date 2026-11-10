@@ -36,16 +36,21 @@
 			// identity appearance; this page awaits its own load because it
 			// must decide the redirect target before navigating.)
 			// Both targets are internal paths — resolve() keeps base-path
-			// deployments working. `target` is typed as a route id with an
-			// optional query string: login() only ever sends
-			// page.url.pathname + page.url.search, so the echoed return_to
-			// is one of this app's own routes. The type is kept in the
-			// route-id family on purpose — SvelteKit 3's resolve() accepts
-			// this union but rejects a plain string or the full
-			// RouteIdWithSearchOrHash union.
+			// deployments working. `target` is typed as a parameterless
+			// route id with an optional query string: login() only ever
+			// sends page.url.pathname + page.url.search, so the echoed
+			// return_to is one of this app's own routes. The parameterized
+			// route id is EXCLUDED from the cast because SvelteKit 3's
+			// typed resolve() demands a second params argument for those
+			// (ResolveArgs in $app/paths); a plain string or the full
+			// RouteIdWithSearchOrHash union is rejected. At runtime this
+			// is harmless — resolve() only treats bracketed ids as routes
+			// and any other absolute path as a plain pathname to prefix
+			// with the base path.
 			const st = await loadSettings();
 			const target = (st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')) as
-				RouteId | `${RouteId}?${string}`;
+				| Exclude<RouteId, '/dashboards/[id]'>
+				| `${Exclude<RouteId, '/dashboards/[id]'>}?${string}`;
 			goto(resolve(target), { replaceState: true });
 		} catch (e) {
 			// e.g. visiting /auth/callback directly with no pending state.

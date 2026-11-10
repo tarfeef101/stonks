@@ -6,7 +6,12 @@
 	import { ApiError } from '#lib/api/client';
 	import { listAccounts, type Account } from '#lib/api/accounts';
 	import { listCategories, type Category } from '#lib/api/categories';
-	import { createDashboardCard } from '#lib/api/dashboardCards';
+	import {
+		listDashboards,
+		createDashboard,
+		createWidget,
+		type Dashboard
+	} from '#lib/api/dashboards';
 	import { parseState, serializeState, type ExploreState } from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
@@ -18,7 +23,7 @@
 	// the grouping/aggregation, and the table/chart render live in the
 	// shared ExploreView component (lib/explore), which the dashboard
 	// cards embed too. The page owns the filter bar, the view bar
-	// (with "Save as dashboard card"), the catalogs, and the URL sync.
+	// (with the "Save to dashboard" panel), the catalogs, and the URL sync.
 	//
 	// Rendered-numbers contract: every displayed amount — table cells,
 	// axis ticks, tooltip values — is an aggregate INTEGER-CENTS sum run
@@ -149,21 +154,62 @@
 		return e instanceof Error ? e.message : String(e);
 	}
 
-	// --- Save as card -----------------------------------------------------
+	// --- Save to a dashboard ----------------------------------------------
 
-	// The view bar's "Save as dashboard card": prompt for a name, then POST the
-	// current view — the RAW canonical serializeState(explore) string
-	// (no trim or transform; '' is the default view). A cancelled
-	// prompt (null) is a no-op; an empty/whitespace name is a server
-	// 400 surfaced verbatim via envelopeMessage. The green note clears
-	// itself after 2.5s.
+	// The view bar's "Save to dashboard" panel: pick one of the caller's
+	// dashboards and name the widget, then POST the current view — the
+	// RAW canonical serializeState(explore) string (no trim or
+	// transform; '' is the default view) — as a 4-column explore widget.
+	// When the caller has NO dashboards the panel instead offers a
+	// new-dashboard name: it is created FIRST, then the widget is saved
+	// into it. An empty name is a server 400 surfaced verbatim via
+	// envelopeMessage. The green note clears itself after 2.5s.
+	let savePanel = $state(false);
+	let saveDashboards = $state<Dashboard[]>([]);
+	let saveDashId = $state('');
+	let saveName = $state('');
+	let newDashName = $state('');
 	let saveNote = $state<string | null>(null);
 	let saveError = $state<string | null>(null);
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	let saveSeq = 0;
 
-	async function saveAsCard(): Promise<void> {
-		const name = window.prompt($_('explore.save_prompt'));
-		if (name === null) return; // the user cancelled the prompt
+	/** Loads the caller's dashboards for the panel's select (one load
+	 * per open; stale loads are dropped). A failed load leaves the
+	 * panel on the create-a-dashboard path — saving still works. */
+	async function loadSaveDashboards(): Promise<void> {
+		const s = ++saveSeq;
+		try {
+			const ds = await listDashboards();
+			if (s !== saveSeq) return; // stale
+			saveDashboards = ds;
+			if (saveDashId === '' && ds.length > 0) saveDashId = ds[0].id;
+		} catch {
+			if (s !== saveSeq) return; // stale
+			saveDashboards = [];
+		}
+	}
+
+	/** Toggles the panel; opening it re-loads the dashboards and
+	 * clears the widget name (the success note persists across
+	 * toggles until its timer runs). */
+	function toggleSavePanel(): void {
+		savePanel = !savePanel;
+		if (savePanel) {
+			saveName = '';
+			saveError = null;
+			void loadSaveDashboards();
+		}
+	}
+
+	function closeSavePanel(): void {
+		savePanel = false;
+	}
+
+	/** Saves the current view as a widget: into the selected
+	 * dashboard, or — when there are none (or the list failed to
+	 * load) — into a freshly created one named newDashName. */
+	async function saveToDashboard(): Promise<void> {
 		if (saveTimer !== null) {
 			clearTimeout(saveTimer);
 			saveTimer = null;
@@ -171,11 +217,19 @@
 		saveNote = null;
 		saveError = null;
 		try {
-			await createDashboardCard(name, serializeState(explore));
-			saveNote = $_('explore.saved');
+			const target = saveDashboards.find((d) => d.id === saveDashId);
+			const dash = target ?? (await createDashboard(newDashName));
+			await createWidget(dash.id, {
+				name: saveName,
+				kind: 'explore',
+				content: serializeState(explore),
+				span: 4
+			});
+			saveNote = $_('explore.saved', { values: { name: dash.name } });
 			saveTimer = setTimeout(() => {
 				saveNote = null;
 			}, 2500);
+			closeSavePanel();
 		} catch (e) {
 			saveError = envelopeMessage(e);
 		}
@@ -414,8 +468,9 @@
 
 		<!-- View bar: chart kind / grouping (URL-only fields — they never
 		     refetch; the metric is derived from the Type filter above)
-		     plus the "Save as dashboard card" button. The row count and the 1000-row
-		     cap note render inside the ExploreView (below). -->
+		     plus the "Save to dashboard" button (which opens the inline
+		     save panel). The row count and the 1000-row cap note render
+		     inside the ExploreView (below). -->
 		<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 			<div class="flex flex-wrap items-end gap-4">
 				<p class="self-center text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
@@ -452,11 +507,64 @@
 				<button
 					class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
 					type="button"
-					onclick={saveAsCard}
+					onclick={toggleSavePanel}
 				>
-					{$_('explore.save_as_card')}
+					{$_('explore.save_to_dashboard')}
 				</button>
 			</div>
+			{#if savePanel}
+				<!-- The save panel: the dashboard select (or a
+				     new-dashboard name when the caller has none),
+				     the widget name, save / cancel. -->
+				<div
+					class="mt-4 flex flex-wrap items-end gap-3 border-t border-zinc-200 dark:border-zinc-800 pt-4"
+				>
+					{#if saveDashboards.length > 0}
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('explore.save_dashboard')}</span>
+							<select
+								class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={saveDashId}
+							>
+								{#each saveDashboards as d (d.id)}
+									<option value={d.id}>{d.name}</option>
+								{/each}
+							</select>
+						</label>
+					{:else}
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('explore.save_new_dashboard')}</span>
+							<input
+								class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={newDashName}
+								placeholder={$_('explore.save_new_dashboard_placeholder')}
+							/>
+						</label>
+					{/if}
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('explore.save_name')}</span>
+						<input
+							class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							bind:value={saveName}
+							placeholder={$_('explore.save_name_placeholder')}
+						/>
+					</label>
+					<button
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+						type="button"
+						onclick={() => void saveToDashboard()}
+					>
+						{$_('explore.save_button')}
+					</button>
+					<button
+						class="self-center text-sm font-medium text-zinc-600 dark:text-zinc-400 underline"
+						type="button"
+						onclick={closeSavePanel}
+					>
+						{$_('explore.save_cancel')}
+					</button>
+				</div>
+			{/if}
 			{#if saveNote}
 				<p class="text-sm text-green-700 dark:text-green-400">{saveNote}</p>
 			{/if}
