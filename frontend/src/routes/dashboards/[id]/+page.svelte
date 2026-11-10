@@ -34,9 +34,9 @@
 	// live to the pointer's drop position, ONE PUT /order on release
 	// — the ⋯ menu's move left/right stay as the a11y fallback. While
 	// a drag is live the grid's bounds are drawn (a ring on the grid
-	// + the 12 column dividers) so the width limit is visible —
-	// otherwise the empty space past a wide card looks like room to
-	// drop next to it.
+	// + 12 column slot frames, each at a card's exact footprint
+	// width) so the width limit is visible — otherwise the empty
+	// space past a wide card looks like room to drop next to it.
 	// Other ops: edit (rename for explore widgets; rename + content
 	// for markdown), confirm-gated delete. "Open in Explore"
 	// re-serializes the stored state with the sign ALWAYS explicit —
@@ -210,7 +210,7 @@
 	// card's rect at pointerdown (the grid pitch is fixed, so the
 	// card's size can't change mid-move); gridW = the grid's content
 	// width (re-read on every move — a mid-drag window resize moves
-	// the column dividers with it).
+	// the column slot frames with it).
 	let dragMove = $state<{
 		id: string;
 		from: number;
@@ -247,19 +247,23 @@
 		return widgets.find((x) => x.id === m.id) ?? null;
 	});
 
-	// The column dividers' x offsets for the drag-move bounds overlay:
-	// the i-th divider sits in the middle of the i-th gap — i full
-	// tracks plus (i-1/2) gaps, with track = (gridW - 11·gap)/12
-	// (12 equal tracks, 11 gaps of 16px). Empty while no drag-move is
+	// The column slot frames for the drag-move bounds overlay: slot i
+	// spans [i·colUnit, i·colUnit + track), colUnit = (gridW + gap)/12
+	// (track + gap — the exact pitch the resize snap uses) and track
+	// = (gridW - 11·gap)/12 — so each frame is a card's exact
+	// footprint width: a card flush-fills its slot and the gutters
+	// sit BETWEEN the frames, never inside them. The last slot's
+	// right edge lands on gridW exactly. Empty while no drag-move is
 	// live. md+ only in the template (below md the grid is one
-	// stacked column and has no dividers to draw).
-	const gridLines = $derived.by((): number[] => {
+	// stacked column and has no slots to draw).
+	const gridSlots = $derived.by((): { left: number; width: number }[] => {
 		const m = dragMove;
 		if (m === null || m.gridW <= 0) return [];
+		const colUnit = (m.gridW + GRID_GAP) / GRID_COLS;
 		const track = (m.gridW - (GRID_COLS - 1) * GRID_GAP) / GRID_COLS;
-		const lines: number[] = [];
-		for (let i = 1; i < GRID_COLS; i++) lines.push(i * track + (i - 0.5) * GRID_GAP);
-		return lines;
+		const slots: { left: number; width: number }[] = [];
+		for (let i = 0; i < GRID_COLS; i++) slots.push({ left: i * colUnit, width: track });
+		return slots;
 	});
 
 	// The ⋯ overflow menu: at most one open at a time, keyed by the
@@ -920,23 +924,30 @@
 					>{$_('dashboards.no_widgets')}</p
 				>
 			{/each}
-			<!-- The grid's bounds while a drag-move is live (round 11):
-			     the ring on the grid above is the outer edge, and this
-			     overlay draws the 12 column dividers — without them the
-			     empty space past a wide card looks like room to drop
+			<!-- The grid's bounds while a drag-move is live
+			     (rounds 11-12): the ring on the grid above is the
+			     outer edge, and this overlay draws the 12 column
+			     slot frames — each at a card's exact footprint
+			     width, so a card flush-fills its slot and the
+			     gutters sit between slots; without them the empty
+			     space past a wide card looks like room to drop
 			     next to it, but the card only snaps inside the 12
-			     columns. Absolutely positioned with no grid area (its
-			     containing block is the grid's padding box) +
-			     pointer-events-none, so it never affects the grid's
-			     layout or steals a card / handle pointer target. md+
-			     only — below md the grid is one stacked column. -->
+			     columns. Absolutely positioned with no grid area
+			     (its containing block is the grid's padding box)
+			     + pointer-events-none, so it never affects the
+			     grid's layout or steals a card / handle pointer
+			     target. md+ only — below md the grid is one
+			     stacked column. -->
 			{#if dragMove !== null}
 				<div
 					class="pointer-events-none absolute inset-0 hidden md:block"
 					aria-hidden="true"
 				>
-					{#each gridLines as left (left)}
-						<div class="absolute inset-y-0 w-px bg-sky-500/25" style="left: {left}px"></div>
+					{#each gridSlots as slot (slot.left)}
+						<div
+							class="absolute inset-y-0 rounded-lg border border-sky-500/40 bg-sky-500/5"
+							style="left: {slot.left}px; width: {slot.width}px;"
+						></div>
 					{/each}
 				</div>
 			{/if}
