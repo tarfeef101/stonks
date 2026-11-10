@@ -1,5 +1,10 @@
 @import 'tailwindcss';
 
+/* Markdown widget bodies render user HTML (marked → DOMPurify → @html).
+ * Tailwind preflight flattens it (h1 at body size, no list markers), so
+ * the typography plugin's `prose` classes restore sane document styling. */
+@plugin "@tailwindcss/typography";
+
 /* Class-based dark mode (Tailwind v4): the `dark:` variant matches when
  * <html> carries the .dark class. The pre-paint script in app.html sets
  * it from the stored setting before first paint; the route layout

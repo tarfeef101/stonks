@@ -30,12 +30,14 @@
 	// the right edge (width), the bottom edge (height), the corner
 	// (both) — pointer-captured, live-previewed, one PATCH on
 	// release — with the ⋯ menu's width/height selects as the a11y
-	// fallback. Other ops: move left/right (swap + PUT /order — the
-	// round-5 cards page pattern), edit (rename for explore widgets;
-	// rename + content for markdown), confirm-gated delete. "Open in
-	// Explore" re-serializes the stored state with the sign ALWAYS
-	// explicit — a bare /explore opens the remembered last view, not
-	// the widget's.
+	// fallback. Reorder (round 8) is a header drag: the card reflows
+	// live to the pointer's drop position, ONE PUT /order on release
+	// — the ⋯ menu's move left/right stay as the a11y fallback.
+	// Other ops: edit (rename for explore widgets; rename + content
+	// for markdown), confirm-gated delete. "Open in Explore"
+	// re-serializes the stored state with the sign ALWAYS explicit —
+	// a bare /explore opens the remembered last view, not the
+	// widget's.
 	//
 	// There is no GET /v1/dashboards/{id} route — the dashboard row is
 	// resolved by id from the list; an unknown id means "not found".
@@ -192,6 +194,28 @@
 	let dragging = $state<{ id: string; span: number; rowSpan: number } | null>(null);
 	let gridEl = $state<HTMLDivElement | null>(null);
 
+	// The live drag-move (reorder) preview: while a header drag is in
+	// flight, the dragged card renders at the drop position in
+	// displayWidgets (the grid reflows around it); the stored widgets
+	// stay put until the pointerup PUT /order. from = the card's
+	// index in the STORED list at pointerdown; drop = a 0..n splice
+	// index into the non-dragged list.
+	let dragMove = $state<{ id: string; from: number; drop: number } | null>(null);
+
+	// The display order: the stored widgets, with the dragged card
+	// spliced into its drop position while a drag-move is live (the
+	// card itself moves — no placeholder element).
+	const displayWidgets = $derived.by((): DashboardWidget[] => {
+		const m = dragMove;
+		if (m === null) return widgets;
+		const dragged = widgets.find((x) => x.id === m.id);
+		if (dragged === undefined) return widgets;
+		const rest = widgets.filter((x) => x.id !== m.id);
+		const arr = [...rest];
+		arr.splice(Math.min(Math.max(m.drop, 0), rest.length), 0, dragged);
+		return arr;
+	});
+
 	// The ⋯ overflow menu: at most one open at a time, keyed by the
 	// widget's id; closed by the fixed inset-0 click-catcher, by an
 	// item click, or by Escape (window keydown while open).
@@ -279,6 +303,88 @@
 		}
 	}
 
+	/** Maps a pointer position to a drop index (a 0..n splice index
+	 * into the NON-dragged list): the first card whose box contains
+	 * the pointer wins, and the pointer falling in its top-left
+	 * triangle drops before it. null = over no card (the current
+	 * drop is kept — empty grid space must not yank the card to the
+	 * end). DOM order == display order while the drag is live, so
+	 * the query is stable under the reflow. */
+	function computeDropIndex(x: number, y: number, dragId: string): number | null {
+		const grid = gridEl;
+		if (grid === null) return null;
+		let pos = 0;
+		for (const el of Array.from(grid.querySelectorAll<HTMLElement>('[data-widget-id]'))) {
+			if (el.dataset.widgetId === dragId) continue;
+			const r = el.getBoundingClientRect();
+			if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+			const before = (x - r.left) / r.width + (y - r.top) / r.height < 1;
+			return before ? pos : pos + 1;
+		}
+		return null;
+	}
+
+	/** Begins a drag-move from the card's header row: window-level
+	 * pointermove/pointerup/pointercancel — NO element capture,
+	 * because the card's node re-parents in the DOM mid-drag (the
+	 * reflow) and that would release a capture. While live, the card
+	 * renders at the drop position (displayWidgets); on release ONE
+	 * PUT /order, and the stored widgets are only rewritten on
+	 * success (a failure is opError + the preview dropping = the
+	 * revert). Skipped while that widget is in edit mode, a menu is
+	 * open, another drag is in flight, or the press starts on an
+	 * interactive element (the ⋯ button, the name input, …). */
+	function startMove(e: PointerEvent, w: DashboardWidget): void {
+		if (editingId === w.id || menuId !== null || dragging !== null || dragMove !== null) return;
+		if (e.target instanceof Element && e.target.closest('button, a, input, select, textarea'))
+			return;
+		const from = widgets.findIndex((x) => x.id === w.id);
+		if (from === -1) return;
+		e.preventDefault();
+		dragMove = { id: w.id, from, drop: from };
+		const onMove = (ev: PointerEvent): void => {
+			ev.preventDefault();
+			const m = dragMove;
+			if (m === null) return;
+			const idx = computeDropIndex(ev.clientX, ev.clientY, m.id);
+			if (idx !== null) dragMove = { ...m, drop: idx };
+		};
+		const finish = (commit: boolean): void => {
+			window.removeEventListener('pointermove', onMove);
+			window.removeEventListener('pointerup', onUp);
+			window.removeEventListener('pointercancel', onCancel);
+			const m = dragMove;
+			dragMove = null;
+			// drop === from = the card landed where it started: the
+			// order is unchanged, so there is nothing to persist.
+			if (commit && m !== null && m.drop !== m.from) void persistReorder(m);
+		};
+		const onUp = (): void => finish(true);
+		const onCancel = (): void => finish(false);
+		window.addEventListener('pointermove', onMove);
+		window.addEventListener('pointerup', onUp);
+		window.addEventListener('pointercancel', onCancel);
+	}
+
+	/** Persists a drag-move: PUT /order with the display order; on
+	 * success the local sort_order is rewritten, on failure the
+	 * stored widgets were never mutated (the dropped preview IS the
+	 * revert). */
+	async function persistReorder(m: { id: string; from: number; drop: number }): Promise<void> {
+		const moved = widgets[m.from];
+		if (moved === undefined) return;
+		const rest = widgets.filter((x) => x.id !== m.id);
+		const next = [...rest];
+		next.splice(Math.min(Math.max(m.drop, 0), rest.length), 0, moved);
+		opError = null;
+		try {
+			await setWidgetOrder(dashboardId, next.map((x) => x.id));
+			widgets = next.map((x, k) => ({ ...x, sort_order: k + 1 }));
+		} catch (e) {
+			opError = envelopeMessage(e);
+		}
+	}
+
 	/** Renders a markdown widget's body: marked → DOMPurify
 	 * (sanitized before the @html — user-authored text is not
 	 * trusted). Runs on each render of a markdown card (cheap for
@@ -354,7 +460,10 @@
 		if (editingId !== w.id) return;
 		editingId = null;
 		const patch: { name?: string; content?: string } = {};
-		if (draftName !== '' && draftName !== w.name) patch.name = draftName;
+		// Names are optional and stored trimmed: a cleared name
+		// patches to "" (the markdown body can carry the "title"),
+		// and whitespace-only edits are trimmed no-ops.
+		if (draftName.trim() !== w.name) patch.name = draftName.trim();
 		if (w.kind === 'markdown' && draftContent !== w.content) patch.content = draftContent;
 		if (Object.keys(patch).length === 0) return; // cancel / no-op
 		opError = null;
@@ -368,7 +477,8 @@
 
 	/** Deletes the widget (confirm-gated). */
 	async function removeWidget(w: DashboardWidget): Promise<void> {
-		if (!window.confirm($_('dashboards.widget_delete_confirm', { values: { name: w.name } })))
+		const label = w.name === '' ? $_('dashboards.widget_untitled') : w.name;
+		if (!window.confirm($_('dashboards.widget_delete_confirm', { values: { name: label } })))
 			return;
 		opError = null;
 		try {
@@ -465,18 +575,29 @@
 		     height / both); the body is the live Explore view, the
 		     sanitized markdown, or the markdown edit textarea. -->
 		<div class="grid grid-cols-1 gap-4 md:grid-cols-12 md:auto-rows-[120px]" bind:this={gridEl}>
-			{#each widgets as w (w.id)}
+			{#each displayWidgets as w (w.id)}
 				{@const fp = footprint(w)}
 				<div
-					class="relative flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {dragging?.id === w.id ? 'ring-1 ring-sky-500/70' : ''}"
+					data-widget-id={w.id}
+					class="relative flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {dragging?.id === w.id
+						? 'ring-1 ring-sky-500/70'
+						: dragMove?.id === w.id
+							? 'ring-2 ring-sky-500/70'
+							: ''}"
 				>
 					<!-- Compact head (round 7): name (truncated) + kind
 					     badge, then the ⋯ overflow menu — the controls no
 					     longer bleed out of a narrow card. In edit mode the
 					     name input + Save / Cancel take the right side and
-					     the ⋯ button hides. -->
+					     the ⋯ button hides. The row is ALSO the round-8
+					     drag-move surface (cursor-grab; startMove ignores
+					     presses on its interactive children). -->
 					<div
-						class="flex items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5"
+						class="flex cursor-grab touch-none items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5 active:cursor-grabbing"
+						role="group"
+						aria-label={$_('dashboards.widget_drag_move')}
+						title={$_('dashboards.widget_drag_move')}
+						onpointerdown={(e) => startMove(e, w)}
 					>
 						<div class="flex min-w-0 flex-1 items-center gap-2">
 							{#if editingId === w.id}
@@ -490,6 +611,13 @@
 										if (e.key === 'Escape') cancelEdit();
 									}}
 								/>
+							{:else if w.name === ''}
+								<!-- Nameless widget: the markdown body can
+								     carry the "title" — a muted placeholder
+								     stands in here. -->
+								<h2 class="truncate text-sm font-semibold text-zinc-400 dark:text-zinc-500 italic">
+									{$_('dashboards.widget_untitled')}
+								</h2>
 							{:else}
 								<h2 class="truncate text-sm font-semibold">{w.name}</h2>
 								<span
@@ -656,7 +784,7 @@
 						{:else if w.kind === 'explore'}
 							<ExploreView state={parseState(w.content)} names={names} />
 						{:else}
-							<article class="text-sm">{@html renderMarkdown(w.content)}</article>
+							<article class="prose prose-sm dark:prose-invert">{@html renderMarkdown(w.content)}</article>
 						{/if}
 					</div>
 					<!-- Drag-resize handles (round 7): right edge = width,
