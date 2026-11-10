@@ -2,6 +2,9 @@
 	"app": {
 		"title": "Personal Finance Tracker"
 	},
+	"common": {
+		"manage_accounts": "Manage in settings →"
+	},
 	"nav": {
 		"summary": "Summary",
 		"explore": "Explore",
@@ -231,7 +234,7 @@
 		"sign_in_prompt": "Sign in to upload statements.",
 		"account_label": "Account",
 		"account_placeholder": "Choose an account…",
-		"no_accounts": "No accounts yet — add one in the app first.",
+		"no_accounts": "No accounts yet — add one in settings.",
 		"drop_hint": "Drag and drop a statement file here, or",
 		"drop_browse": "browse",
 		"supported": "Supported: .csv, .json, .ofx, .qfx (max 10 MB)",
@@ -281,7 +284,7 @@
 		"intro": "Record a transaction that isn't in any statement — it enters the same pipeline as an import.",
 		"account_label": "Account",
 		"account_placeholder": "Choose an account…",
-		"no_accounts": "No accounts yet — add one in the app first.",
+		"no_accounts": "No accounts yet — add one in settings.",
 		"category_label": "Category",
 		"category_none": "No category",
 		"date_posted_label": "Date posted",
@@ -397,6 +400,29 @@
 		"cat_add_label": "New category",
 		"cat_add_placeholder": "e.g. Groceries",
 		"cat_add": "Add",
-		"cat_adding": "Adding…"
+		"cat_adding": "Adding…",
+		"accounts_title": "Accounts",
+		"accounts_note": "The accounts your transactions, imports, and mortgages point at. Renaming or re-typing one keeps its history; deleting it removes its transactions, import jobs, and mortgages.",
+		"acct_loading": "Loading accounts…",
+		"acct_add_label": "New account",
+		"acct_add_placeholder": "e.g. Chequings",
+		"acct_type_label": "Type",
+		"acct_type": {
+			"bank": "Bank",
+			"cash": "Cash",
+			"credit_card": "Credit card",
+			"mortgage": "Mortgage",
+			"investment": "Investment",
+			"other": "Other"
+		},
+		"acct_currency_label": "Currency",
+		"acct_subtype_label": "Subtype",
+		"acct_subtype_placeholder": "e.g. Visa, TFSA",
+		"acct_add": "Add",
+		"acct_adding": "Adding…",
+		"acct_edit": "Edit",
+		"acct_delete": "Delete",
+		"acct_deleting": "Deleting…",
+		"acct_delete_confirm": "Delete account “{name}”? Its transactions, import jobs, and mortgages are removed too."
 	}
 }

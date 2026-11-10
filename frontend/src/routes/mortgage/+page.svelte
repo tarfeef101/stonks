@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
@@ -320,7 +321,10 @@
 	{:else if !listLoaded}
 		<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('mortgage.loading')}</p>
 	{:else if mortgageAccounts.length === 0}
-		<p class="text-zinc-600 dark:text-zinc-400">{$_('mortgage.no_mortgage')}</p>
+		<p class="text-zinc-600 dark:text-zinc-400">
+			{$_('mortgage.no_mortgage')}
+			<a class="underline" href={resolve('/settings#accounts')}>{$_('common.manage_accounts')}</a>
+		</p>
 	{:else}
 		{#if listError}
 			<p class="text-sm text-red-600 dark:text-red-400">{listError}</p>
@@ -338,18 +342,23 @@
 						void addMortgage();
 					}}
 				>
-					<label class="block text-sm">
-						<span class="mb-1 block font-medium">{$_('mortgage.form_account')}</span>
-						<select
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
-							bind:value={form.account_id}
-						>
-							<option value="" disabled>{$_('mortgage.form_account_placeholder')}</option>
-							{#each mortgageAccounts as a (a.id)}
-								<option value={a.id}>{a.name}</option>
-							{/each}
-						</select>
-					</label>
+					<div class="block text-sm">
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('mortgage.form_account')}</span>
+							<select
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={form.account_id}
+							>
+								<option value="" disabled>{$_('mortgage.form_account_placeholder')}</option>
+								{#each mortgageAccounts as a (a.id)}
+									<option value={a.id}>{a.name}</option>
+								{/each}
+							</select>
+						</label>
+						<a class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
+							{$_('common.manage_accounts')}
+						</a>
+					</div>
 					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('mortgage.form_start')}</span>
 						<input

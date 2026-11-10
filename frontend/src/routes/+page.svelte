@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
@@ -240,6 +241,9 @@
 					{/each}
 				</select>
 			</label>
+			<a class="pb-1.5 text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
+				{$_('common.manage_accounts')}
+			</a>
 		</div>
 
 		{#if loading && !summary}

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { _ } from 'svelte-i18n';
 	import { login, user } from '#lib/auth/client';
@@ -348,6 +349,9 @@
 							<option value={a.id}>{a.name}</option>
 						{/each}
 					</select>
+					<a class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
+						{$_('common.manage_accounts')}
+					</a>
 				</div>
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.category_label')}</span>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
@@ -370,6 +371,9 @@
 				{#if accounts.length === 0 && !loadError}
 					<p class="pb-1.5 text-xs text-zinc-500 dark:text-zinc-400">{$_('imports.no_accounts')}</p>
 				{/if}
+				<a class="pb-1.5 text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
+					{$_('common.manage_accounts')}
+				</a>
 			</div>
 
 			<!-- svelte-ignore a11y_no_static_element_interactions -->

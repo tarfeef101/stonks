@@ -20,6 +20,15 @@
 		patchCategory,
 		type Category
 	} from '#lib/api/categories';
+	import {
+		ACCOUNT_TYPES,
+		createAccount,
+		deleteAccount,
+		listAccounts,
+		patchAccount,
+		type Account,
+		type AccountType
+	} from '#lib/api/accounts';
 	import { CURRENCIES, loadSettings, settings, updateSettings } from '#lib/settings';
 
 	// LLM credentials (step 5.6): at most one credential per provider
@@ -202,6 +211,141 @@
 		}
 	}
 
+	// Accounts (round 4): the money transactions, imports, and mortgages
+	// point at. `default_schema_id` is import-specific (the schema an
+	// import job applies by default) and deliberately not edited here.
+	// Deleting an account removes its transactions, import jobs, and
+	// mortgages (FKs ON DELETE CASCADE) — the confirm warns about it.
+	let accounts = $state<Account[]>([]);
+	let accountsLoading = $state(true);
+	let accountsError = $state<string | null>(null);
+
+	let newAccountName = $state('');
+	let newAccountType = $state<AccountType>('bank');
+	let newAccountSubtype = $state('');
+	let newAccountCurrency = $state('');
+	let accountAdding = $state(false);
+	let accountAddError = $state<string | null>(null);
+
+	let accountEditingId: string | null = $state(null);
+	let accountEditName = $state('');
+	let accountEditType = $state<AccountType>('bank');
+	let accountEditSubtype = $state('');
+	let accountEditCurrency = $state('');
+	let accountSaving = $state(false);
+	let accountSaveError = $state<string | null>(null);
+
+	let accountRemovingId: string | null = $state(null);
+	let accountRemoveError = $state<string | null>(null);
+
+	async function loadAccounts(): Promise<void> {
+		accountsLoading = true;
+		accountsError = null;
+		try {
+			accounts = await listAccounts();
+		} catch (e) {
+			accountsError = envelopeMessage(e);
+		} finally {
+			accountsLoading = false;
+		}
+	}
+
+	/** Prefills the new-account currency with the settings default until
+	 * the user picks one (the select has no empty option, so a choice
+	 * sticks). */
+	$effect(() => {
+		if (newAccountCurrency === '') {
+			newAccountCurrency = $settings?.default_currency ?? '';
+		}
+	});
+
+	async function addAccount(): Promise<void> {
+		const name = newAccountName.trim();
+		if (accountAdding || name === '' || newAccountCurrency === '') return;
+		accountAdding = true;
+		accountAddError = null;
+		try {
+			const subtype = newAccountSubtype.trim();
+			const acct = await createAccount({
+				name,
+				type: newAccountType,
+				currency: newAccountCurrency,
+				subtype: subtype === '' ? undefined : subtype
+			});
+			accounts = [...accounts, acct];
+			newAccountName = '';
+			newAccountSubtype = '';
+			newAccountCurrency = '';
+		} catch (e) {
+			accountAddError = envelopeMessage(e);
+		} finally {
+			accountAdding = false;
+		}
+	}
+
+	function startEditAccount(acct: Account): void {
+		accountEditingId = acct.id;
+		accountEditName = acct.name;
+		accountEditType = acct.type as AccountType;
+		accountEditSubtype = acct.subtype ?? '';
+		accountEditCurrency = acct.currency;
+		accountSaveError = null;
+	}
+
+	async function commitAccountEdit(): Promise<void> {
+		const name = accountEditName.trim();
+		if (accountSaving || accountEditingId === null || name === '') return;
+		accountSaving = true;
+		accountSaveError = null;
+		try {
+			const subtype = accountEditSubtype.trim();
+			const updated = await patchAccount(accountEditingId, {
+				name,
+				type: accountEditType,
+				currency: accountEditCurrency,
+				// Tri-state: an empty field clears the subtype.
+				subtype: subtype === '' ? null : subtype
+			});
+			accounts = accounts.map((a) => (a.id === updated.id ? updated : a));
+			accountEditingId = null;
+		} catch (e) {
+			accountSaveError = envelopeMessage(e);
+		} finally {
+			accountSaving = false;
+		}
+	}
+
+	function cancelEditAccount(): void {
+		accountEditingId = null;
+		accountSaveError = null;
+	}
+
+	async function removeAccount(acct: Account): Promise<void> {
+		if (!confirm($_('settings.acct_delete_confirm', { values: { name: acct.name } }))) return;
+		accountRemovingId = acct.id;
+		accountRemoveError = null;
+		try {
+			await deleteAccount(acct.id);
+			accounts = accounts.filter((a) => a.id !== acct.id);
+		} catch (e) {
+			accountRemoveError = envelopeMessage(e);
+		} finally {
+			accountRemovingId = null;
+		}
+	}
+
+	/** The type's display label (settings.acct_type.<type>). */
+	function accountTypeLabel(t: string): string {
+		return $_('settings.acct_type.' + t);
+	}
+
+	/** The currency picker offers the curated list; a currency outside it
+	 * (the backend accepts any ISO-4217 code) is kept as an extra option
+	 * so it can't be lost. */
+	function accountCurrencyOptions(extra?: string): string[] {
+		return extra && !CURRENCIES.includes(extra) ? [extra, ...CURRENCIES] : CURRENCIES;
+	}
+
 	/** The stored row for the selected provider, if any. */
 	const stored = $derived(credentials.find((c) => c.provider === provider) ?? null);
 
@@ -325,6 +469,7 @@
 		// notice below; fail-open (a failed load just hides it).
 		void loadSettings();
 		void loadCategories();
+		void loadAccounts();
 		void listLLMCredentials()
 			.then((rows) => {
 				credentials = rows;
@@ -632,6 +777,187 @@
 				</div>
 				{#if addError}
 					<p class="text-sm text-red-600 dark:text-red-400">{addError}</p>
+				{/if}
+			{/if}
+		</div>
+
+		<div
+			id="accounts"
+			class="space-y-4 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5"
+		>
+			<h2 class="text-lg font-medium">{$_('settings.accounts_title')}</h2>
+			<p class="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">{$_('settings.accounts_note')}</p>
+
+			{#if accountsLoading}
+				<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('settings.acct_loading')}</p>
+			{:else}
+				{#if accountsError}
+					<p class="text-sm text-red-600 dark:text-red-400">{accountsError}</p>
+				{:else}
+					<ul class="overflow-hidden rounded-md border border-zinc-100 dark:border-zinc-800">
+						{#each accounts as acct (acct.id)}
+							<li
+								class="flex flex-wrap items-center gap-3 border-b border-zinc-100 dark:border-zinc-800 px-3 py-2 last:border-b-0"
+							>
+								{#if accountEditingId === acct.id}
+									<input
+										class="w-44 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+										maxlength="255"
+										value={accountEditName}
+										oninput={(e) => {
+											accountEditName = e.currentTarget.value;
+											accountSaveError = null;
+										}}
+										onkeydown={(e) => {
+											if (e.key === 'Enter') void commitAccountEdit();
+											if (e.key === 'Escape') cancelEditAccount();
+										}}
+									/>
+									<select
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+										value={accountEditType}
+										onchange={(e) => (accountEditType = e.currentTarget.value as AccountType)}
+									>
+										{#each ACCOUNT_TYPES as t (t)}
+											<option value={t}>{accountTypeLabel(t)}</option>
+										{/each}
+									</select>
+									<select
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+										value={accountEditCurrency}
+										onchange={(e) => (accountEditCurrency = e.currentTarget.value)}
+									>
+										{#each accountCurrencyOptions(accountEditCurrency) as code (code)}
+											<option value={code}>{code}</option>
+										{/each}
+									</select>
+									<input
+										class="w-32 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+										maxlength="64"
+										placeholder={$_('settings.acct_subtype_placeholder')}
+										value={accountEditSubtype}
+										oninput={(e) => {
+											accountEditSubtype = e.currentTarget.value;
+											accountSaveError = null;
+										}}
+										onkeydown={(e) => {
+											if (e.key === 'Enter') void commitAccountEdit();
+											if (e.key === 'Escape') cancelEditAccount();
+										}}
+									/>
+									<div class="flex gap-2">
+										<button
+											class="rounded-md bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
+											disabled={accountSaving || accountEditName.trim() === ''}
+											type="button"
+											onclick={() => void commitAccountEdit()}
+										>
+											{$_('settings.save')}
+										</button>
+										<button
+											class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+											type="button"
+											onclick={() => cancelEditAccount()}
+										>
+											{$_('settings.cancel')}
+										</button>
+									</div>
+									{#if accountSaveError}
+										<p class="w-full text-xs text-red-600 dark:text-red-400">{accountSaveError}</p>
+									{/if}
+								{:else}
+									<span class="flex-1 text-sm text-zinc-900 dark:text-zinc-100">
+										{acct.name}
+										<span class="text-zinc-500 dark:text-zinc-400">
+											({accountTypeLabel(acct.type)} · {acct.currency}{#if acct.subtype}
+												· {acct.subtype}
+											{/if})</span>
+									</span>
+									<div class="flex gap-2">
+										<button
+											class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+											type="button"
+											onclick={() => startEditAccount(acct)}
+										>
+											{$_('settings.acct_edit')}
+										</button>
+										<button
+											class="rounded-md border border-red-300 dark:border-red-900 px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 disabled:opacity-50"
+											disabled={accountRemovingId !== null}
+											type="button"
+											onclick={() => void removeAccount(acct)}
+										>
+											{accountRemovingId === acct.id ? $_('settings.acct_deleting') : $_('settings.acct_delete')}
+										</button>
+									</div>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+					{#if accountRemoveError}
+						<p class="text-sm text-red-600 dark:text-red-400">{accountRemoveError}</p>
+					{/if}
+				{/if}
+
+				<div class="flex flex-wrap items-end gap-3">
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('settings.acct_add_label')}</span>
+						<input
+							class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+							maxlength="255"
+							placeholder={$_('settings.acct_add_placeholder')}
+							value={newAccountName}
+							oninput={(e) => {
+								newAccountName = e.currentTarget.value;
+								accountAddError = null;
+							}}
+							onkeydown={(e) => {
+								if (e.key === 'Enter') void addAccount();
+							}}
+						/>
+					</label>
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('settings.acct_type_label')}</span>
+						<select
+							class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+							bind:value={newAccountType}
+						>
+							{#each ACCOUNT_TYPES as t (t)}
+								<option value={t}>{accountTypeLabel(t)}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('settings.acct_currency_label')}</span>
+						<select
+							class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+							bind:value={newAccountCurrency}
+						>
+							{#each accountCurrencyOptions(newAccountCurrency) as code (code)}
+								<option value={code}>{code}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('settings.acct_subtype_label')}</span>
+						<input
+							class="w-40 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+							maxlength="64"
+							placeholder={$_('settings.acct_subtype_placeholder')}
+							bind:value={newAccountSubtype}
+						/>
+					</label>
+					<button
+						class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
+						disabled={accountAdding || newAccountName.trim() === '' || newAccountCurrency === ''}
+						type="button"
+						onclick={() => void addAccount()}
+					>
+						{accountAdding ? $_('settings.acct_adding') : $_('settings.acct_add')}
+					</button>
+				</div>
+				{#if accountAddError}
+					<p class="text-sm text-red-600 dark:text-red-400">{accountAddError}</p>
 				{/if}
 			{/if}
 		</div>

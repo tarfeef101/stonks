@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
 	import { ApiError } from '#lib/api/client';
@@ -136,18 +137,23 @@
 		}}
 	>
 		<div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-			<label class="block text-sm">
-				<span class="mb-1 block font-medium">{$_('manual_entry.account_label')}</span>
-				<select bind:value={accountId} class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5">
-					<option value="">{$_('manual_entry.account_placeholder')}</option>
-					{#each accounts as a (a.id)}
-						<option value={a.id}>{a.name} ({a.currency})</option>
-					{/each}
-				</select>
-				{#if accounts.length === 0 && !loadError}
-					<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">{$_('manual_entry.no_accounts')}</span>
-				{/if}
-			</label>
+			<div class="block text-sm">
+				<label class="block text-sm">
+					<span class="mb-1 block font-medium">{$_('manual_entry.account_label')}</span>
+					<select bind:value={accountId} class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5">
+						<option value="">{$_('manual_entry.account_placeholder')}</option>
+						{#each accounts as a (a.id)}
+							<option value={a.id}>{a.name} ({a.currency})</option>
+						{/each}
+					</select>
+					{#if accounts.length === 0 && !loadError}
+						<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">{$_('manual_entry.no_accounts')}</span>
+					{/if}
+				</label>
+				<a class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
+					{$_('common.manage_accounts')}
+				</a>
+			</div>
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('manual_entry.category_label')}</span>
 				<select
