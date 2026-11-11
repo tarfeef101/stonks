@@ -503,14 +503,41 @@
 
 	// --- Actions ----------------------------------------------------------
 
-	function onAccountsChange(e: Event): void {
-		const sel = e.currentTarget as HTMLSelectElement;
-		explore = { ...explore, account: [...sel.selectedOptions].map((o) => o.value) };
+	// Bumped on every multi-select toggle so the checkbox rows re-mount and
+	// the DOM can never drift from state (e.g. unchecking the last explicit
+	// id canonicalizes to the empty selection, which displays as all
+	// checked — without the re-mount the just-unchecked box would go stale).
+	let selectionTick = $state(0);
+
+	// "Default all selected" is display-only: the state contract is
+	// unchanged (empty selection = any). An empty selection renders every
+	// option checked; unchecking from there materializes the complement,
+	// and re-selecting the full set canonicalizes back to the empty
+	// selection so URLs stay clean and later-created accounts/categories
+	// are included automatically.
+	function toggleSelection(current: string[], all: string[], id: string, checked: boolean): string[] {
+		let next: string[];
+		if (checked) {
+			next = current.includes(id) ? current : [...current, id];
+		} else if (current.length === 0) {
+			next = all.filter((v) => v !== id);
+		} else {
+			next = current.filter((v) => v !== id);
+		}
+		if (all.length > 0 && next.length === all.length && all.every((v) => next.includes(v))) {
+			return [];
+		}
+		return next;
 	}
 
-	function onCategoriesChange(e: Event): void {
-		const sel = e.currentTarget as HTMLSelectElement;
-		explore = { ...explore, category: [...sel.selectedOptions].map((o) => o.value) };
+	function toggleAccount(id: string, checked: boolean): void {
+		selectionTick++;
+		explore = { ...explore, account: toggleSelection(explore.account, accounts.map((a) => a.id), id, checked) };
+	}
+
+	function toggleCategory(id: string, checked: boolean): void {
+		selectionTick++;
+		explore = { ...explore, category: toggleSelection(explore.category, ['none', ...categories.map((c) => c.id)], id, checked) };
 	}
 
 	function resetFilters(): void {
@@ -583,33 +610,55 @@
 				</label>
 				<div class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.account_label')}</span>
-					<select
-						class="h-16 w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
-						multiple
-						value={explore.account}
-						onchange={onAccountsChange}
+					<div
+						class="h-24 min-h-16 w-56 resize-y overflow-y-auto rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
 					>
-						{#each accounts as a (a.id)}
-							<option value={a.id}>{a.name}</option>
-						{/each}
-					</select>
+						{#key selectionTick}
+							{#each accounts as a (a.id)}
+								<label class="flex cursor-pointer items-center gap-2 py-0.5">
+									<input
+										type="checkbox"
+										class="accent-zinc-700 dark:accent-zinc-300"
+										checked={explore.account.length === 0 || explore.account.includes(a.id)}
+										onchange={(e) => toggleAccount(a.id, (e.currentTarget as HTMLInputElement).checked)}
+									/>
+									<span class="truncate">{a.name}</span>
+								</label>
+							{/each}
+						{/key}
+					</div>
 					<a class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
 						{$_('common.manage_accounts')}
 					</a>
 				</div>
 				<div class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.category_label')}</span>
-					<select
-						class="h-16 w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
-						multiple
-						value={explore.category}
-						onchange={onCategoriesChange}
+					<div
+						class="h-24 min-h-16 w-56 resize-y overflow-y-auto rounded-md border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
 					>
-						<option value="none">{$_('explore.category_uncategorized')}</option>
-						{#each categories as c (c.id)}
-							<option value={c.id}>{c.name}</option>
-						{/each}
-					</select>
+						{#key selectionTick}
+							<label class="flex cursor-pointer items-center gap-2 py-0.5">
+								<input
+									type="checkbox"
+									class="accent-zinc-700 dark:accent-zinc-300"
+									checked={explore.category.length === 0 || explore.category.includes('none')}
+									onchange={(e) => toggleCategory('none', (e.currentTarget as HTMLInputElement).checked)}
+								/>
+								<span class="truncate">{$_('explore.category_uncategorized')}</span>
+							</label>
+							{#each categories as c (c.id)}
+								<label class="flex cursor-pointer items-center gap-2 py-0.5">
+									<input
+										type="checkbox"
+										class="accent-zinc-700 dark:accent-zinc-300"
+										checked={explore.category.length === 0 || explore.category.includes(c.id)}
+										onchange={(e) => toggleCategory(c.id, (e.currentTarget as HTMLInputElement).checked)}
+									/>
+									<span class="truncate">{c.name}</span>
+								</label>
+							{/each}
+						{/key}
+					</div>
 				</div>
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_(explore.sign === 'spending' ? 'explore.min_spend_label' : explore.sign === 'income' ? 'explore.min_income_label' : 'explore.min_label')}</span>
