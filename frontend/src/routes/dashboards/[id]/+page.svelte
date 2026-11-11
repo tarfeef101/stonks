@@ -660,7 +660,11 @@
 		     height selects, move, edit, delete); the right edge,
 		     bottom edge and corner are drag-resize handles (width /
 		     height / both); the body is the live Explore view, the
-		     sanitized markdown, or the markdown edit textarea. -->
+		     sanitized markdown, or the markdown edit textarea.
+		     Nameless cards render headless at rest (round 13) —
+		     their head is sr-only until the card is hovered or
+		     focused, so the body — a markdown card's own `# Title`
+		     heading foremost — fills the whole card. -->
 		<div
 			class="relative grid grid-cols-1 gap-4 md:grid-cols-12 md:auto-rows-[120px] {dragMove !== null
 				? 'rounded-lg ring-2 ring-sky-500/40'
@@ -678,29 +682,44 @@
 				     from the positional count. -->
 				<div
 					data-widget-id={w.id}
-					class="relative flex flex-col rounded-lg {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {moving
+					class="group relative flex flex-col rounded-lg {spanClass(fp.span)} {rowSpanClass(fp.rowSpan)} {moving
 						? 'border-2 border-dashed border-sky-500/60 bg-sky-500/5'
 						: dragging?.id === w.id
 							? 'border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 ring-1 ring-sky-500/70'
 							: 'border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900'}"
 				>
-					<!-- Compact head (round 7): name (truncated) + kind
+					<!-- Compact head (rounds 7 + 13): name (truncated) + kind
 					     badge, then the ⋯ overflow menu — the controls no
 					     longer bleed out of a narrow card. In edit mode the
 					     name input + Save / Cancel take the right side and
 					     the ⋯ button hides. The row is ALSO the round-8
 					     drag-move surface (cursor-grab; startMove ignores
-					     presses on its interactive children). -->
+					     presses on its interactive children). A NAMELESS card
+					     keeps the head out of the flow at rest (sr-only —
+					     the ⋯ stays keyboard-reachable) so its body — a
+					     markdown card's own `# Title` heading foremost —
+					     fills the whole card; the head slides back in when
+					     the card is hovered or has focus (group-hover /
+					     group-focus-within on the root), or whenever its
+					     menu is open / it is being edited. The row's
+					     padding lives on its children, not the row:
+					     the not-sr-only reveal sets padding:0 on the
+					     row itself, which would beat the row's own
+					     px/py. -->
 					<div
-						class="flex cursor-grab touch-none items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 px-3 py-1.5 active:cursor-grabbing {moving
+						class="flex cursor-grab touch-none items-center gap-2 border-b border-zinc-200 dark:border-zinc-800 active:cursor-grabbing {moving
 							? 'hidden'
-							: ''}"
+							: w.name === ''
+								? menuId === w.id || editingId === w.id
+									? ''
+									: 'sr-only group-hover:not-sr-only group-focus-within:not-sr-only'
+								: ''}"
 						role="group"
 						aria-label={$_('dashboards.widget_drag_move')}
 						title={$_('dashboards.widget_drag_move')}
 						onpointerdown={(e) => startMove(e, w)}
 					>
-						<div class="flex min-w-0 flex-1 items-center gap-2">
+						<div class="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5">
 							{#if editingId === w.id}
 								<input
 									class="min-w-0 flex-1 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1 text-sm"
@@ -730,147 +749,149 @@
 								</span>
 							{/if}
 						</div>
-						{#if editingId === w.id}
-							<button
-								class="shrink-0 font-medium text-emerald-600 dark:text-emerald-400 underline"
-								type="button"
-								onclick={() => void saveEdit(w)}
-							>
-								{$_('dashboards.widget_save')}
-							</button>
-							<button
-								class="shrink-0 font-medium text-zinc-600 dark:text-zinc-400 underline"
-								type="button"
-								onclick={cancelEdit}
-							>
-								{$_('dashboards.widget_cancel')}
-							</button>
-						{:else}
-							<div class="relative shrink-0">
+						<div class="flex shrink-0 items-center gap-2 py-1.5 pr-3">
+							{#if editingId === w.id}
 								<button
-									class="rounded-md px-1.5 py-0.5 text-base leading-none text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+									class="shrink-0 font-medium text-emerald-600 dark:text-emerald-400 underline"
 									type="button"
-									aria-label={$_('dashboards.widget_menu')}
-									aria-expanded={menuId === w.id}
-									onclick={() => (menuId = menuId === w.id ? null : w.id)}
+									onclick={() => void saveEdit(w)}
 								>
-									⋯
+									{$_('dashboards.widget_save')}
 								</button>
-								{#if menuId === w.id}
-									<!-- Click-catcher: any click outside the panel
-									     closes the menu (z-20, below the z-30 panel). -->
-									<div
-										class="fixed inset-0 z-20"
-										aria-hidden="true"
-										onclick={() => (menuId = null)}
-									></div>
-									<div
-										class="absolute right-0 top-full z-30 mt-1 w-48 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 py-1 shadow-lg"
-										role="menu"
+								<button
+									class="shrink-0 font-medium text-zinc-600 dark:text-zinc-400 underline"
+									type="button"
+									onclick={cancelEdit}
+								>
+									{$_('dashboards.widget_cancel')}
+								</button>
+							{:else}
+								<div class="relative shrink-0">
+									<button
+										class="rounded-md px-1.5 py-0.5 text-base leading-none text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+										type="button"
+										aria-label={$_('dashboards.widget_menu')}
+										aria-expanded={menuId === w.id}
+										onclick={() => (menuId = menuId === w.id ? null : w.id)}
 									>
-										{#if w.kind === 'explore'}
-											<a
-												href={resolve('/explore') + '?' + serializeStateForLink(parseState(w.content))}
-												class="block px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-												role="menuitem"
-												onclick={() => (menuId = null)}
+										⋯
+									</button>
+									{#if menuId === w.id}
+										<!-- Click-catcher: any click outside the panel
+										     closes the menu (z-20, below the z-30 panel). -->
+										<div
+											class="fixed inset-0 z-20"
+											aria-hidden="true"
+											onclick={() => (menuId = null)}
+										></div>
+										<div
+											class="absolute right-0 top-full z-30 mt-1 w-48 rounded-md border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 py-1 shadow-lg"
+											role="menu"
+										>
+											{#if w.kind === 'explore'}
+												<a
+													href={resolve('/explore') + '?' + serializeStateForLink(parseState(w.content))}
+													class="block px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+													role="menuitem"
+													onclick={() => (menuId = null)}
+												>
+													{$_('dashboards.widget_open_explore')}
+												</a>
+												<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
+											{/if}
+											<label
+												class="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300"
 											>
-												{$_('dashboards.widget_open_explore')}
-											</a>
+												{$_('dashboards.widget_width')}
+												<select
+													class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5 text-xs"
+													value={fp.span}
+													aria-label={$_('dashboards.widget_width')}
+													onchange={(e) => {
+														menuId = null;
+														void resize(w, Number(e.currentTarget.value));
+													}}
+												>
+													{#each WIDTH_OPTIONS as n (n)}
+														<option value={n}>{$_('dashboards.size_n', { values: { n } })}</option>
+													{/each}
+												</select>
+											</label>
+											<label
+												class="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300"
+											>
+												{$_('dashboards.widget_height')}
+												<select
+													class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5 text-xs"
+													value={fp.rowSpan}
+													aria-label={$_('dashboards.widget_height')}
+													onchange={(e) => {
+														menuId = null;
+														void resizeHeight(w, Number(e.currentTarget.value));
+													}}
+												>
+													{#each HEIGHT_OPTIONS as n (n)}
+														<option value={n}>{$_('dashboards.height_n', { values: { n } })}</option>
+													{/each}
+												</select>
+											</label>
 											<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
-										{/if}
-										<label
-											class="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300"
-										>
-											{$_('dashboards.widget_width')}
-											<select
-												class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5 text-xs"
-												value={fp.span}
-												aria-label={$_('dashboards.widget_width')}
-												onchange={(e) => {
+											<button
+												class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:text-zinc-400 disabled:hover:bg-transparent dark:disabled:text-zinc-600"
+												type="button"
+												role="menuitem"
+												aria-label={$_('dashboards.widget_move_left')}
+												disabled={widgets[0]?.id === w.id}
+												onclick={() => {
 													menuId = null;
-													void resize(w, Number(e.currentTarget.value));
+													void move(w, -1);
 												}}
 											>
-												{#each WIDTH_OPTIONS as n (n)}
-													<option value={n}>{$_('dashboards.size_n', { values: { n } })}</option>
-												{/each}
-											</select>
-										</label>
-										<label
-											class="flex cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-300"
-										>
-											{$_('dashboards.widget_height')}
-											<select
-												class="rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-1.5 py-0.5 text-xs"
-												value={fp.rowSpan}
-												aria-label={$_('dashboards.widget_height')}
-												onchange={(e) => {
+												{$_('dashboards.widget_move_left')}
+											</button>
+											<button
+												class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:text-zinc-400 disabled:hover:bg-transparent dark:disabled:text-zinc-600"
+												type="button"
+												role="menuitem"
+												aria-label={$_('dashboards.widget_move_right')}
+												disabled={widgets.at(-1)?.id === w.id}
+												onclick={() => {
 													menuId = null;
-													void resizeHeight(w, Number(e.currentTarget.value));
+													void move(w, 1);
 												}}
 											>
-												{#each HEIGHT_OPTIONS as n (n)}
-													<option value={n}>{$_('dashboards.height_n', { values: { n } })}</option>
-												{/each}
-											</select>
-										</label>
-										<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
-										<button
-											class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:text-zinc-400 disabled:hover:bg-transparent dark:disabled:text-zinc-600"
-											type="button"
-											role="menuitem"
-											aria-label={$_('dashboards.widget_move_left')}
-											disabled={widgets[0]?.id === w.id}
-											onclick={() => {
-												menuId = null;
-												void move(w, -1);
-											}}
-										>
-											{$_('dashboards.widget_move_left')}
-										</button>
-										<button
-											class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:text-zinc-400 disabled:hover:bg-transparent dark:disabled:text-zinc-600"
-											type="button"
-											role="menuitem"
-											aria-label={$_('dashboards.widget_move_right')}
-											disabled={widgets.at(-1)?.id === w.id}
-											onclick={() => {
-												menuId = null;
-												void move(w, 1);
-											}}
-										>
-											{$_('dashboards.widget_move_right')}
-										</button>
-										<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
-										<button
-											class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-											type="button"
-											role="menuitem"
-											aria-label={$_('dashboards.widget_edit')}
-											onclick={() => {
-												menuId = null;
-												startEdit(w);
-											}}
-										>
-											{$_('dashboards.widget_edit')}
-										</button>
-										<button
-											class="block w-full px-3 py-1.5 text-left text-sm text-red-600 dark:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-											type="button"
-											role="menuitem"
-											aria-label={$_('dashboards.widget_delete')}
-											onclick={() => {
-												menuId = null;
-												void removeWidget(w);
-											}}
-										>
-											{$_('dashboards.widget_delete')}
-										</button>
-									</div>
-								{/if}
-							</div>
-						{/if}
+												{$_('dashboards.widget_move_right')}
+											</button>
+											<div class="my-1 border-t border-zinc-200 dark:border-zinc-800"></div>
+											<button
+												class="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+												type="button"
+												role="menuitem"
+												aria-label={$_('dashboards.widget_edit')}
+												onclick={() => {
+													menuId = null;
+													startEdit(w);
+												}}
+											>
+												{$_('dashboards.widget_edit')}
+											</button>
+											<button
+												class="block w-full px-3 py-1.5 text-left text-sm text-red-600 dark:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+												type="button"
+												role="menuitem"
+												aria-label={$_('dashboards.widget_delete')}
+												onclick={() => {
+													menuId = null;
+													void removeWidget(w);
+												}}
+											>
+												{$_('dashboards.widget_delete')}
+											</button>
+										</div>
+									{/if}
+								</div>
+							{/if}
+						</div>
 					</div>
 					<div class="min-h-0 flex-1 overflow-y-auto p-3 {moving ? 'hidden' : ''}">
 						{#if editingId === w.id && w.kind === 'markdown'}
