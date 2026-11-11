@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { _ } from 'svelte-i18n';
@@ -19,7 +20,12 @@
 		deleteSavedView,
 		type SavedView
 	} from '#lib/api/savedviews';
-	import { parseState, serializeState, type ExploreState } from '#lib/explore/state';
+	import {
+		EXPLORE_STATE_KEY,
+		parseState,
+		serializeState,
+		type ExploreState
+	} from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
 	// Explore page (step 6.4, refactored in 6.5 C2): a filterable,
@@ -42,13 +48,6 @@
 	// House pattern: {#if !$user} sign-in gate, one $effect per concern
 	// (catalogs / URL), a seq guard drops stale responses,
 	// envelopeMessage carves the 3.1 envelope out of ApiError.
-
-	/** The page-scoped "last settings" (house ftrk- prefix): the full
-	 * canonical state string this page last held — a bare /explore
-	 * reopens it. The URL-sync effect rewrites it on every change;
-	 * Reset restores the defaults, which serialize to '' and are
-	 * rewritten by the same effect. */
-	const EXPLORE_STATE_KEY = 'ftrk-explore-state';
 
 	/** The page's state: URL params WIN (a shared/explicit link is
 	 * deterministic — it never merges with the remembered settings);
@@ -181,6 +180,29 @@
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
 	let saveSeq = 0;
 
+	// The round-17 handoff: a dashboard's "Create new view" navigates
+	// here as /explore?save_to=<id>. The panel then opens pre-aimed at
+	// that dashboard — the target is LOCKED (the select and the
+	// new-dashboard path don't render) — and saving creates the named
+	// saved view AND the widget (a copy of the state) in it, then
+	// returns the caller to the dashboard. The URL-sync effect strips
+	// the param from the address bar after load, so the handoff lives
+	// only in this const for the page's lifetime.
+	const saveToId = new URLSearchParams(window.location.search).get('save_to') ?? '';
+	let handoffArmed = false;
+	$effect(() => {
+		if (saveToId === '' || handoffArmed) return;
+		if ($user === null) return; // not signed in yet — arm on sign-in
+		handoffArmed = true;
+		saveName = '';
+		saveError = null;
+		savePanel = true;
+		saveDashId = saveToId;
+		// For the target's NAME (the muted "saving to" line) — saving
+		// itself needs only the id, so a failed load doesn't block.
+		void loadSaveDashboards();
+	});
+
 	/** Loads the caller's dashboards for the panel's select (one load
 	 * per open; stale loads are dropped). A failed load leaves the
 	 * panel on the create-a-dashboard path — saving still works. */
@@ -213,9 +235,13 @@
 		savePanel = false;
 	}
 
-	/** Saves the current view as a widget: into the selected
-	 * dashboard, or — when there are none (or the list failed to
-	 * load) — into a freshly created one named newDashName. */
+	/** Saves the current view. The round-17 handoff (saveToId set)
+	 * creates the named saved view AND the widget — the view's name,
+	 * a COPY of the state — in the target dashboard, then returns the
+	 * caller to it (the id came from the URL, so no list lookup).
+	 * Otherwise the widget goes into the selected dashboard, or —
+	 * when there are none (or the list failed to load) — into a
+	 * freshly created one named newDashName. */
 	async function saveToDashboard(): Promise<void> {
 		if (saveTimer !== null) {
 			clearTimeout(saveTimer);
@@ -223,13 +249,25 @@
 		}
 		saveNote = null;
 		saveError = null;
+		const state = serializeState(explore);
 		try {
+			if (saveToId !== '') {
+				await createSavedView({ name: saveName, state });
+				await createWidget(saveToId, {
+					name: saveName,
+					kind: 'explore',
+					content: state,
+					span: 4
+				});
+				await goto(`/dashboards/${saveToId}`);
+				return;
+			}
 			const target = saveDashboards.find((d) => d.id === saveDashId);
 			const dash = target ?? (await createDashboard(newDashName));
 			await createWidget(dash.id, {
 				name: saveName,
 				kind: 'explore',
-				content: serializeState(explore),
+				content: state,
 				span: 4
 			});
 			saveNote = $_('explore.saved', { values: { name: dash.name } });
@@ -669,11 +707,29 @@
 			{#if savePanel}
 				<!-- The save panel: the dashboard select (or a
 				     new-dashboard name when the caller has none),
-				     the widget name, save / cancel. -->
+				     the widget name, save / cancel. The round-17
+				     handoff (?save_to=<id>) locks the target:
+				     the select/new-dashboard block NEVER renders,
+				     replaced by a muted "saving to" line
+				     (shown once the name has loaded — a
+				     list failure doesn't block saving,
+				     which needs only the id), and saving
+				     also creates the named saved view,
+				     then returns to the dashboard. -->
+				{@const handoff = saveToId !== ''}
+				{@const lockedDash = handoff
+					? saveDashboards.find((d) => d.id === saveToId)
+					: undefined}
 				<div
 					class="mt-4 flex flex-wrap items-end gap-3 border-t border-zinc-200 dark:border-zinc-800 pt-4"
 				>
-					{#if saveDashboards.length > 0}
+					{#if handoff}
+						{#if lockedDash !== undefined}
+							<p class="self-center text-sm text-zinc-500 dark:text-zinc-400">
+								{$_('explore.save_handoff_target', { values: { name: lockedDash.name } })}
+							</p>
+						{/if}
+					{:else if saveDashboards.length > 0}
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('explore.save_dashboard')}</span>
 							<select

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { _ } from 'svelte-i18n';
@@ -17,9 +18,14 @@
 		type DashboardWidget,
 		type WidgetKind
 	} from '#lib/api/dashboards';
-	import { listSavedViews, createSavedView, type SavedView } from '#lib/api/savedviews';
+	import { listSavedViews, type SavedView } from '#lib/api/savedviews';
 	import { loadCatalogs } from '#lib/explore/catalogs';
-	import { parseState, serializeStateForLink, type Names } from '#lib/explore/state';
+	import {
+		EXPLORE_STATE_KEY,
+		parseState,
+		serializeStateForLink,
+		type Names
+	} from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
 	// Dashboard editor (rounds 6–7): one dashboard's 12-col × N-row
@@ -65,22 +71,26 @@
 	let draftName = $state('');
 	let draftContent = $state('');
 
+	// "Add a tile" (round 17): the titled box below the grid. At rest
+	// it is the title + one button; opened it is the title + ONE row —
+	// the tile picker, Add, Cancel. The picker's value: '' = nothing
+	// picked yet (Add is disabled), a saved view's id (the tile takes
+	// the view's name and a COPY of its stored state — a copy, not a
+	// reference: deleting the view later never breaks the tile),
+	// 'current' = quick-add the Explore page's remembered last view
+	// untitled (no saved view is created), 'newview' = hand off to
+	// /explore?save_to= (the caller builds the query, names and saves
+	// the view there; saving also creates the tile and returns),
+	// 'markdown' = a note — the ONLY choice that reveals fields below
+	// the row (a name + the content textarea). One saved-views list
+	// load per open; stale loads are dropped (a failed load leaves
+	// just the fixed choices — adding still works).
 	let adding = $state(false);
-	let addKind = $state<WidgetKind | null>(null);
+	let addChoice = $state('');
 	let addName = $state('');
 	let addContent = $state('');
 	let addError = $state<string | null>(null);
-
-	// The add card's saved-views picker (round 16): '' = no saved view
-	// (the default view — the old behavior), 'new' = create a NEW saved
-	// view first (named after the widget name, the default state) and
-	// then the widget, else the picked saved view's id — the widget's
-	// content is a COPY of its stored state (a copy, not a reference:
-	// deleting the view later never breaks the widget). One list load
-	// per add-card open; stale loads are dropped (a failed load leaves
-	// the picker on the "no saved view" path — adding still works).
 	let addSavedViews = $state<SavedView[]>([]);
-	let addSavedView = $state('');
 	let addViewsSeq = 0;
 
 	// --- Load --------------------------------------------------------------
@@ -593,27 +603,25 @@
 
 	// --- Add widget ----------------------------------------------------------
 
-	/** Opens the add-widget card with the kind preselected: "Explore
-	 * view" seeds the saved-views picker (its list loads async),
-	 * "Text (markdown)" also opens the content textarea. */
-	function startAdd(kind: WidgetKind): void {
+	/** Opens the "Add a tile" card: the single row with the picker
+	 * (its saved-views list loads async), Add and Cancel. */
+	function startAdd(): void {
 		adding = true;
-		addKind = kind;
+		addChoice = '';
 		addName = '';
 		addContent = '';
-		addSavedView = '';
 		addError = null;
-		if (kind === 'explore') void loadAddSavedViews();
+		void loadAddSavedViews();
 	}
 
+	/** Closes the card (the at-rest box returns). */
 	function cancelAdd(): void {
 		adding = false;
-		addKind = null;
 	}
 
-	/** Loads the caller's saved views for the add card's picker (one
-	 * load per open; stale loads are dropped). A failed load leaves
-	 * the picker on the "no saved view" path — adding still works. */
+	/** Loads the caller's saved views for the picker (one load per
+	 * open; stale loads are dropped). A failed load leaves just the
+	 * fixed choices — adding still works. */
 	async function loadAddSavedViews(): Promise<void> {
 		const s = ++addViewsSeq;
 		try {
@@ -626,47 +634,74 @@
 		}
 	}
 
-	/** The picker's select changed: a saved view pre-fills the widget
-	 * name with the view's own label; "new" and "none" clear it (the
-	 * user names the widget — for "new" that name is the new saved
-	 * view's name too). */
-	function onAddSavedViewChange(e: Event): void {
+	/** The picker's select changed. Only 'markdown' needs the name /
+	 * content fields — leaving it clears them so a stale note can't
+	 * leak into a later markdown tile. */
+	function onAddChoiceChange(e: Event): void {
 		const sel = e.currentTarget as HTMLSelectElement;
-		addSavedView = sel.value;
-		const sv = addSavedViews.find((x) => x.id === addSavedView);
-		addName = sv !== undefined ? sv.name : '';
+		addChoice = sel.value;
+		if (addChoice !== 'markdown') {
+			addName = '';
+			addContent = '';
+		}
 	}
 
-	/** Creates the widget from the add card (new widgets span 4
-	 * columns; row_span is left to the server's per-kind default —
-	 * explore 4, markdown 2); the returned row is appended to the
-	 * grid. The explore content is a COPY of the picked saved view's
-	 * state ('new' creates its saved view first — named after the
-	 * widget name, the default state — then the widget; "none" is
-	 * the old '' path). */
+	/** The Explore page's remembered last settings — its localStorage
+	 * last-settings (the same key the page writes on every change);
+	 * '' when none (the default view). A read failure is the same as
+	 * none. */
+	function rememberedExploreState(): string {
+		try {
+			return window.localStorage.getItem(EXPLORE_STATE_KEY) ?? '';
+		} catch {
+			// storage unavailable (private mode) — the default view
+			return '';
+		}
+	}
+
+	/** Adds the tile from the picker row (new tiles span 4 columns;
+	 * row_span is left to the server's per-kind default — explore 4,
+	 * markdown 2); the returned row is appended to the grid. 'newview'
+	 * is not an add at all — it hands off to /explore?save_to= and
+	 * returns (the caller saves the view + the tile there). */
 	async function submitAdd(): Promise<void> {
-		if (addKind === null) return;
+		if (addChoice === '') return;
 		addError = null;
 		try {
-			let content = '';
-			if (addKind === 'markdown') {
-				content = addContent;
-			} else if (addSavedView === 'new') {
-				// The typed name IS the new saved view's name (and
-				// the widget's); blank is a server 400, verbatim.
-				await createSavedView({ name: addName, state: '' });
-			} else if (addSavedView !== '') {
-				// The widget stores its OWN copy of the picked view's
-				// state — a copy, not a reference.
-				const sv = addSavedViews.find((x) => x.id === addSavedView);
-				if (sv !== undefined) content = sv.state;
+			if (addChoice === 'newview') {
+				// The Explore page's save panel opens pre-aimed at
+				// this dashboard; saving there creates the named
+				// saved view AND this tile, then returns the caller.
+				await goto(`/explore?save_to=${encodeURIComponent(dashboardId)}`);
+				return;
 			}
-			const w = await createWidget(dashboardId, {
-				name: addName,
-				kind: addKind,
-				content,
-				span: 4
-			});
+			let name = '';
+			let kind: WidgetKind;
+			let content = '';
+			if (addChoice === 'markdown') {
+				// The typed name (optional — blank renders the
+				// card's "Untitled") + the typed note.
+				name = addName;
+				kind = 'markdown';
+				content = addContent;
+			} else if (addChoice === 'current') {
+				// The Explore page's remembered last view (the
+				// default view when none): an untitled quick-add —
+				// no saved view is created.
+				kind = 'explore';
+				content = rememberedExploreState();
+			} else {
+				// A saved view: the tile takes the view's name and
+				// its OWN copy of the view's state — a copy, not a
+				// reference.
+				kind = 'explore';
+				const sv = addSavedViews.find((x) => x.id === addChoice);
+				if (sv !== undefined) {
+					name = sv.name;
+					content = sv.state;
+				}
+			}
+			const w = await createWidget(dashboardId, { name, kind, content, span: 4 });
 			widgets = [...widgets, w];
 			if (dashboard !== null)
 				dashboard = { ...dashboard, widget_count: dashboard.widget_count + 1 };
@@ -676,8 +711,9 @@
 		}
 	}
 
-	/** Auto-focuses the inline edit / add-name inputs when they appear. */
-	function autofocus(el: HTMLInputElement): void {
+	/** Auto-focuses the inline edit / add-name inputs and the tile
+	 * picker when they appear. */
+	function autofocus(el: HTMLInputElement | HTMLSelectElement): void {
 		el.focus();
 	}
 </script>
@@ -1065,34 +1101,45 @@
 				{/if}
 			</div>
 		{/if}
-		<!-- Add-widget row: a kind picker; picking one opens the add
-		     card (a name + — for markdown — a content textarea).
-		     New widgets span 4 columns. -->
+		<!-- "Add a tile" (round 17): the titled box below the grid.
+		     At rest it is the title + one button; opened it is the
+		     title + ONE row — the tile picker (the caller's saved
+		     views, "Add current view", "Create new view", "Markdown
+		     note"), Add, Cancel. Picking a saved view names the tile
+		     after the view and copies its state; "Add current view"
+		     quick-adds the Explore page's remembered view untitled;
+		     "Create new view" hands off to /explore?save_to=; only
+		     "Markdown note" reveals fields (name + textarea) below
+		     the row. New tiles span 4 columns. -->
 		{#if adding}
 			<div
 				class="space-y-3 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4"
 			>
+				<h2 class="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+					{$_('dashboards.widget_add_title')}
+				</h2>
 				{#if addError}
 					<p class="text-sm text-red-600 dark:text-red-400">{addError}</p>
 				{/if}
 				<div class="flex flex-wrap items-center gap-3">
-					<span class="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-						{addKind === 'explore'
-							? $_('dashboards.widget_add_explore')
-							: $_('dashboards.widget_add_markdown')}
-					</span>
-					<input
+					<select
 						class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm"
-						bind:value={addName}
-						placeholder={$_('dashboards.widget_name_placeholder')}
+						value={addChoice}
+						onchange={onAddChoiceChange}
 						use:autofocus
-						onkeydown={(e) => {
-							if (e.key === 'Enter') void submitAdd();
-						}}
-					/>
+					>
+						<option value="" disabled>{$_('dashboards.widget_add_choice')}</option>
+						{#each addSavedViews as sv (sv.id)}
+							<option value={sv.id}>{sv.name}</option>
+						{/each}
+						<option value="current">{$_('dashboards.widget_add_current')}</option>
+						<option value="newview">{$_('dashboards.widget_add_new_view')}</option>
+						<option value="markdown">{$_('dashboards.widget_add_markdown')}</option>
+					</select>
 					<button
 						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
 						type="button"
+						disabled={addChoice === ''}
 						onclick={() => void submitAdd()}
 					>
 						{$_('dashboards.widget_add_button')}
@@ -1105,59 +1152,41 @@
 						{$_('dashboards.widget_cancel')}
 					</button>
 				</div>
-				{#if addKind === 'explore'}
-					<!-- The saved-views picker (round 16): picking a
-					     saved view copies its state into the widget
-					     (the widget owns its copy — deleting the view
-					     later never breaks it); "new" creates a saved
-					     view first (named after the widget name, default
-					     state) and then the widget; "none" is the old
-					     default-view path. -->
-					<label class="block text-sm">
-						<span class="mb-1 block font-medium">
-							{$_('dashboards.widget_add_saved_view')}
-						</span>
-						<select
-							class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
-							value={addSavedView}
-							onchange={onAddSavedViewChange}
-						>
-							<option value="">{$_('dashboards.widget_add_saved_none')}</option>
-							<option value="new">{$_('dashboards.widget_add_saved_new')}</option>
-							{#each addSavedViews as sv (sv.id)}
-								<option value={sv.id}>{sv.name}</option>
-							{/each}
-						</select>
-					</label>
-				{/if}
-				{#if addKind === 'markdown'}
-					<textarea
-						class="w-full min-h-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1.5 font-mono text-xs"
-						bind:value={addContent}
-						placeholder={$_('dashboards.widget_content_placeholder')}
-					></textarea>
+				{#if addChoice === 'markdown'}
+					<!-- The only choice with fields below the row: a
+					     name (optional — blank renders "Untitled") + the
+					     markdown note. -->
+					<div class="space-y-3">
+						<input
+							class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm"
+							bind:value={addName}
+							placeholder={$_('dashboards.widget_name_placeholder')}
+							use:autofocus
+							onkeydown={(e) => {
+								if (e.key === 'Enter') void submitAdd();
+							}}
+						/>
+						<textarea
+							class="w-full min-h-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1.5 font-mono text-xs"
+							bind:value={addContent}
+							placeholder={$_('dashboards.widget_content_placeholder')}
+						></textarea>
+					</div>
 				{/if}
 			</div>
 		{:else}
 			<div
 				class="flex flex-wrap items-center gap-3 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4"
 			>
-				<span class="text-sm font-medium text-zinc-600 dark:text-zinc-400">
-					{$_('dashboards.widget_add')}
-				</span>
+				<h2 class="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+					{$_('dashboards.widget_add_title')}
+				</h2>
 				<button
 					class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm"
 					type="button"
-					onclick={() => startAdd('explore')}
+					onclick={startAdd}
 				>
-					{$_('dashboards.widget_add_explore')}
-				</button>
-				<button
-					class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm"
-					type="button"
-					onclick={() => startAdd('markdown')}
-				>
-					{$_('dashboards.widget_add_markdown')}
+					{$_('dashboards.widget_add_button')}
 				</button>
 			</div>
 		{/if}

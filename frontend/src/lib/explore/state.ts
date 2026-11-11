@@ -110,6 +110,12 @@ function isValidDate(s: string): boolean {
 	return d >= 1 && d <= max;
 }
 
+/** The Explore page's "last settings" localStorage key (house ftrk-
+ * prefix): the full canonical state string the page last held. The
+ * Explore page rewrites it on every change (a bare /explore reopens
+ * it); the dashboard's "add current view" tile reads it. */
+export const EXPLORE_STATE_KEY = 'ftrk-explore-state';
+
 /** Parses a query string WITHOUT a leading '?' into the full state.
  * Invalid values are silently dropped; unknown params are ignored; when a
  * param repeats, the first VALID occurrence wins (for `account`, every
