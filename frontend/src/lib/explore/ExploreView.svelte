@@ -22,6 +22,12 @@
 	// responses, envelopeMessage carves the 3.1 envelope out of ApiError,
 	// and a signed-out identity resets the view (the host page owns the
 	// sign-in prompt, the filter bar, and the view bar).
+	//
+	// Round 20: the optional rangeFrom/rangeTo props override the
+	// state's date range in the query — the dashboard page owns its
+	// cards' range (new tiles are saved without one, legacy tiles'
+	// dates are overridden at render time); hosts that pass nothing
+	// (the Explore page) keep the state's dates.
 
 	interface Props {
 		/** The Explore state to render (read-only — the view never
@@ -30,13 +36,24 @@
 		/** id -> display name maps for the category/account groupings
 		 * (rows carry only ids; a missing name falls back to the id). */
 		names: Names;
+		/** Optional date-range override (round 20): when PROVIDED —
+		 * even as '' (unbounded) — it replaces the state's `from` in
+		 * the query. The dashboard page owns its cards' range; the
+		 * Explore page passes nothing and keeps the state's dates.
+		 * A primitive prop on purpose: a {from,to} object prop would
+		 * churn identity on unrelated host re-renders and re-run
+		 * the fetch effect. */
+		rangeFrom?: string;
+		/** Optional date-range override (round 20), the `to` side —
+		 * see rangeFrom. */
+		rangeTo?: string;
 	}
 
 	// The prop is bound to a local named `explore` (the page's original
 	// local name — the moved code reads below stays verbatim): a local
 	// called `state` would shadow the $state rune ($state then parses
 	// as a store subscription to the prop).
-	let { state: explore, names }: Props = $props();
+	let { state: explore, names, rangeFrom, rangeTo }: Props = $props();
 
 	// The 3.2 endpoint caps limit at 100: page offset 0..900, stop early
 	// on a short page; 10 full pages = the 1000-row cap note.
@@ -182,12 +199,14 @@
 	}
 
 	// One load per (identity, filter fields) change. The eight filter
-	// fields are read synchronously below — those are the tracked deps.
+	// fields are read synchronously below — those are the tracked
+	// deps (plus the two range overrides, when provided: the page
+	// range wins over whatever dates the state carries).
 	$effect(() => {
 		const sub = $user?.profile.sub ?? null;
 		const snap: FilterFields = {
-			from: explore.from,
-			to: explore.to,
+			from: rangeFrom !== undefined ? rangeFrom : explore.from,
+			to: rangeTo !== undefined ? rangeTo : explore.to,
 			account: explore.account,
 			category: explore.category,
 			min: explore.min,

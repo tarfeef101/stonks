@@ -24,6 +24,7 @@
 		EXPLORE_STATE_KEY,
 		parseState,
 		serializeState,
+		withoutRange,
 		type ExploreState
 	} from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
@@ -241,7 +242,13 @@
 	 * caller to it (the id came from the URL, so no list lookup).
 	 * Otherwise the widget goes into the selected dashboard, or —
 	 * when there are none (or the list failed to load) — into a
-	 * freshly created one named newDashName. */
+	 * freshly created one named newDashName.
+	 *
+	 * Round 20: the WIDGET stores the state WITHOUT its time range
+	 * (the dashboard page owns its cards' range via its picker). The
+	 * handoff's NAMED SAVED VIEW keeps the full state — it is a
+	 * normal Explore artifact, and re-opening it in Explore restores
+	 * the dates. */
 	async function saveToDashboard(): Promise<void> {
 		if (saveTimer !== null) {
 			clearTimeout(saveTimer);
@@ -250,13 +257,14 @@
 		saveNote = null;
 		saveError = null;
 		const state = serializeState(explore);
+		const tileState = withoutRange(state);
 		try {
 			if (saveToId !== '') {
 				await createSavedView({ name: saveName, state });
 				await createWidget(saveToId, {
 					name: saveName,
 					kind: 'explore',
-					content: state,
+					content: tileState,
 					span: 4
 				});
 				await goto(`/dashboards/${saveToId}`);
@@ -267,7 +275,7 @@
 			await createWidget(dash.id, {
 				name: saveName,
 				kind: 'explore',
-				content: state,
+				content: tileState,
 				span: 4
 			});
 			saveNote = $_('explore.saved', { values: { name: dash.name } });

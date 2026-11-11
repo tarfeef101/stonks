@@ -24,6 +24,7 @@
 		EXPLORE_STATE_KEY,
 		parseState,
 		serializeStateForLink,
+		withoutRange,
 		type Names
 	} from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
@@ -50,6 +51,17 @@
 	// a bare /explore opens the remembered last view, not the
 	// widget's.
 	//
+	// Round 20: the time range is DECOUPLED from the cards' saved
+	// state. The page owns it (top-right date range picker, signed-in
+	// only; blank ends = all time) and injects it into every explore
+	// card's query via ExploreView's rangeFrom/rangeTo — overriding
+	// whatever dates a legacy saved state carries. NEW tiles are
+	// saved WITHOUT a range (withoutRange over the remembered last
+	// view / the picked saved view's state); the handoff to
+	// /explore?save_to= is unchanged (the Explore page strips there).
+	// "Open in Explore" is also unchanged — it hands off the widget's
+	// stored state VERBATIM (a legacy tile's dates travel with it).
+	//
 	// There is no GET /v1/dashboards/{id} route — the dashboard row is
 	// resolved by id from the list; an unknown id means "not found".
 
@@ -61,6 +73,15 @@
 	let loading = $state(true);
 	let loadError = $state<string | null>(null);
 	let notFound = $state(false);
+
+	// The page-owned date range (round 20): '' = that end is
+	// unbounded (all time). Explore cards' queries use THESE dates
+	// instead of whatever the widget's saved state carries — new
+	// tiles are saved without a range at all (withoutRange); a
+	// pre-round-20 tile's dates are overridden at render time. The
+	// picker lives in the header (top right, signed-in only).
+	let rangeFrom = $state('');
+	let rangeTo = $state('');
 
 	// Shared note for widget-op failures: NOT auto-cleared — the next
 	// successful op or a new op start clears it.
@@ -687,18 +708,21 @@
 			} else if (addChoice === 'current') {
 				// The Explore page's remembered last view (the
 				// default view when none): an untitled quick-add —
-				// no saved view is created.
+				// no saved view is created. The tile stores the view
+				// WITHOUT its time range (round 20): this page owns
+				// the cards' range.
 				kind = 'explore';
-				content = rememberedExploreState();
+				content = withoutRange(rememberedExploreState());
 			} else {
 				// A saved view: the tile takes the view's name and
 				// its OWN copy of the view's state — a copy, not a
-				// reference.
+				// reference — with the time range stripped (round
+				// 20): this page owns the cards' range.
 				kind = 'explore';
 				const sv = addSavedViews.find((x) => x.id === addChoice);
 				if (sv !== undefined) {
 					name = sv.name;
-					content = sv.state;
+					content = withoutRange(sv.state);
 				}
 			}
 			const w = await createWidget(dashboardId, { name, kind, content, span: 4 });
@@ -720,8 +744,10 @@
 
 <section class="space-y-4">
 	<!-- Header: back to the list + the dashboard's name (the name is
-	     resolved from the list — there is no single-dashboard GET). -->
-	<div class="flex flex-wrap items-baseline gap-3">
+	     resolved from the list — there is no single-dashboard GET) +
+	     the page-owned date range picker (round 20, signed-in only,
+	     top right; blank ends = all time). -->
+	<div class="flex flex-wrap items-center gap-3">
 		<a
 			href={resolve('/dashboards')}
 			class="text-sm font-medium text-zinc-500 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100"
@@ -730,6 +756,26 @@
 		</a>
 		{#if dashboard}
 			<h1 class="text-2xl font-semibold">{dashboard.name}</h1>
+		{/if}
+		{#if $user}
+			<div class="ml-auto flex items-center gap-3 text-sm">
+				<label class="flex items-center gap-1.5">
+					<span class="font-medium">{$_('dashboards.range_from')}</span>
+					<input
+						type="date"
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						bind:value={rangeFrom}
+					/>
+				</label>
+				<label class="flex items-center gap-1.5">
+					<span class="font-medium">{$_('dashboards.range_to')}</span>
+					<input
+						type="date"
+						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						bind:value={rangeTo}
+					/>
+				</label>
+			</div>
 		{/if}
 	</div>
 
@@ -752,7 +798,8 @@
 		     name (kind badge) + the ⋯ menu (open in Explore, width /
 		     height selects, move, edit, delete); the right edge,
 		     bottom edge and corner are drag-resize handles (width /
-		     height / both); the body is the live Explore view, the
+		     height / both); the body is the live Explore view
+		     (queried with the page's date range, round 20), the
 		     sanitized markdown, or the markdown edit textarea.
 		     Nameless cards render headless at rest (round 13) —
 		     their head is sr-only until the card is hovered or
@@ -997,7 +1044,17 @@
 								}}
 							></textarea>
 						{:else if w.kind === 'explore'}
-							<ExploreView state={parseState(w.content)} names={names} />
+							<!-- The page range overrides the state's
+							     dates (round 20): new tiles carry no
+							     range at all; a legacy tile's stored
+							     dates are ignored while the picker
+							     speaks. -->
+							<ExploreView
+								state={parseState(w.content)}
+								names={names}
+								rangeFrom={rangeFrom}
+								rangeTo={rangeTo}
+							/>
 						{:else}
 							<article class="prose prose-sm dark:prose-invert">{@html renderMarkdown(w.content)}</article>
 						{/if}

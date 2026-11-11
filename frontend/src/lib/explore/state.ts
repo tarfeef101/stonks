@@ -234,6 +234,19 @@ export function serializeStateForLink(s: ExploreState): string {
 	return params.toString();
 }
 
+/** The saved state minus its time range (round 20): parse, zero the
+ * `from`/`to` fields, and re-serialize canonically. This is the string
+ * a dashboard tile stores — the dashboard PAGE owns its cards' date
+ * range (its own picker), not the saved state. Malformed input degrades
+ * exactly like parseState (invalid values dropped, unknown params
+ * ignored); a range-only input round-trips to ''. */
+export function withoutRange(qs: string): string {
+	const s = parseState(qs);
+	s.from = '';
+	s.to = '';
+	return serializeState(s);
+}
+
 /** The exact API query params for one page of the 3.2 List endpoint, in
  * the pinned wire order: date_from,date_to,account_id(repeated),
  * category_id(repeated),min_amount,max_amount,search,sign,limit=100,offset.
