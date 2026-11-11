@@ -3,16 +3,18 @@
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
 	import { user } from '#lib/auth/client';
-	import { listAccounts } from '#lib/api/accounts';
 	import { unreadNotificationCount } from '#lib/api/notifications';
 	import UserChip from '#lib/auth/UserChip.svelte';
 	import type { Snippet } from 'svelte';
 
 	let { children }: { children: Snippet } = $props();
 
-	// The full nav. The Mortgage entry is conditional: it renders only
-	// while the user has an account with type "mortgage" (mortgage
-	// accounts use exactly that type — pinned for step 7.1).
+	// The full nav. The Mortgage entry is always visible (round 22): the
+	// page's own empty states (sign-in prompt, and a "no mortgage on
+	// file" pointer to Settings → Accounts) make the feature discoverable
+	// without a mortgage-typed account existing first — the plan-7.3
+	// existence-gate hid the tab entirely, so the page was unreachable
+	// until a user happened to look for it in Settings.
 	const navItems = [
 		{ href: '/', key: 'nav.summary' },
 		{ href: '/explore', key: 'nav.explore' },
@@ -25,25 +27,14 @@
 		{ href: '/settings', key: 'nav.settings' }
 	] as const;
 
-	// Unread-notification badge on the Notifications link, and the
-	// Mortgage nav predicate. Both refresh when the identity appears or
-	// changes (keyed on the sub claim with a last-seen guard —
-	// oidc-client-ts re-emits the User object on every silent token
-	// renewal, same reason the layout's settings effect uses one), are
-	// cleared on sign-out, and are polled every 60 s while signed in (one
-	// interval, both checks — a mortgage account created later shows its
-	// link within a minute without a reload). A failed poll is silent:
-	// each keeps its last value (the link starts hidden, so a failed
-	// first fetch keeps it hidden).
+	// Unread-notification badge on the Notifications link. Refreshes when
+	// the identity appears or changes (keyed on the sub claim with a
+	// last-seen guard — oidc-client-ts re-emits the User object on every
+	// silent token renewal, same reason the layout's settings effect uses
+	// one), is cleared on sign-out, and is polled every 60 s while signed
+	// in. A failed poll is silent: it keeps its last value.
 	let unread = $state(0);
-	let hasMortgage = $state(false);
 	let lastSub: string | null = null;
-
-	// The items to render: all but Mortgage unless the user has a
-	// mortgage account.
-	const visibleNavItems = $derived(
-		hasMortgage ? navItems : navItems.filter((i) => i.href !== '/mortgage')
-	);
 
 	$effect(() => {
 		const sub = $user?.profile.sub ?? null;
@@ -51,10 +42,8 @@
 		lastSub = sub;
 		if (sub) {
 			void refreshUnread();
-			void refreshMortgage();
 		} else {
 			unread = 0;
-			hasMortgage = false;
 		}
 	});
 
@@ -68,21 +57,10 @@
 			});
 	}
 
-	function refreshMortgage(): void {
-		void listAccounts()
-			.then((accounts) => {
-				hasMortgage = accounts.some((a) => a.type === 'mortgage');
-			})
-			.catch(() => {
-				// keep the last value — a poll hiccup is not a page error
-			});
-	}
-
 	onMount(() => {
 		const t = setInterval(() => {
 			if ($user?.profile.sub) {
 				refreshUnread();
-				refreshMortgage();
 			}
 		}, 60_000);
 		return () => clearInterval(t);
@@ -104,7 +82,7 @@
 			     while the profile is incomplete, until step 1.4). -->
 			<div class="flex flex-wrap items-center gap-x-4 gap-y-2">
 				<nav class="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-					{#each visibleNavItems as item (item.href)}
+					{#each navItems as item (item.href)}
 						<a
 							href={resolve(item.href)}
 							class="inline-flex items-center gap-1 text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"

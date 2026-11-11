@@ -186,6 +186,13 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 	start := time.Date(spec.StartDate.Year(), spec.StartDate.Month(), spec.StartDate.Day(), 0, 0, 0, 0, time.UTC)
 	r := PeriodicRate(spec.AnnualRate, ppy)
 	pay := amortize(spec.Principal, r, n) // initial regular payment, full precision
+	// BasePayment reports THIS initial payment. In principal mode `pay` is
+	// re-amortized after every extra, so the loop-end value is the final
+	// (smaller) payment — capturing the start value keeps the field's
+	// documented meaning (round 22: the seed data exposed it; a
+	// principal-mode schedule was reporting its last partial payment as
+	// the base payment).
+	basePay := pay
 
 	bal := spec.Principal
 	pm := periodMonths(spec.ExtraPaymentFrequency)
@@ -242,7 +249,7 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 				return Schedule{}, errors.New("one-time prepayment date is after the payoff date")
 			}
 			return Schedule{
-				BasePayment:   round2(pay),
+				BasePayment:   round2(basePay),
 				PayoffDate:    d,
 				PayoffIndex:   k,
 				TotalPaid:     round2(totalPaid),

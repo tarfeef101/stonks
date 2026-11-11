@@ -264,6 +264,64 @@ func TestRecurringExtraTerm(t *testing.T) {
 	}
 }
 
+// TestRecurringExtraPrincipalBasePayment pins the documented meaning of
+// BasePayment in principal mode: the INITIAL regular payment, not the
+// re-amortized payment value at payoff.
+//
+// In principal mode `pay` is re-amortized (smaller, same end date) after
+// every extra, so pre-round-22 the schedule reported the final partial
+// payment as BasePayment — the seed loan (485000 @ 4.39%, 25 yr,
+// semi_monthly, extra 200/month, principal) returned 505.43 (its last
+// payment) instead of 1326.18 (its initial regular payment). Every
+// existing extra test uses "term" mode, where `pay` never mutates, so
+// none of them caught it.
+func TestRecurringExtraPrincipalBasePayment(t *testing.T) {
+	base := Spec{
+		Principal:             485000,
+		AnnualRate:            4.39,
+		AmortizationYears:     25,
+		StartDate:             time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		PaymentFrequency:      "semi_monthly",
+		ExtraPaymentAmount:    0,
+		ExtraPaymentFrequency: "monthly",
+		ExtraPrepaymentType:   "principal",
+	}
+	baseSch, err := Generate(base)
+	if err != nil {
+		t.Fatalf("Generate(no-extra): %v", err)
+	}
+	sc := base
+	sc.ExtraPaymentAmount = 200.00
+	sch, err := Generate(sc)
+	if err != nil {
+		t.Fatalf("Generate(principal): %v", err)
+	}
+	// The extras do not change the initial regular payment.
+	if sch.BasePayment != baseSch.BasePayment {
+		t.Fatalf("BasePayment = %v, want the initial regular payment %v (no-extra)",
+			sch.BasePayment, baseSch.BasePayment)
+	}
+	if sch.BasePayment != 1326.18 {
+		t.Fatalf("BasePayment = %v, want 1326.18 (pinned for the seed loan)", sch.BasePayment)
+	}
+	// And it is decidedly not the final partial payment (the pre-fix
+	// symptom: 505.43 here).
+	last := sch.Payments[len(sch.Payments)-1]
+	if last.Payment >= sch.BasePayment {
+		t.Fatalf("final payment %v >= BasePayment %v — BasePayment looks like the re-amortized final payment",
+			last.Payment, sch.BasePayment)
+	}
+	// The extras still re-amortize: a year of monthly extras lowers the
+	// regular portion below the initial one, and the term is preserved.
+	if sch.PayoffIndex != 600 {
+		t.Fatalf("PayoffIndex = %d, want 600 (principal mode preserves the term)", sch.PayoffIndex)
+	}
+	if sch.Payments[12].Payment >= sch.Payments[0].Payment {
+		t.Fatalf("payment 13 = %v, want < first payment %v (re-amortized smaller after a year of extras)",
+			sch.Payments[12].Payment, sch.Payments[0].Payment)
+	}
+}
+
 // TestRecurringExtraQuarterlyBuckets pins the quarterly calendar buckets.
 //
 // DEVIATION from handoff pin 7 (see REPORT.md section 4): the handoff pins
