@@ -62,6 +62,14 @@
 	// "Open in Explore" is also unchanged — it hands off the widget's
 	// stored state VERBATIM (a legacy tile's dates travel with it).
 	//
+	// Round 21: the picker also offers period PRESETS — this/last
+	// month, this/last quarter, this/last year, all time — beside the
+	// free-form date inputs. The select is DERIVED from the two dates
+	// (the matching preset, or 'custom' when none matches); picking a
+	// preset just writes its dates into rangeFrom/rangeTo, so every
+	// downstream effect (the cards' re-fetch, the strip-on-save) is
+	// unchanged — presets are input sugar over the same two fields.
+	//
 	// There is no GET /v1/dashboards/{id} route — the dashboard row is
 	// resolved by id from the list; an unknown id means "not found".
 
@@ -79,9 +87,118 @@
 	// instead of whatever the widget's saved state carries — new
 	// tiles are saved without a range at all (withoutRange); a
 	// pre-round-20 tile's dates are overridden at render time. The
-	// picker lives in the header (top right, signed-in only).
+	// picker lives in the header (top right, signed-in only): a
+	// period preset select (round 21) beside the free-form date
+	// inputs.
 	let rangeFrom = $state('');
 	let rangeTo = $state('');
+
+	// --- Range presets (round 21; browser Date — page-only, the
+	// same house pattern as the Explore page's presets) -------------
+
+	function pad2(n: number): string {
+		return String(n).padStart(2, '0');
+	}
+
+	/** The preset's from/to in local time, or null for 'custom'. */
+	function presetRange(key: string): { from: string; to: string } | null {
+		const now = new Date();
+		const y = now.getFullYear();
+		const m = now.getMonth();
+		if (key === 'this_month') {
+			const last = new Date(y, m + 1, 0).getDate();
+			return { from: `${y}-${pad2(m + 1)}-01`, to: `${y}-${pad2(m + 1)}-${pad2(last)}` };
+		}
+		if (key === 'last_month') {
+			const first = new Date(y, m - 1, 1);
+			const last = new Date(y, m, 0);
+			return {
+				from: `${first.getFullYear()}-${pad2(first.getMonth() + 1)}-01`,
+				to: `${last.getFullYear()}-${pad2(last.getMonth() + 1)}-${pad2(last.getDate())}`
+			};
+		}
+		if (key === 'this_quarter') {
+			const q = Math.floor(m / 3) * 3;
+			const last = new Date(y, q + 3, 0);
+			return {
+				from: `${y}-${pad2(q + 1)}-01`,
+				to: `${last.getFullYear()}-${pad2(last.getMonth() + 1)}-${pad2(last.getDate())}`
+			};
+		}
+		if (key === 'last_quarter') {
+			// q can be negative (Jan → last year's Q4); the Date
+			// constructor normalizes negative months.
+			const q = Math.floor(m / 3) * 3 - 3;
+			const first = new Date(y, q, 1);
+			const last = new Date(y, q + 3, 0);
+			return {
+				from: `${first.getFullYear()}-${pad2(first.getMonth() + 1)}-01`,
+				to: `${last.getFullYear()}-${pad2(last.getMonth() + 1)}-${pad2(last.getDate())}`
+			};
+		}
+		if (key === 'this_year') {
+			return { from: `${y}-01-01`, to: `${y}-12-31` };
+		}
+		if (key === 'last_year') {
+			return { from: `${y - 1}-01-01`, to: `${y - 1}-12-31` };
+		}
+		if (key === 'all_time') {
+			return { from: '', to: '' };
+		}
+		return null;
+	}
+
+	const PRESET_KEYS = [
+		'this_month',
+		'last_month',
+		'this_quarter',
+		'last_quarter',
+		'this_year',
+		'last_year',
+		'all_time'
+	] as const;
+
+	/** The preset whose range matches the current rangeFrom/rangeTo —
+	 * 'custom' when none (the date inputs hold a hand-picked range). */
+	function currentPreset(): string {
+		for (const key of PRESET_KEYS) {
+			const r = presetRange(key);
+			if (r !== null && r.from === rangeFrom && r.to === rangeTo) return key;
+		}
+		return 'custom';
+	}
+
+	function presetLabel(key: string): string {
+		switch (key) {
+			case 'this_month':
+				return $_('dashboards.preset_this_month');
+			case 'last_month':
+				return $_('dashboards.preset_last_month');
+			case 'this_quarter':
+				return $_('dashboards.preset_this_quarter');
+			case 'last_quarter':
+				return $_('dashboards.preset_last_quarter');
+			case 'this_year':
+				return $_('dashboards.preset_this_year');
+			case 'last_year':
+				return $_('dashboards.preset_last_year');
+			case 'all_time':
+				return $_('dashboards.preset_all_time');
+			default:
+				return $_('dashboards.preset_custom');
+		}
+	}
+
+	/** The preset select changed. 'custom' is display-only — a
+	 * hand-picked range is owned by the date inputs. */
+	function applyPreset(key: string): void {
+		if (key === 'custom') return;
+		const r = presetRange(key);
+		if (r !== null) {
+			rangeFrom = r.from;
+			rangeTo = r.to;
+		}
+	}
 
 	// Shared note for widget-op failures: NOT auto-cleared — the next
 	// successful op or a new op start clears it.
@@ -746,7 +863,8 @@
 	<!-- Header: back to the list + the dashboard's name (the name is
 	     resolved from the list — there is no single-dashboard GET) +
 	     the page-owned date range picker (round 20, signed-in only,
-	     top right; blank ends = all time). -->
+	     top right; blank ends = all time) — a period preset select
+	     (round 21) beside the free-form date inputs. -->
 	<div class="flex flex-wrap items-center gap-3">
 		<a
 			href={resolve('/dashboards')}
@@ -758,7 +876,20 @@
 			<h1 class="text-2xl font-semibold">{dashboard.name}</h1>
 		{/if}
 		{#if $user}
-			<div class="ml-auto flex items-center gap-3 text-sm">
+			<div class="ml-auto flex flex-wrap items-center gap-3 text-sm">
+				<label class="flex items-center gap-1.5">
+					<span class="font-medium">{$_('dashboards.preset_label')}</span>
+					<select
+						class="w-40 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						value={currentPreset()}
+						onchange={(e) => applyPreset(e.currentTarget.value)}
+					>
+						{#each PRESET_KEYS as key (key)}
+							<option value={key}>{presetLabel(key)}</option>
+						{/each}
+						<option value="custom">{$_('dashboards.preset_custom')}</option>
+					</select>
+				</label>
 				<label class="flex items-center gap-1.5">
 					<span class="font-medium">{$_('dashboards.range_from')}</span>
 					<input
