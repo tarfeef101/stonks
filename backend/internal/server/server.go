@@ -110,6 +110,7 @@ type handler struct {
 	llmCreds      *LLMCredentials
 	dashboards    DashboardStore
 	widgets       DashboardWidgetStore
+	savedViews    SavedViewStore
 	mortgages     MortgageStore
 	mailer        mail.Sender
 	mailEnabled   bool
@@ -153,7 +154,10 @@ type handler struct {
 // GET/POST /api/v1/dashboards/{id}/widgets, PATCH/DELETE
 // /api/v1/dashboards/{id}/widgets/{wid}, PUT
 // /api/v1/dashboards/{id}/widgets/order); either nil and the affected
-// routes answer 503. mortgages serves the mortgage routes
+// routes answer 503. savedViews serves the saved Explore view routes
+// (round 16, migration 0015: GET/POST /api/v1/saved-views,
+// PATCH/DELETE /api/v1/saved-views/{id}); nil and those routes answer
+// 503. mortgages serves the mortgage routes
 // (plan 7.1: GET/POST /api/v1/mortgages, GET/PATCH/DELETE
 // /api/v1/mortgages/{id}); nil and those routes answer 503.
 // institutions serves the FI institution registry routes (plan 9.1:
@@ -170,7 +174,7 @@ type handler struct {
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
 // reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -192,6 +196,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		llmCreds:      llmCreds,
 		dashboards:    dashboards,
 		widgets:       widgets,
+		savedViews:    savedViews,
 		mortgages:     mortgages,
 		mailer:        mailer,
 		mailEnabled:   mailEnabled,
@@ -277,6 +282,16 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Patch("/v1/dashboards/{id}/widgets/{wid}", h.widgetsUpdate)
 		r.Delete("/v1/dashboards/{id}/widgets/{wid}", h.widgetsDelete)
 		r.Put("/v1/dashboards/{id}/widgets/order", h.widgetsSetOrder)
+		// Saved Explore views (round 16, migration 0015): per-user
+		// named snapshots of the Explore page's URL state (state =
+		// the canonical explore_state string, '' = the default view).
+		// The Explore view bar manages them; the dashboard
+		// add-widget flow picks one and copies its state into the
+		// new widget. No single-GET route (house convention).
+		r.Get("/v1/saved-views", h.savedViewsList)
+		r.Post("/v1/saved-views", h.savedViewsCreate)
+		r.Patch("/v1/saved-views/{id}", h.savedViewsUpdate)
+		r.Delete("/v1/saved-views/{id}", h.savedViewsDelete)
 		// Mortgages (plan 7.1, migration 0009): the mortgage CRUD over a
 		// single mortgage-typed account (existence/type checked in the
 		// handler). No PUT; account_id is immutable (absent from the

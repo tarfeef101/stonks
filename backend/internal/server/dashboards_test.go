@@ -338,7 +338,7 @@ func newDashServer(t *testing.T, dash DashboardStore, wid DashboardWidgetStore) 
 	return New(
 		fakeReady{}, BuildInfo{}, liveAuth(t, key), b,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		dash, wid, nil, nil, false, nil, nil, nil,
+		dash, wid, nil, nil, nil, false, nil, nil, nil,
 	), key
 }
 

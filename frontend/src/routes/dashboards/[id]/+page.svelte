@@ -17,6 +17,7 @@
 		type DashboardWidget,
 		type WidgetKind
 	} from '#lib/api/dashboards';
+	import { listSavedViews, createSavedView, type SavedView } from '#lib/api/savedviews';
 	import { loadCatalogs } from '#lib/explore/catalogs';
 	import { parseState, serializeStateForLink, type Names } from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
@@ -69,6 +70,18 @@
 	let addName = $state('');
 	let addContent = $state('');
 	let addError = $state<string | null>(null);
+
+	// The add card's saved-views picker (round 16): '' = no saved view
+	// (the default view — the old behavior), 'new' = create a NEW saved
+	// view first (named after the widget name, the default state) and
+	// then the widget, else the picked saved view's id — the widget's
+	// content is a COPY of its stored state (a copy, not a reference:
+	// deleting the view later never breaks the widget). One list load
+	// per add-card open; stale loads are dropped (a failed load leaves
+	// the picker on the "no saved view" path — adding still works).
+	let addSavedViews = $state<SavedView[]>([]);
+	let addSavedView = $state('');
+	let addViewsSeq = 0;
 
 	// --- Load --------------------------------------------------------------
 
@@ -581,14 +594,16 @@
 	// --- Add widget ----------------------------------------------------------
 
 	/** Opens the add-widget card with the kind preselected: "Explore
-	 * view" seeds content '' (the default view), "Text (markdown)"
-	 * also opens the content textarea. */
+	 * view" seeds the saved-views picker (its list loads async),
+	 * "Text (markdown)" also opens the content textarea. */
 	function startAdd(kind: WidgetKind): void {
 		adding = true;
 		addKind = kind;
 		addName = '';
 		addContent = '';
+		addSavedView = '';
 		addError = null;
+		if (kind === 'explore') void loadAddSavedViews();
 	}
 
 	function cancelAdd(): void {
@@ -596,18 +611,60 @@
 		addKind = null;
 	}
 
+	/** Loads the caller's saved views for the add card's picker (one
+	 * load per open; stale loads are dropped). A failed load leaves
+	 * the picker on the "no saved view" path — adding still works. */
+	async function loadAddSavedViews(): Promise<void> {
+		const s = ++addViewsSeq;
+		try {
+			const vs = await listSavedViews();
+			if (s !== addViewsSeq) return; // stale
+			addSavedViews = vs;
+		} catch {
+			if (s !== addViewsSeq) return; // stale
+			addSavedViews = [];
+		}
+	}
+
+	/** The picker's select changed: a saved view pre-fills the widget
+	 * name with the view's own label; "new" and "none" clear it (the
+	 * user names the widget — for "new" that name is the new saved
+	 * view's name too). */
+	function onAddSavedViewChange(e: Event): void {
+		const sel = e.currentTarget as HTMLSelectElement;
+		addSavedView = sel.value;
+		const sv = addSavedViews.find((x) => x.id === addSavedView);
+		addName = sv !== undefined ? sv.name : '';
+	}
+
 	/** Creates the widget from the add card (new widgets span 4
 	 * columns; row_span is left to the server's per-kind default —
 	 * explore 4, markdown 2); the returned row is appended to the
-	 * grid. */
+	 * grid. The explore content is a COPY of the picked saved view's
+	 * state ('new' creates its saved view first — named after the
+	 * widget name, the default state — then the widget; "none" is
+	 * the old '' path). */
 	async function submitAdd(): Promise<void> {
 		if (addKind === null) return;
 		addError = null;
 		try {
+			let content = '';
+			if (addKind === 'markdown') {
+				content = addContent;
+			} else if (addSavedView === 'new') {
+				// The typed name IS the new saved view's name (and
+				// the widget's); blank is a server 400, verbatim.
+				await createSavedView({ name: addName, state: '' });
+			} else if (addSavedView !== '') {
+				// The widget stores its OWN copy of the picked view's
+				// state — a copy, not a reference.
+				const sv = addSavedViews.find((x) => x.id === addSavedView);
+				if (sv !== undefined) content = sv.state;
+			}
 			const w = await createWidget(dashboardId, {
 				name: addName,
 				kind: addKind,
-				content: addKind === 'markdown' ? addContent : '',
+				content,
 				span: 4
 			});
 			widgets = [...widgets, w];
@@ -1048,6 +1105,31 @@
 						{$_('dashboards.widget_cancel')}
 					</button>
 				</div>
+				{#if addKind === 'explore'}
+					<!-- The saved-views picker (round 16): picking a
+					     saved view copies its state into the widget
+					     (the widget owns its copy — deleting the view
+					     later never breaks it); "new" creates a saved
+					     view first (named after the widget name, default
+					     state) and then the widget; "none" is the old
+					     default-view path. -->
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">
+							{$_('dashboards.widget_add_saved_view')}
+						</span>
+						<select
+							class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							value={addSavedView}
+							onchange={onAddSavedViewChange}
+						>
+							<option value="">{$_('dashboards.widget_add_saved_none')}</option>
+							<option value="new">{$_('dashboards.widget_add_saved_new')}</option>
+							{#each addSavedViews as sv (sv.id)}
+								<option value={sv.id}>{sv.name}</option>
+							{/each}
+						</select>
+					</label>
+				{/if}
 				{#if addKind === 'markdown'}
 					<textarea
 						class="w-full min-h-32 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1.5 font-mono text-xs"

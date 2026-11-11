@@ -88,6 +88,7 @@ func main() {
 		llmCreds      *server.LLMCredentials
 		dashboards    server.DashboardStore
 		widgets       server.DashboardWidgetStore
+		savedViews    server.SavedViewStore
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -219,9 +220,14 @@ func main() {
 		// (like every other store).
 		dashboards = repo.NewDashboardStore(pool)
 		widgets = repo.NewDashboardWidgetStore(pool)
+		// Saved Explore views (round 16, migration 0015): same pool;
+		// name and state are DEK-encrypted by the repo layer, the
+		// handlers pass the per-user DEK from bootstrap (like the
+		// dashboards above).
+		savedViews = repo.NewSavedViewStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, savedViews, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

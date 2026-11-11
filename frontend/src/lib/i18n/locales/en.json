@@ -96,7 +96,21 @@
 		"save_name_placeholder": "Widget name…",
 		"save_button": "Save",
 		"save_cancel": "Cancel",
-		"saved": "Saved to {name}"
+		"saved": "Saved to {name}",
+		"saved_views": "Saved views",
+		"view_name": "Name",
+		"view_name_placeholder": "Saved view name…",
+		"view_save_button": "Save current view",
+		"view_cancel": "Cancel",
+		"view_loading": "Loading saved views…",
+		"view_empty": "No saved views yet — save the current view above.",
+		"view_open": "Open",
+		"view_update": "Update",
+		"view_rename": "Rename",
+		"view_delete": "Delete",
+		"view_saved": "Saved {name}",
+		"view_updated": "Updated {name}",
+		"view_delete_confirm": "Delete the saved view {name}? Widgets that copied it keep working."
 	},
 	"dashboards": {
 		"heading": "Dashboards",
@@ -139,7 +153,10 @@
 		"height_n": "{n} rows",
 		"handle_width": "Drag to change the widget's width",
 		"handle_height": "Drag to change the widget's height",
-		"handle_corner": "Drag to change the widget's width and height"
+		"handle_corner": "Drag to change the widget's width and height",
+		"widget_add_saved_view": "Saved view",
+		"widget_add_saved_none": "No saved view (default view)",
+		"widget_add_saved_new": "New saved view…"
 	},
 	"budgets": {
 		"heading": "Budgets",

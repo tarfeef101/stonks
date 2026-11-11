@@ -131,15 +131,16 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 14 (all seventeen tables present, dashboard_widgets.row_span
-// from 0014 on top of dashboards + dashboard_widgets from 0013 on top of
+// version 15 (all eighteen tables present, saved_views from 0015 on top
+// of dashboard_widgets.row_span from 0014 on top of dashboards +
+// dashboard_widgets from 0013 on top of
 // offset_suggestions + transactions.offset_group_id from 0012 on top of
 // users.theme from 0011 on top of fi_institutions + fi_credentials from
 // 0010 on top of mortgages from 0009 + dashboard_cards from 0008 +
 // categorise_jobs from 0007 + import_jobs' 0006 mapping column), a second
-// `up` is a no-op, and `down` rolls back exactly one step (0014 drops
-// dashboard_widgets.row_span; the dashboards + dashboard_widgets tables
-// keep 0013, offset_suggestions keeps 0012's
+// `up` is a no-op, and `down` rolls back exactly one step (0015 drops
+// saved_views; dashboard_widgets keeps 0014's row_span, the dashboards +
+// dashboard_widgets tables keep 0013, offset_suggestions keeps 0012's
 // transactions.offset_group_id, users keeps its 0011 theme, and the fi
 // tables, mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006
 // mapping column and 0001+0002+0003+0004 stay in place, users keeps its
@@ -151,15 +152,15 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 14 {
-		t.Fatalf("version after up = %d, want 14", ver)
+	if ver != 15 {
+		t.Fatalf("version after up = %d, want 15", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
 		"accounts", "transactions", "budgets", "llm_credentials",
 		"import_jobs", "categorise_jobs", "dashboard_cards", "mortgages",
 		"fi_institutions", "fi_credentials", "offset_suggestions",
-		"dashboards", "dashboard_widgets",
+		"dashboards", "dashboard_widgets", "saved_views",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -192,38 +193,43 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 14 {
-		t.Fatalf("version after re-up = %d (err %v), want 14", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 15 {
+		t.Fatalf("version after re-up = %d (err %v), want 15", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0014) only —
-	// dashboard_widgets.row_span goes; 0013 stays (dashboards +
-	// dashboard_widgets), 0012 stays (offset_suggestions plus
-	// transactions.offset_group_id), users keeps its 0011 theme, and the
-	// fi tables (0010), mortgages (0009), dashboard_cards (0008),
+	// One-step down: goose rolls back the latest migration (0015) only —
+	// saved_views goes; 0014 stays (dashboard_widgets.row_span), 0013
+	// stays (dashboards + dashboard_widgets), 0012 stays (offset_suggestions
+	// plus transactions.offset_group_id), users keeps its 0011 theme, and
+	// the fi tables (0010), mortgages (0009), dashboard_cards (0008),
 	// categorise_jobs, import_jobs' 0006 mapping column and the
 	// 0001+0002+0003+0004 tables stay.
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 13 {
-		t.Fatalf("version after down = %d (err %v), want 13", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 14 {
+		t.Fatalf("version after down = %d (err %v), want 14", ver, err)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'saved_views'`); n != 0 {
+		t.Fatalf("saved_views remaining after one-step down = %d, want 0 (0015 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'dashboards'`); n != 1 {
-		t.Fatalf("dashboards remaining after one-step down = %d, want 1 (only 0014 rolls back)", n)
+		t.Fatalf("dashboards remaining after one-step down = %d, want 1 (only 0015 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'dashboard_widgets'`); n != 1 {
-		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 1 (only 0014 rolls back)", n)
+		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 1 (only 0015 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns
 		  WHERE table_schema = 'public' AND table_name = 'dashboard_widgets'
-		    AND column_name = 'row_span'`); n != 0 {
-		t.Fatalf("dashboard_widgets.row_span remaining after one-step down = %d, want 0 (0014 rolls back)", n)
+		    AND column_name = 'row_span'`); n != 1 {
+		t.Fatalf("dashboard_widgets.row_span remaining after one-step down = %d, want 1 (0014 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables

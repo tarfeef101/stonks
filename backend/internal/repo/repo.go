@@ -59,6 +59,9 @@ var (
 	ErrDashboardNotFound       = errors.New("repo: dashboard not found")
 	ErrDashboardWidgetNotFound = errors.New("repo: dashboard widget not found")
 
+	// 16.1 saved Explore views (round 16, migration 0015).
+	ErrSavedViewNotFound = errors.New("repo: saved view not found")
+
 	// 7.1 mortgages.
 	ErrMortgageNotFound = errors.New("repo: mortgage not found")
 

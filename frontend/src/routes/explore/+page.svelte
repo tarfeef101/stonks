@@ -12,6 +12,13 @@
 		createWidget,
 		type Dashboard
 	} from '#lib/api/dashboards';
+	import {
+		listSavedViews,
+		createSavedView,
+		updateSavedView,
+		deleteSavedView,
+		type SavedView
+	} from '#lib/api/savedviews';
 	import { parseState, serializeState, type ExploreState } from '#lib/explore/state';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
@@ -233,6 +240,146 @@
 		} catch (e) {
 			saveError = envelopeMessage(e);
 		}
+	}
+
+	// --- Saved views (round 16) ------------------------------------------
+
+	// The view bar's "Saved views" panel: name + save the CURRENT view
+	// (the RAW canonical serializeState(explore) string, '' = the
+	// default view), then per row: Open (load the view's state back
+	// into the page — the sync effect rewrites the URL + the remembered
+	// settings), Update (write the current state back over the saved
+	// one), Rename (inline) and Delete (confirm-gated). The list loads
+	// once per open with a seq guard (the savePanel pattern); a failed
+	// load leaves it empty — saving still works. The green note clears
+	// itself after 2.5s.
+	let viewsPanel = $state(false);
+	let savedViews = $state<SavedView[]>([]);
+	let viewsLoading = $state(false);
+	let newViewName = $state('');
+	let viewNote = $state<string | null>(null);
+	let viewError = $state<string | null>(null);
+	let viewTimer: ReturnType<typeof setTimeout> | null = null;
+	let viewsSeq = 0;
+	let renameId = $state<string | null>(null);
+	let renameDraft = $state('');
+
+	/** Loads the caller's saved views (one load per open; stale loads
+	 * are dropped). A failed load leaves the list empty. */
+	async function loadSavedViews(): Promise<void> {
+		const s = ++viewsSeq;
+		viewsLoading = true;
+		try {
+			const vs = await listSavedViews();
+			if (s !== viewsSeq) return; // stale
+			savedViews = vs;
+		} catch {
+			if (s !== viewsSeq) return; // stale
+			savedViews = [];
+		}
+		if (s === viewsSeq) viewsLoading = false;
+	}
+
+	/** Toggles the panel; opening it re-loads the list and clears the
+	 * new-view name (the success note persists until its timer runs). */
+	function toggleViewsPanel(): void {
+		viewsPanel = !viewsPanel;
+		if (viewsPanel) {
+			newViewName = '';
+			viewError = null;
+			void loadSavedViews();
+		}
+	}
+
+	function closeViewsPanel(): void {
+		viewsPanel = false;
+	}
+
+	/** The 2.5s self-clearing green note (restarts the timer on a
+	 * repeat). */
+	function showViewNote(msg: string): void {
+		if (viewTimer !== null) clearTimeout(viewTimer);
+		viewNote = msg;
+		viewTimer = setTimeout(() => {
+			viewNote = null;
+		}, 2500);
+	}
+
+	/** Saves the CURRENT view under newViewName: the raw canonical
+	 * serializeState(explore) string. The created row is appended; an
+	 * empty name is a server 400 surfaced verbatim via envelopeMessage. */
+	async function saveView(): Promise<void> {
+		viewError = null;
+		try {
+			const v = await createSavedView({ name: newViewName, state: serializeState(explore) });
+			savedViews = [...savedViews, v];
+			newViewName = '';
+			showViewNote($_('explore.view_saved', { values: { name: v.name } }));
+		} catch (e) {
+			viewError = envelopeMessage(e);
+		}
+	}
+
+	/** Opens a saved view: the page's state becomes the view's stored
+	 * state. The view row itself is never mutated — the dashboard
+	 * widgets copy it, and so does this. */
+	function openView(v: SavedView): void {
+		explore = parseState(v.state);
+	}
+
+	/** Writes the CURRENT view back over the saved one (PATCH {state});
+	 * the returned row replaces it in place. */
+	async function updateView(v: SavedView): Promise<void> {
+		viewError = null;
+		try {
+			const updated = await updateSavedView(v.id, { state: serializeState(explore) });
+			savedViews = savedViews.map((x) => (x.id === v.id ? updated : x));
+			showViewNote($_('explore.view_updated', { values: { name: updated.name } }));
+		} catch (e) {
+			viewError = envelopeMessage(e);
+		}
+	}
+
+	/** Begins the inline rename: the row's name becomes an input. */
+	function startRename(v: SavedView): void {
+		renameId = v.id;
+		renameDraft = v.name;
+	}
+
+	/** Commits the inline rename (PATCH {name}, trimmed); a blank or
+	 * unchanged draft cancels. */
+	async function commitRename(v: SavedView): Promise<void> {
+		if (renameId !== v.id) return;
+		renameId = null;
+		const next = renameDraft.trim();
+		if (next === '' || next === v.name) return; // cancel / no-op
+		viewError = null;
+		try {
+			const updated = await updateSavedView(v.id, { name: next });
+			savedViews = savedViews.map((x) => (x.id === v.id ? updated : x));
+		} catch (e) {
+			viewError = envelopeMessage(e);
+		}
+	}
+
+	/** Deletes the saved view (confirm-gated). Widgets keep their own
+	 * copy of the state, so nothing else is affected. */
+	async function deleteView(v: SavedView): Promise<void> {
+		if (!window.confirm($_('explore.view_delete_confirm', { values: { name: v.name } })))
+			return;
+		viewError = null;
+		try {
+			await deleteSavedView(v.id);
+			savedViews = savedViews.filter((x) => x.id !== v.id);
+			if (renameId === v.id) renameId = null;
+		} catch (e) {
+			viewError = envelopeMessage(e);
+		}
+	}
+
+	/** Auto-focuses the inline rename input when it appears. */
+	function autofocus(el: HTMLInputElement): void {
+		el.focus();
 	}
 
 	// --- Presets (browser Date — page-only; state.ts stays Date-free) ----
@@ -511,6 +658,13 @@
 				>
 					{$_('explore.save_to_dashboard')}
 				</button>
+				<button
+					class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+					type="button"
+					onclick={toggleViewsPanel}
+				>
+					{$_('explore.saved_views')}
+				</button>
 			</div>
 			{#if savePanel}
 				<!-- The save panel: the dashboard select (or a
@@ -565,11 +719,107 @@
 					</button>
 				</div>
 			{/if}
+			{#if viewsPanel}
+				<!-- The saved-views panel (round 16): name + save the
+				     current view, then the list — per row Open /
+				     Update / Rename (inline) / Delete. -->
+				<div
+					class="mt-4 border-t border-zinc-200 dark:border-zinc-800 pt-4"
+				>
+					<div class="flex flex-wrap items-end gap-3">
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('explore.view_name')}</span>
+							<input
+								class="w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={newViewName}
+								placeholder={$_('explore.view_name_placeholder')}
+							/>
+						</label>
+						<button
+							class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+							type="button"
+							onclick={() => void saveView()}
+						>
+							{$_('explore.view_save_button')}
+						</button>
+						<button
+							class="self-center text-sm font-medium text-zinc-600 dark:text-zinc-400 underline"
+							type="button"
+							onclick={closeViewsPanel}
+						>
+							{$_('explore.view_cancel')}
+						</button>
+					</div>
+					{#if viewsLoading}
+						<p class="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
+							{$_('explore.view_loading')}
+						</p>
+					{:else if savedViews.length > 0}
+						<ul class="mt-3 space-y-1.5">
+							{#each savedViews as v (v.id)}
+								<li class="flex flex-wrap items-center gap-2">
+									{#if renameId === v.id}
+										<input
+											class="w-48 rounded-md border border-zinc-300 dark:border-zinc-700 px-2 py-1 text-sm"
+											bind:value={renameDraft}
+											use:autofocus
+											onkeydown={(e) => {
+												if (e.key === 'Enter') void commitRename(v);
+												if (e.key === 'Escape') renameId = null;
+											}}
+										/>
+									{:else}
+										<span class="text-sm font-medium">{v.name}</span>
+									{/if}
+									<button
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+										type="button"
+										onclick={() => openView(v)}
+									>
+										{$_('explore.view_open')}
+									</button>
+									<button
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+										type="button"
+										onclick={() => void updateView(v)}
+									>
+										{$_('explore.view_update')}
+									</button>
+									<button
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+										type="button"
+										onclick={() => startRename(v)}
+									>
+										{$_('explore.view_rename')}
+									</button>
+									<button
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 px-2.5 py-1 text-xs font-medium text-red-600 dark:text-red-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+										type="button"
+										onclick={() => void deleteView(v)}
+									>
+										{$_('explore.view_delete')}
+									</button>
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p class="mt-3 text-sm text-zinc-600 dark:text-zinc-400">
+							{$_('explore.view_empty')}
+						</p>
+					{/if}
+				</div>
+			{/if}
 			{#if saveNote}
 				<p class="text-sm text-green-700 dark:text-green-400">{saveNote}</p>
 			{/if}
 			{#if saveError}
 				<p class="text-sm text-red-600 dark:text-red-400">{saveError}</p>
+			{/if}
+			{#if viewNote}
+				<p class="text-sm text-green-700 dark:text-green-400">{viewNote}</p>
+			{/if}
+			{#if viewError}
+				<p class="text-sm text-red-600 dark:text-red-400">{viewError}</p>
 			{/if}
 		</div>
 
