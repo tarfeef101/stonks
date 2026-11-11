@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { _ } from 'svelte-i18n';
+	import { locale, _ } from 'svelte-i18n';
 	import { login, user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
 	import { listCategories, type Category } from '#lib/api/categories';
@@ -274,6 +274,22 @@
 		if (p === 'quarter') return $_('budgets.period_quarter');
 		if (p === 'year') return $_('budgets.period_year');
 		return $_('budgets.period_month');
+	}
+
+	/** A trend window's friendly name from its start date: "March 2025"
+	 * (month), "Q4 2023" (quarter), "2024" (year). The windows are whole
+	 * calendar periods (the backend's periodBounds), so the start date
+	 * names the window fully — the old "from – to" range is redundant.
+	 * $locale may be null before init, hence the 'en' fallback (the app
+	 * is English-only anyway — see the i18n registration). */
+	function windowName(from: string, period: Period): string {
+		const y = Number(from.slice(0, 4));
+		const m = Number(from.slice(5, 7));
+		if (period === 'year') return String(y);
+		if (period === 'quarter') return `Q${Math.floor((m - 1) / 3) + 1} ${y}`;
+		return new Intl.DateTimeFormat($locale ?? 'en', { month: 'long', year: 'numeric' }).format(
+			new Date(y, m - 1, 1)
+		);
 	}
 
 	/** The current-period spend string for a target category, from
@@ -565,11 +581,17 @@
 									{/each}
 								</ul>
 
-								<!-- Adherence history: a plain table (oldest →
-									 newest); the plan's "chart/table" — the
-									 table is the honest minimal choice, the
-									 ECharts call is 6.4's. Cells are the raw
-									 API strings; red = over the budget's own
+								<!-- History: a plain table (oldest → newest);
+									 the window column is named for the
+									 budget's period (Month / Quarter / Year)
+									 and each row is that window's friendly
+									 name (March 2025 / Q4 2023 / 2024) — the
+									 windows are whole calendar periods, so
+									 the old "from – to" range is redundant.
+									 The plan's "chart/table" — the table is
+									 the honest minimal choice, the ECharts
+									 call is 6.4's. Cells are the raw API
+									 strings; red = over the budget's own
 									 target for the category. -->
 								<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
 									{$_('budgets.history')}
@@ -583,7 +605,7 @@
 												<tr
 													class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase"
 												>
-													<th class="py-1.5 pr-4">{$_('budgets.col_window')}</th>
+													<th class="py-1.5 pr-4">{periodLabel(b.period)}</th>
 													{#each targetCats(b) as c (c.id)}
 														<th class="py-1.5 pr-4 text-right">{c.name}</th>
 													{/each}
@@ -593,9 +615,7 @@
 												{#each summaries[b.period]?.trend ?? [] as p (p.from)}
 													<tr class="border-b border-zinc-100 dark:border-zinc-800 last:border-0">
 														<td class="py-1.5 pr-4 text-zinc-600 dark:text-zinc-400">
-															{$_('budgets.window_label', {
-																values: { from: p.from, to: p.to }
-															})}
+															{windowName(p.from, b.period)}
 														</td>
 														{#each targetCats(b) as c (c.id)}
 															<td
