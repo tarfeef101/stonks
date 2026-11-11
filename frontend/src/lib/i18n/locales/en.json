@@ -166,7 +166,7 @@
 		"delete": "Delete",
 		"confirm_delete": "Delete budget \"{name}\"?",
 		"period_fixed": "The period is fixed at creation and cannot be changed.",
-		"current_window": "for {from} – {to}",
+		"current_window": "For {window}",
 		"history": "History",
 		"over": "Over target",
 		"under": "Under target",

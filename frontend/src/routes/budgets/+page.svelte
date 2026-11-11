@@ -26,8 +26,9 @@
 	// are JSON NUMBERS on the wire and render via Svelte's default
 	// number-to-string (a known minor visual deviation from the
 	// server's canonical 2-decimal text — deliberately not "fixed" by
-	// formatting). Numeric parsing is limited to the bar-width and
-	// over/under helpers (geometry) — never for displayed text.
+	// formatting). Numeric parsing is limited to the bar-width,
+	// variance-% and over/under helpers (geometry) — never for
+	// displayed text.
 
 	// Trailing adherence history: always 6 windows (oldest → newest).
 	const TREND_PERIODS = 6;
@@ -292,6 +293,15 @@
 		);
 	}
 
+	/** The friendly name of the budget's CURRENT window (the "For …"
+	 * label under the targets) — the same naming as the history rows.
+	 * Empty while the summary has not loaded; the card only renders
+	 * once it has, so this is always named in practice. */
+	function currentWindowName(b: Budget): string {
+		const s = summaries[b.period];
+		return s ? windowName(s.from, b.period) : '';
+	}
+
 	/** The current-period spend string for a target category, from
 	 * the matching top-level summary group — VERBATIM, or null when
 	 * the window has no transactions in the category (the "no
@@ -356,6 +366,18 @@
 	function spendOverTarget(spend: string, target: number): boolean {
 		const t = targetCents(target);
 		return t > 0 && toCents(spend) > t;
+	}
+
+	/** The VARIANCE of a spend string from a target number, as a whole
+	 * % of the target — 55 means "55% over/under target"; the
+	 * DIRECTION is the row's red/green treatment, never this number.
+	 * Null when there is no spend or the target is not positive.
+	 * GEOMETRY ONLY. */
+	function deltaPct(spend: string | null, target: number): number | null {
+		if (spend === null) return null;
+		const t = targetCents(target);
+		if (t <= 0) return null;
+		return Math.round((Math.abs(toCents(spend) - t) / t) * 100);
 	}
 </script>
 
@@ -541,24 +563,31 @@
 									 number-to-string — see the page header). -->
 								<p class="mt-3 text-sm text-zinc-600 dark:text-zinc-400">{targetsText(b)}</p>
 
-								<!-- Current-period adherence: the spend strings
-									 are the raw API text; the bar and the
-									 over/under label are geometry only. -->
-								<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+								<!-- Current-period adherence: the "For …"
+									 label is the windowName of the current
+									 window (the same friendly naming as
+									 the history rows); the spend strings
+									 are the raw API text; the bar, the
+									 over/under label and the "(55%)"
+									 variance are geometry only. -->
+								<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400">
 									{$_('budgets.current_window', {
 										values: {
-											from: summaries[b.period]?.from ?? '',
-											to: summaries[b.period]?.to ?? ''
+											window: currentWindowName(b)
 										}
 									})}
 								</p>
 								<ul class="mt-2 space-y-3">
 									{#each targetCats(b) as c (c.id)}
+										{@const d = deltaPct(rowSpend(b, c.id), b.targets[c.id])}
 										<li class="text-sm">
 											<div class="flex items-baseline justify-between gap-2">
 												<span class="font-medium">{c.name}</span>
 												<span class="text-zinc-600 dark:text-zinc-400 tabular-nums">
 													{rowSpend(b, c.id) ?? $_('budgets.no_tx')}
+													{#if d !== null}
+														<span class="text-zinc-400"> ({d}%)</span>
+													{/if}
 													<span class="text-zinc-400"> / {b.targets[c.id]}</span>
 												</span>
 											</div>
@@ -591,8 +620,10 @@
 									 The plan's "chart/table" — the table is
 									 the honest minimal choice, the ECharts
 									 call is 6.4's. Cells are the raw API
-									 strings; red = over the budget's own
-									 target for the category. -->
+									 strings plus a "(157%)" variance-from-
+									 target figure (geometry); red = over
+									 the budget's own target for the
+									 category. -->
 								<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
 									{$_('budgets.history')}
 								</p>
@@ -618,6 +649,7 @@
 															{windowName(p.from, b.period)}
 														</td>
 														{#each targetCats(b) as c (c.id)}
+															{@const d = deltaPct(trendSpend(p.groups, c.id), b.targets[c.id])}
 															<td
 																class="py-1.5 pr-4 text-right tabular-nums {cellOver(
 																	p.groups,
@@ -628,6 +660,9 @@
 																	: 'text-zinc-600 dark:text-zinc-400'}"
 															>
 																{trendSpend(p.groups, c.id) ?? $_('budgets.no_tx')}
+																{#if d !== null}
+																	<span> ({d}%)</span>
+																{/if}
 															</td>
 														{/each}
 													</tr>
