@@ -45,9 +45,10 @@ type memTxRow struct {
 // references, amount canonicalization, the executed-not-after-posted
 // date rule, the 0002 dedup hash (a Create colliding with an existing
 // identity is ErrDedupConflict; an Update recomputes it), the List
-// filter set (repeatable account ids, category_id ""=uncategorized
-// only, inclusive date bounds, min/max amounts, the 1000-row search
-// candidate window, the date_posted DESC / id DESC ordering), and the
+// filter set (repeatable account ids, repeatable category ids — each a
+// UUID or ""=uncategorized only, OR-combined — inclusive date bounds,
+// min/max amounts, the 1000-row search candidate window, the
+// date_posted DESC / id DESC ordering), and the
 // per-user period aggregation (same account filter as List; every call
 // is recorded in aggregateCalls so tests can assert the handler's
 // window math). The per-op error fields exercise the handler's error
@@ -308,12 +309,15 @@ func (m *memTxStore) List(_ context.Context, userID string, f repo.TransactionFi
 				continue
 			}
 		}
-		if f.CategoryID != nil {
-			if *f.CategoryID == "" {
-				if r.tx.CategoryID != "" {
-					continue
+		if len(f.CategoryIDs) > 0 {
+			in := false
+			for _, c := range f.CategoryIDs {
+				if (c == "" && r.tx.CategoryID == "") || (c != "" && r.tx.CategoryID == c) {
+					in = true
+					break
 				}
-			} else if r.tx.CategoryID != *f.CategoryID {
+			}
+			if !in {
 				continue
 			}
 		}
@@ -855,9 +859,10 @@ func TestTransactionsDelete(t *testing.T) {
 
 // TestTransactionsList covers GET /api/v1/transactions: the default
 // ordering (date_posted DESC, id DESC), every filter (repeatable
-// account_id, category_id ""=uncategorized only, inclusive date bounds,
-// min/max amounts, case-insensitive description search), limit/offset
-// paging, the 400 filter table, and per-user scoping.
+// account_id, repeatable category_id — each a UUID or ""=uncategorized
+// only, OR-combined — inclusive date bounds, min/max amounts,
+// case-insensitive description search), limit/offset paging, the 400
+// filter table, and per-user scoping.
 func TestTransactionsList(t *testing.T) {
 	store := &memTxStore{}
 	h, key := newTxServer(t, store, nil, nil)
@@ -923,7 +928,7 @@ func TestTransactionsList(t *testing.T) {
 		}
 	})
 
-	t.Run("category_id: specific and empty=uncategorized", func(t *testing.T) {
+	t.Run("category_id: repeatable, OR-combined; empty=uncategorized", func(t *testing.T) {
 		if code, out := get("?category_id=" + c1); code != http.StatusOK ||
 			!sameIDs(ids(out), t1.ID, t4.ID) {
 			t.Errorf("c1: status=%d ids=%v, want [%s %s]", code, ids(out), t1.ID, t4.ID)
@@ -932,6 +937,16 @@ func TestTransactionsList(t *testing.T) {
 		// absent means "no filter".
 		if code, out := get("?category_id="); code != http.StatusOK || !sameIDs(ids(out), t3.ID) {
 			t.Errorf("empty: status=%d ids=%v, want [%s]", code, ids(out), t3.ID)
+		}
+		// Repeated values combine with OR: c1 OR c2.
+		if code, out := get("?category_id=" + c1 + "&category_id=" + c2); code != http.StatusOK ||
+			!sameIDs(ids(out), t2.ID, t1.ID, t4.ID) {
+			t.Errorf("c1+c2: status=%d ids=%v, want [%s %s %s]", code, ids(out), t2.ID, t1.ID, t4.ID)
+		}
+		// The empty value participates in the OR: uncategorized OR c1.
+		if code, out := get("?category_id=&category_id=" + c1); code != http.StatusOK ||
+			!sameIDs(ids(out), t3.ID, t1.ID, t4.ID) {
+			t.Errorf("empty+c1: status=%d ids=%v, want [%s %s %s]", code, ids(out), t3.ID, t1.ID, t4.ID)
 		}
 	})
 

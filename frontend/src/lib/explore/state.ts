@@ -31,8 +31,10 @@ export interface ExploreState {
 	/** Selected account ids, stored AS WRITTEN (case preserved), in URL
 	 * order; no dedup (keeps the round-trip total). */
 	account: string[];
-	/** '' = any category; 'none' = uncategorized only; else a category id. */
-	category: string;
+	/** Selected category values ('none' = uncategorized only, else a
+	 * category id), stored AS WRITTEN (case preserved), in URL order; no
+	 * dedup (keeps the round-trip total). Empty = any. */
+	category: string[];
 	/** Min amount in the server grammar, or '' when absent. With sign
 	 * 'spending' this is an ABSOLUTE magnitude (no leading '-'). */
 	min: string;
@@ -118,15 +120,15 @@ export const EXPLORE_STATE_KEY = 'ftrk-explore-state';
 
 /** Parses a query string WITHOUT a leading '?' into the full state.
  * Invalid values are silently dropped; unknown params are ignored; when a
- * param repeats, the first VALID occurrence wins (for `account`, every
- * valid occurrence is kept, in order). */
+ * param repeats, the first VALID occurrence wins (for `account` and
+ * `category`, every valid occurrence is kept, in order). */
 export function parseState(qs: string): ExploreState {
 	const params = new URLSearchParams(qs.startsWith('?') ? qs.slice(1) : qs);
 	const state: ExploreState = {
 		from: '',
 		to: '',
 		account: [],
-		category: '',
+		category: [],
 		min: '',
 		max: '',
 		q: '',
@@ -146,7 +148,7 @@ export function parseState(qs: string): ExploreState {
 	state.from = firstValid('from', isValidDate);
 	state.to = firstValid('to', isValidDate);
 	for (const v of params.getAll('account')) if (UUID_RE.test(v)) state.account.push(v);
-	state.category = firstValid('category', (v) => v === 'none' || UUID_RE.test(v));
+	for (const v of params.getAll('category')) if (v === 'none' || UUID_RE.test(v)) state.category.push(v);
 	state.min = firstValid('min', (v) => AMOUNT_RE.test(v));
 	state.max = firstValid('max', (v) => AMOUNT_RE.test(v));
 	state.q = params.getAll('q').find((v) => v !== '') ?? '';
@@ -191,7 +193,7 @@ function appendCanonical(s: ExploreState, params: URLSearchParams, alwaysSign: b
 	if (s.from !== '') params.append('from', s.from);
 	if (s.to !== '') params.append('to', s.to);
 	for (const a of s.account) params.append('account', a);
-	if (s.category !== '') params.append('category', s.category);
+	for (const c of s.category) params.append('category', c);
 	let min = s.min;
 	let max = s.max;
 	if (s.sign === 'spending') {
@@ -234,15 +236,16 @@ export function serializeStateForLink(s: ExploreState): string {
 
 /** The exact API query params for one page of the 3.2 List endpoint, in
  * the pinned wire order: date_from,date_to,account_id(repeated),
- * category_id,min_amount,max_amount,search,sign,limit=100,offset.
- * `category` 'none' becomes an EMPTY category_id (uncategorized-only).
- * chart/group are view-only — never present. */
+ * category_id(repeated),min_amount,max_amount,search,sign,limit=100,offset.
+ * Each `category` value is one category_id; 'none' becomes an EMPTY
+ * category_id (uncategorized-only). chart/group are view-only — never
+ * present. */
 export function apiQuery(s: ExploreState, offset: number): URLSearchParams {
 	const params = new URLSearchParams();
 	if (s.from !== '') params.append('date_from', s.from);
 	if (s.to !== '') params.append('date_to', s.to);
 	for (const a of s.account) params.append('account_id', a);
-	if (s.category !== '') params.append('category_id', s.category === 'none' ? '' : s.category);
+	for (const c of s.category) params.append('category_id', c === 'none' ? '' : c);
 	if (s.min !== '') params.append('min_amount', s.min);
 	if (s.max !== '') params.append('max_amount', s.max);
 	if (s.q !== '') params.append('search', s.q);

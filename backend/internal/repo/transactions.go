@@ -110,7 +110,8 @@ type TransactionPatch struct {
 }
 
 // TransactionFilter is the List query. nil/empty fields = unfiltered.
-// CategoryID "" = uncategorized only (IS NULL). DateFrom/DateTo bound
+// CategoryIDs: each value is a category UUID or "" (uncategorized only,
+// IS NULL), combined with OR. DateFrom/DateTo bound
 // date_posted (inclusive). MinAmount/MaxAmount are canonicalized
 // (inclusive); with Sign set they are absolute magnitudes — spending
 // matches -max..-min (amount < 0), income matches min..max (amount >
@@ -119,8 +120,8 @@ type TransactionPatch struct {
 // candidate window (see package doc). Limit defaults to 50, capped at
 // 100. Rows come back ordered date_posted DESC, id DESC.
 type TransactionFilter struct {
-	AccountIDs []string
-	CategoryID *string
+	AccountIDs  []string
+	CategoryIDs []string
 	DateFrom   *time.Time
 	DateTo     *time.Time
 	MinAmount  *string
@@ -541,11 +542,28 @@ func (s *TransactionStore) List(ctx context.Context, userID string, f Transactio
 		}
 		where = append(where, "account_id IN ("+strings.Join(ph, ", ")+")")
 	}
-	if f.CategoryID != nil {
-		if *f.CategoryID == "" {
-			where = append(where, "category_id IS NULL")
+	if len(f.CategoryIDs) > 0 {
+		var conds []string
+		var uuids []string
+		for _, c := range f.CategoryIDs {
+			if c == "" {
+				conds = append(conds, "category_id IS NULL")
+			} else {
+				uuids = append(uuids, c)
+			}
+		}
+		if len(uuids) > 0 {
+			ph := make([]string, len(uuids))
+			for i, id := range uuids {
+				args = append(args, id)
+				ph[i] = "$" + strconv.Itoa(len(args))
+			}
+			conds = append(conds, "category_id IN ("+strings.Join(ph, ", ")+")")
+		}
+		if len(conds) == 1 {
+			where = append(where, conds[0])
 		} else {
-			add("category_id =", *f.CategoryID)
+			where = append(where, "("+strings.Join(conds, " OR ")+")")
 		}
 	}
 	if f.DateFrom != nil {

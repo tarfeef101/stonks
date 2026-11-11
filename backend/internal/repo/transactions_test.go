@@ -380,10 +380,19 @@ func TestTransactionStore(t *testing.T) {
 				DateFrom: ptrDate("2026-03-02"), DateTo: ptrDate("2026-03-03"),
 			}, []string{fIDs["Filter Alpha Studio"], fIDs["Filter Beta Cafe"]}},
 			{"categorized", TransactionFilter{
-				DateFrom: ptrDate("2026-03-01"), CategoryID: strPtr(aCat.ID),
+				DateFrom: ptrDate("2026-03-01"), CategoryIDs: []string{aCat.ID},
 			}, []string{fIDs["Filter Delta Deli"], fIDs["Filter Alpha Studio"], fIDs["Filter Alpha Mart"]}},
 			{"uncategorized", TransactionFilter{
-				DateFrom: ptrDate("2026-03-01"), CategoryID: strPtr(""),
+				DateFrom: ptrDate("2026-03-01"), CategoryIDs: []string{""},
+			}, []string{fIDs["Filter Gamma Grocer"], fIDs["Filter Beta Cafe"]}},
+			{"categorized OR uncategorized", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), CategoryIDs: []string{aCat.ID, ""},
+			}, wantAll},
+			{"category no match", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), CategoryIDs: []string{bCat.ID},
+			}, []string{}},
+			{"category no match OR uncategorized", TransactionFilter{
+				DateFrom: ptrDate("2026-03-01"), CategoryIDs: []string{bCat.ID, ""},
 			}, []string{fIDs["Filter Gamma Grocer"], fIDs["Filter Beta Cafe"]}},
 			{"amount bounds inclusive", TransactionFilter{
 				DateFrom: ptrDate("2026-03-01"), MinAmount: strPtr("10"), MaxAmount: strPtr("26"),
@@ -455,7 +464,7 @@ func TestTransactionStore(t *testing.T) {
 			{"case-insensitive uppercase", TransactionFilter{Search: "DELI"},
 				[]string{fIDs["Filter Delta Deli"]}},
 			{"substring plus filters", TransactionFilter{
-				Search: "alpha", CategoryID: strPtr(aCat.ID), DateFrom: ptrDate("2026-03-01"),
+				Search: "alpha", CategoryIDs: []string{aCat.ID}, DateFrom: ptrDate("2026-03-01"),
 			}, []string{fIDs["Filter Alpha Studio"], fIDs["Filter Alpha Mart"]}},
 			{"search with limit", TransactionFilter{Search: "filter", Limit: 2},
 				[]string{fIDs["Filter Delta Deli"], fIDs["Filter Gamma Grocer"]}},

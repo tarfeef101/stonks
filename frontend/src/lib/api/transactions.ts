@@ -51,8 +51,8 @@ export function createTransaction(input: CreateTransactionInput): Promise<Transa
 }
 
 /** List filters for GET /v1/transactions (step 3.2), AND-combined on the
- * server. Absent (undefined) params are omitted from the query; an empty
- * `category_id` means "uncategorized only". */
+ * server. Absent (undefined) params are omitted from the query; an
+ * EMPTY `category_id` value means "uncategorized only". */
 export interface ListParams {
 	/** Inclusive lower bound on date_posted (YYYY-MM-DD). */
 	date_from?: string;
@@ -60,8 +60,9 @@ export interface ListParams {
 	date_to?: string;
 	/** Repeatable account filter (sent once per id). */
 	account_id?: string[];
-	/** A category id, or '' for uncategorized rows only. */
-	category_id?: string;
+	/** Repeatable category filter (sent once per value; '' =
+	 * uncategorized rows only). */
+	category_id?: string[];
 	min_amount?: string;
 	max_amount?: string;
 	/** Case-insensitive description substring. */
@@ -80,7 +81,7 @@ export function listTransactions(params: ListParams = {}): Promise<Transaction[]
 	if (params.date_from !== undefined) q.append('date_from', params.date_from);
 	if (params.date_to !== undefined) q.append('date_to', params.date_to);
 	for (const id of params.account_id ?? []) q.append('account_id', id);
-	if (params.category_id !== undefined) q.append('category_id', params.category_id);
+	for (const id of params.category_id ?? []) q.append('category_id', id);
 	if (params.min_amount !== undefined) q.append('min_amount', params.min_amount);
 	if (params.max_amount !== undefined) q.append('max_amount', params.max_amount);
 	if (params.search !== undefined) q.append('search', params.search);

@@ -508,12 +508,17 @@
 		explore = { ...explore, account: [...sel.selectedOptions].map((o) => o.value) };
 	}
 
+	function onCategoriesChange(e: Event): void {
+		const sel = e.currentTarget as HTMLSelectElement;
+		explore = { ...explore, category: [...sel.selectedOptions].map((o) => o.value) };
+	}
+
 	function resetFilters(): void {
 		explore = {
 			from: '',
 			to: '',
 			account: [],
-			category: '',
+			category: [],
 			min: '',
 			max: '',
 			q: '',
@@ -592,20 +597,20 @@
 						{$_('common.manage_accounts')}
 					</a>
 				</div>
-				<label class="block text-sm">
+				<div class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('explore.category_label')}</span>
 					<select
-						class="w-48 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						class="h-16 w-56 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						multiple
 						value={explore.category}
-						onchange={(e) => (explore = { ...explore, category: e.currentTarget.value })}
+						onchange={onCategoriesChange}
 					>
-						<option value="">{$_('explore.category_any')}</option>
 						<option value="none">{$_('explore.category_uncategorized')}</option>
 						{#each categories as c (c.id)}
 							<option value={c.id}>{c.name}</option>
 						{/each}
 					</select>
-				</label>
+				</div>
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_(explore.sign === 'spending' ? 'explore.min_spend_label' : explore.sign === 'income' ? 'explore.min_income_label' : 'explore.min_label')}</span>
 					<input

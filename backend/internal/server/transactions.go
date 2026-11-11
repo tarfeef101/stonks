@@ -236,8 +236,9 @@ func buildTxPatch(b transactionPatch) (repo.TransactionPatch, error) {
 }
 
 // txFilterFromQuery builds the List query from the query string.
-// account_id is repeatable; category_id's first value applies ("" =
-// uncategorized only); date_from/date_to bound date_posted inclusively;
+// account_id is repeatable; category_id is repeatable too — each value
+// is a UUID or "" (uncategorized only) — and combines with OR;
+// date_from/date_to bound date_posted inclusively;
 // min/max_amount are canonicalized; sign is "spending" (amount < 0) or
 // "income" (amount > 0) — with sign set, min/max_amount are absolute
 // magnitudes and a negative value is a 400; limit/offset are integers
@@ -253,16 +254,11 @@ func txFilterFromQuery(q url.Values) (repo.TransactionFilter, error) {
 		}
 		f.AccountIDs = append(f.AccountIDs, a)
 	}
-	if v, ok := q["category_id"]; ok && len(v) > 0 {
-		c := v[0]
-		if c == "" {
-			uncat := ""
-			f.CategoryID = &uncat
-		} else if !uuidShapeOK(c) {
+	for _, c := range q["category_id"] {
+		if c != "" && !uuidShapeOK(c) {
 			return f, errors.New("category_id must be a valid UUID")
-		} else {
-			f.CategoryID = &c
 		}
+		f.CategoryIDs = append(f.CategoryIDs, c)
 	}
 	if s := q.Get("date_from"); s != "" {
 		d, err := parseDateParam("date_from", s)

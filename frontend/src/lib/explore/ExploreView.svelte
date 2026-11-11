@@ -144,7 +144,7 @@
 		if (s.from !== '') p.date_from = s.from;
 		if (s.to !== '') p.date_to = s.to;
 		if (s.account.length > 0) p.account_id = [...s.account];
-		if (s.category !== '') p.category_id = s.category === 'none' ? '' : s.category;
+		if (s.category.length > 0) p.category_id = s.category.map((c) => (c === 'none' ? '' : c));
 		if (s.min !== '') p.min_amount = s.min;
 		if (s.max !== '') p.max_amount = s.max;
 		if (s.q !== '') p.search = s.q;
