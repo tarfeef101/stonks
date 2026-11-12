@@ -10,18 +10,23 @@
 	import {
 		listMortgages,
 		createMortgage,
+		patchMortgage,
 		getMortgageAmortization,
 		whatIfMortgageAmortization,
 		type AmortizationPayment,
 		type AmortizationSchedule,
 		type Mortgage,
+		type MortgageCreate,
+		type MortgageRateEvent,
 		type WhatIfRequest,
 		type WhatIfResult
 	} from '#lib/api/mortgages';
 
-	// Mortgage page (step 7.3): the stored mortgage spec — KPI line,
-	// balance/equity chart, yearly-collapsed schedule table — plus the
-	// what-if comparison panel over the 7.2 engine.
+	// Mortgage page (step 7.3): the stored mortgage spec — KPI line
+	// (incl. the next renewal when the spec has a term), balance/equity
+	// chart, yearly-collapsed schedule table, the rate-change events
+	// (round 23) — plus the what-if comparison panel over the 7.2 engine
+	// (rate, extra payments, payment frequency, renewals).
 	//
 	// Rendered-numbers contract: every displayed amount is the raw API
 	// string (canonical 2-decimal) bound straight into the DOM. Numeric
@@ -69,39 +74,50 @@
 		return mortgages.find((m) => m.id === selectedId) ?? null;
 	}
 
+	/** The selected row as a derived binding so the template can
+	 * null-narrow it inside an {#if}. */
+	const detailMortgage = $derived.by(() => selectedMortgage());
+
 	// --- Amortization fetch: one per selected mortgage ------------------
 	let amortization = $state<AmortizationSchedule | null>(null);
 	let amortizing = $state(false);
 	let amortError = $state<string | null>(null);
 	let amortSeq = 0;
 
+	/** Fetch the selected mortgage's schedule (seq-guarded against
+	 * stale responses) and reset the what-if controls — the stored spec
+	 * is the base of every comparison. Also re-run after a successful
+	 * rate-event PATCH (a renewal moves next_renewal). */
+	function loadAmortization(): Promise<void> {
+		const id = selectedId;
+		const seq = ++amortSeq;
+		amortizing = true;
+		amortization = null;
+		amortError = null;
+		resetWhatIf();
+		return getMortgageAmortization(id)
+			.then((s) => {
+				if (seq === amortSeq) amortization = s;
+			})
+			.catch((e) => {
+				if (seq === amortSeq) amortError = envelopeMessage(e);
+			})
+			.finally(() => {
+				if (seq === amortSeq) amortizing = false;
+			});
+	}
+
 	$effect(() => {
 		const sub = $user?.profile.sub ?? null;
 		const id = selectedId;
-		const seq = ++amortSeq;
 		if (sub === null || id === '') {
+			++amortSeq; // discard any in-flight fetch
 			amortization = null;
 			amortError = null;
 			amortizing = false;
 			return;
 		}
-		amortizing = true;
-		amortization = null;
-		amortError = null;
-		resetWhatIf();
-		getMortgageAmortization(id)
-			.then((s) => {
-				if (seq !== amortSeq) return;
-				amortization = s;
-			})
-			.catch((e) => {
-				if (seq !== amortSeq) return;
-				amortError = envelopeMessage(e);
-			})
-			.finally(() => {
-				if (seq !== amortSeq) return;
-				amortizing = false;
-			});
+		void loadAmortization();
 	});
 
 	// --- What-if state ----------------------------------------------------
@@ -110,6 +126,14 @@
 	let wiFreq = $state('monthly');
 	let wiOneTime = $state(0);
 	let wiDate = $state('');
+	// Round 24: the simulated payment frequency + a simulated renewal.
+	let wiPayFreq = $state('monthly');
+	let wiRenewDate = $state('');
+	let wiRenewRate = $state('');
+	let wiRenewType = $state('fixed');
+	// true when the last compare sent a payment_frequency override —
+	// months_saved is then measured in PAYMENT PERIODS, not months.
+	let wiFreqApplied = $state(false);
 	let whatIf = $state<WhatIfResult | null>(null);
 	let comparing = $state(false);
 	let compareError = $state<string | null>(null);
@@ -124,6 +148,11 @@
 		const m = selectedMortgage();
 		wiOneTime = 0;
 		wiDate = '';
+		wiPayFreq = 'monthly';
+		wiRenewDate = '';
+		wiRenewRate = '';
+		wiRenewType = 'fixed';
+		wiFreqApplied = false;
 		whatIf = null;
 		compareError = null;
 		expandedYears.clear();
@@ -131,12 +160,36 @@
 		wiRate = clampRate(m.annual_rate);
 		wiExtra = toCents(m.extra_payment_amount) / 100;
 		wiFreq = m.extra_payment_frequency;
+		wiPayFreq = m.payment_frequency;
+		wiRenewDate = nextRenewalOf(m) ?? '';
+		wiRenewRate = m.annual_rate;
+		wiRenewType = m.rate_type === 'variable' ? 'variable' : 'fixed';
 	}
 
 	function clampRate(s: string): number {
 		const v = parseFloat(s);
 		if (!Number.isFinite(v)) return 0.5;
 		return Math.min(15, Math.max(0.5, v));
+	}
+
+	/** The rate-type label; a legacy empty value reads as fixed (the
+	 * backend never fabricates one). */
+	function rateTypeLabel(t: string): string {
+		return t === 'variable' ? $_('mortgage.rate_variable') : $_('mortgage.rate_fixed');
+	}
+
+	/** Client mirror of the backend NextRenewalDate: the last re_amortize
+	 * event date (else the start) plus the term; null when the mortgage
+	 * has no term. INPUT PREFILL ONLY — the schedule's next_renewal is
+	 * the source of truth on display. */
+	function nextRenewalOf(m: Mortgage): string | null {
+		if (m.term_years <= 0) return null;
+		let base = m.start_date;
+		for (const ev of m.rate_events) if (ev.action === 're_amortize') base = ev.effective_date;
+		const d = new Date(`${base}T00:00:00Z`);
+		if (Number.isNaN(d.getTime())) return null;
+		d.setUTCFullYear(d.getUTCFullYear() + m.term_years);
+		return d.toISOString().slice(0, 10);
 	}
 
 	/** Compare the stored spec against the scenario, built by the pinned
@@ -157,10 +210,17 @@
 		if (wiOneTime > 0 && wiDate !== '') {
 			body.one_time_prepayment = { amount: wiOneTime.toFixed(2), date: wiDate };
 		}
+		// Sent only when it differs from the stored frequency; the
+		// renewal only when a date is set (the rate type is explicit).
+		if (wiPayFreq !== m.payment_frequency) body.payment_frequency = wiPayFreq;
+		if (wiRenewDate !== '') {
+			body.renewal = { date: wiRenewDate, annual_rate: wiRenewRate, rate_type: wiRenewType };
+		}
 		try {
 			const r = await whatIfMortgageAmortization(m.id, body);
 			if (seq !== compareSeq) return;
 			whatIf = r;
+			wiFreqApplied = body.payment_frequency !== undefined;
 		} catch (e) {
 			if (seq !== compareSeq) return;
 			whatIf = null;
@@ -176,7 +236,7 @@
 		else expandedYears.add(year);
 	}
 
-	// --- Add form (the 9 create fields) ----------------------------------
+	// --- Add form (the 9 create fields + the round-23 term metadata) -----
 	let form = $state({
 		account_id: '',
 		principal: '',
@@ -186,19 +246,24 @@
 		payment_frequency: 'monthly',
 		extra_payment_amount: '0.00',
 		extra_payment_frequency: 'monthly',
-		extra_prepayment_type: 'term'
+		extra_prepayment_type: 'term',
+		term_years: 0,
+		rate_type: 'fixed'
 	});
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 
 	/** Create the mortgage, refresh the list and select the new row;
-	 * a server 400 message is shown verbatim on error. */
+	 * a server 400 message is shown verbatim on error. term_years is
+	 * truncated to an integer (an emptied number input binds null at
+	 * runtime despite its number type). */
 	async function addMortgage(): Promise<void> {
 		if (creating) return;
 		creating = true;
 		createError = null;
 		try {
-			const m = await createMortgage(form);
+			const body: MortgageCreate = { ...form, term_years: Math.trunc(form.term_years ?? 0) };
+			const m = await createMortgage(body);
 			const all = await listMortgages();
 			mortgages = all;
 			listError = null;
@@ -207,6 +272,62 @@
 			createError = envelopeMessage(e);
 		} finally {
 			creating = false;
+		}
+	}
+
+	// --- Rate-change events (round 23 data, round 24 UI) -------------------
+	let evDate = $state('');
+	let evRate = $state('');
+	let evRateType = $state('fixed');
+	let evAction = $state('re_amortize');
+	let evError = $state<string | null>(null);
+	let evBusy = $state(false);
+
+	/** PATCH the full event array (server contract: a non-null
+	 * rate_events REPLACES the whole array), swap the row in the list,
+	 * and refetch the schedule (a renewal moves next_renewal). */
+	async function applyRateEvents(id: string, events: MortgageRateEvent[]): Promise<void> {
+		const updated = await patchMortgage(id, { rate_events: events });
+		mortgages = mortgages.map((x) => (x.id === updated.id ? updated : x));
+		await loadAmortization();
+	}
+
+	/** Add a rate change; the array is re-sorted ascending before it is
+	 * sent (a duplicate date 400s server-side and surfaces verbatim). */
+	async function addRateEvent(): Promise<void> {
+		const m = selectedMortgage();
+		if (m === null || evBusy || evDate === '') return;
+		evBusy = true;
+		evError = null;
+		try {
+			const next = [
+				...m.rate_events,
+				{ effective_date: evDate, annual_rate: evRate, rate_type: evRateType, action: evAction }
+			];
+			next.sort((a, b) => a.effective_date.localeCompare(b.effective_date));
+			await applyRateEvents(m.id, next);
+			evDate = '';
+			evRate = '';
+		} catch (e) {
+			evError = envelopeMessage(e);
+		} finally {
+			evBusy = false;
+		}
+	}
+
+	/** Remove a stored rate change (index into the stored array). */
+	async function removeRateEvent(i: number): Promise<void> {
+		const m = selectedMortgage();
+		if (m === null || evBusy) return;
+		evBusy = true;
+		evError = null;
+		try {
+			const next = m.rate_events.filter((_, j) => j !== i);
+			await applyRateEvents(m.id, next);
+		} catch (e) {
+			evError = envelopeMessage(e);
+		} finally {
+			evBusy = false;
 		}
 	}
 
@@ -398,6 +519,28 @@
 						/>
 					</label>
 					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('mortgage.form_term')}</span>
+						<input
+							type="number"
+							min={0}
+							max={40}
+							step={1}
+							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							placeholder={$_('mortgage.form_term_placeholder')}
+							bind:value={form.term_years}
+						/>
+					</label>
+					<label class="block text-sm">
+						<span class="mb-1 block font-medium">{$_('mortgage.form_rate_type')}</span>
+						<select
+							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							bind:value={form.rate_type}
+						>
+							<option value="fixed">{$_('mortgage.rate_fixed')}</option>
+							<option value="variable">{$_('mortgage.rate_variable')}</option>
+						</select>
+					</label>
+					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('mortgage.form_payment_freq')}</span>
 						<select
 							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
@@ -472,7 +615,7 @@
 							>
 								<span class="block text-sm font-medium">{m.principal}</span>
 								<span class="block text-xs text-zinc-600 dark:text-zinc-400">
-									{m.annual_rate}{$_('mortgage.percent')} / {m.start_date}
+									{m.annual_rate}{$_('mortgage.percent')} {rateTypeLabel(m.rate_type)} / {m.start_date}
 								</span>
 							</button>
 						</li>
@@ -486,8 +629,13 @@
 			{:else if amortError}
 				<p class="text-sm text-red-600 dark:text-red-400">{$_('mortgage.error_label')}: {amortError}</p>
 			{:else if amortization}
-				<!-- KPI line: the raw API strings, verbatim. -->
-				<div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+				<!-- KPI line: the raw API strings, verbatim. A fifth
+					 "next renewal" card when the spec has a term. -->
+				<div
+					class={amortization.next_renewal !== undefined
+						? 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5'
+						: 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'}
+				>
 					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
 							{$_('mortgage.label_base_payment')}
@@ -520,6 +668,16 @@
 							{amortization.total_interest}
 						</p>
 					</div>
+					{#if amortization.next_renewal !== undefined}
+						<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+							<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+								{$_('mortgage.label_next_renewal')}
+							</p>
+							<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
+								{amortization.next_renewal}
+							</p>
+						</div>
+					{/if}
 				</div>
 
 				<!-- Balance vs equity over the schedule (svg-polyline idiom). -->
@@ -624,6 +782,99 @@
 					</table>
 				</div>
 
+				<!-- Rate changes: stored events, edited as a full array. -->
+				{#if detailMortgage}
+					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.events_title')}</p>
+						<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.events_hint')}</p>
+						{#if detailMortgage.rate_events.length === 0}
+							<p class="mt-3 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.events_empty')}</p>
+						{:else}
+							<ul class="mt-3 divide-y divide-zinc-100 dark:divide-zinc-800">
+								{#each detailMortgage.rate_events as ev, i (ev.effective_date)}
+									<li class="flex flex-wrap items-center gap-3 py-2 text-sm">
+										<span class="w-24 font-medium">{ev.effective_date}</span>
+										<span>{ev.annual_rate}{$_('mortgage.percent')} {rateTypeLabel(ev.rate_type)}</span>
+										<span class="text-zinc-500 dark:text-zinc-400">
+											{ev.action === 're_amortize'
+												? $_('mortgage.event_action_re_amortize')
+												: $_('mortgage.event_action_keep_payment')}
+										</span>
+										<button
+											type="button"
+											class="ml-auto text-xs font-medium text-zinc-600 dark:text-zinc-400 underline decoration-zinc-300 underline-offset-2 hover:text-red-600 dark:hover:text-red-400 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+											disabled={evBusy}
+											onclick={() => removeRateEvent(i)}
+										>
+											{$_('mortgage.event_remove')}
+										</button>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						<form
+							class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5"
+							onsubmit={(e) => {
+								e.preventDefault();
+								void addRateEvent();
+							}}
+						>
+							<label class="block text-sm">
+								<span class="mb-1 block font-medium">{$_('mortgage.event_date')}</span>
+								<input
+									type="date"
+									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									bind:value={evDate}
+								/>
+							</label>
+							<label class="block text-sm">
+								<span class="mb-1 block font-medium">{$_('mortgage.event_rate')}</span>
+								<input
+									type="text"
+									inputmode="decimal"
+									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									placeholder={$_('mortgage.form_rate_placeholder')}
+									bind:value={evRate}
+								/>
+							</label>
+							<label class="block text-sm">
+								<span class="mb-1 block font-medium">{$_('mortgage.event_rate_type')}</span>
+								<select
+									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									bind:value={evRateType}
+								>
+									<option value="fixed">{$_('mortgage.rate_fixed')}</option>
+									<option value="variable">{$_('mortgage.rate_variable')}</option>
+								</select>
+							</label>
+							<label class="block text-sm">
+								<span class="mb-1 block font-medium">{$_('mortgage.event_action')}</span>
+								<select
+									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									bind:value={evAction}
+								>
+									<option value="re_amortize">{$_('mortgage.event_action_re_amortize')}</option>
+									<option value="keep_payment">{$_('mortgage.event_action_keep_payment')}</option>
+								</select>
+							</label>
+							<div class="flex items-end">
+								<button
+									type="submit"
+									class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+									disabled={evBusy || evDate === ''}
+								>
+									{evBusy ? $_('mortgage.event_adding') : $_('mortgage.event_add')}
+								</button>
+							</div>
+						</form>
+						{#if evError}
+							<p class="mt-3 text-sm text-red-600 dark:text-red-400">
+								{$_('mortgage.error_label')}: {evError}
+							</p>
+						{/if}
+					</div>
+				{/if}
+
 				<!-- What-if panel: sliders over the stored spec. -->
 				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.whatif_title')}</p>
@@ -686,6 +937,45 @@
 								bind:value={wiDate}
 							/>
 						</label>
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('mortgage.whatif_pay_freq')}</span>
+							<select
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={wiPayFreq}
+							>
+								<option value="monthly">{$_('mortgage.freq_monthly')}</option>
+								<option value="semi_monthly">{$_('mortgage.freq_semi_monthly')}</option>
+								<option value="biweekly">{$_('mortgage.freq_biweekly')}</option>
+							</select>
+						</label>
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('mortgage.whatif_renewal_date')}</span>
+							<input
+								type="date"
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={wiRenewDate}
+							/>
+						</label>
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('mortgage.whatif_renewal_rate')}</span>
+							<input
+								type="text"
+								inputmode="decimal"
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								placeholder={$_('mortgage.form_rate_placeholder')}
+								bind:value={wiRenewRate}
+							/>
+						</label>
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('mortgage.whatif_renewal_type')}</span>
+							<select
+								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								bind:value={wiRenewType}
+							>
+								<option value="fixed">{$_('mortgage.rate_fixed')}</option>
+								<option value="variable">{$_('mortgage.rate_variable')}</option>
+							</select>
+						</label>
 					</div>
 					<div class="mt-4 flex items-center gap-4">
 						<button
@@ -735,10 +1025,19 @@
 									<td class="py-1.5 text-right">{whatIf.total_interest}</td>
 								</tr>
 								<tr class="border-b border-zinc-100 dark:border-zinc-800">
-									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">{$_('mortgage.cmp_months')}</td>
+									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">
+										{wiFreqApplied ? $_('mortgage.cmp_periods') : $_('mortgage.cmp_months')}
+									</td>
 									<td class="py-1.5 pr-3 text-right">0</td>
 									<td class="py-1.5 text-right">{whatIf.months_saved}</td>
 								</tr>
+								{#if amortization.next_renewal !== undefined || whatIf.schedule.next_renewal !== undefined}
+									<tr class="border-b border-zinc-100 dark:border-zinc-800">
+										<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">{$_('mortgage.cmp_renewal')}</td>
+										<td class="py-1.5 pr-3 text-right">{amortization.next_renewal ?? '—'}</td>
+										<td class="py-1.5 text-right">{whatIf.schedule.next_renewal ?? '—'}</td>
+									</tr>
+								{/if}
 								<tr>
 									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">
 										{$_('mortgage.cmp_interest_saved')}

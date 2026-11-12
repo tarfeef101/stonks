@@ -8,8 +8,20 @@
 
 import { api } from './client';
 
+/** One stored rate change (round 23 contract): the rate and its type
+ * from the effective date on, and what happens to the payment.
+ * Served strictly ascending by effective_date; the rate is a
+ * canonical 2-decimal string. */
+export interface MortgageRateEvent {
+	effective_date: string;
+	annual_rate: string;
+	rate_type: string;
+	action: string;
+}
+
 /** A mortgage row (backend mortgageOut). The amounts and the rate are
- * canonical 2-decimal strings; years is a number. */
+ * canonical 2-decimal strings; years is a number. The round-23 term
+ * fields are appended last, matching the wire order. */
 export interface Mortgage {
 	id: string;
 	account_id: string;
@@ -21,6 +33,12 @@ export interface Mortgage {
 	extra_payment_amount: string;
 	extra_payment_frequency: string;
 	extra_prepayment_type: string;
+	/** 0 = no renewable term. */
+	term_years: number;
+	/** 'fixed' | 'variable'; legacy rows serve '' (render as fixed). */
+	rate_type: string;
+	/** Strictly ascending rate changes; always [] (never null). */
+	rate_events: MortgageRateEvent[];
 }
 
 /** The 9-field create body (POST /v1/mortgages, 7.1). */
@@ -34,6 +52,10 @@ export interface MortgageCreate {
 	extra_payment_amount: string;
 	extra_payment_frequency: string;
 	extra_prepayment_type: string;
+	/** Optional term metadata (defaults 0 / 'fixed'); client-sent
+	 * rate_events are silently ignored by the backend on create. */
+	term_years?: number;
+	rate_type?: string;
 }
 
 /** One payment of the amortization schedule; every amount is a
@@ -56,6 +78,9 @@ export interface AmortizationSchedule {
 	total_paid: string;
 	total_interest: string;
 	payments: AmortizationPayment[];
+	/** Present only when the generating spec has a term
+	 * (term_years > 0); the next scheduled renewal date. */
+	next_renewal?: string;
 }
 
 /** A what-if request: every field optional, at least one required (the
@@ -65,6 +90,12 @@ export interface WhatIfRequest {
 	extra_payment_amount?: string;
 	extra_payment_frequency?: string;
 	one_time_prepayment?: { amount: string; date: string };
+	/** Simulate a different payment frequency
+	 * (monthly/semi_monthly/biweekly). */
+	payment_frequency?: string;
+	/** Simulate a renewal at the date with the rate; supersedes stored
+	 * events dated on/after it. */
+	renewal?: { date: string; annual_rate: string; rate_type?: string };
 }
 
 /** A what-if result (POST /v1/mortgages/{id}/amortization/what-if,
@@ -85,6 +116,28 @@ export function listMortgages(): Promise<Mortgage[]> {
 /** Create a mortgage (7.1 endpoint). */
 export function createMortgage(body: MortgageCreate): Promise<Mortgage> {
 	return api<Mortgage>('/v1/mortgages', { method: 'POST', body });
+}
+
+/** The patch body (round 23): every field optional; absent = untouched,
+ * present = full replacement. A non-null rate_events replaces the WHOLE
+ * array ([] clears it); at least one field is required. */
+export interface MortgagePatch {
+	principal?: string;
+	annual_rate?: string;
+	amortization_years?: number;
+	start_date?: string;
+	payment_frequency?: string;
+	extra_payment_amount?: string;
+	extra_payment_frequency?: string;
+	extra_prepayment_type?: string;
+	term_years?: number;
+	rate_type?: string;
+	rate_events?: MortgageRateEvent[];
+}
+
+/** Patch a mortgage (round 23 endpoint). */
+export function patchMortgage(id: string, body: MortgagePatch): Promise<Mortgage> {
+	return api<Mortgage>(`/v1/mortgages/${id}`, { method: 'PATCH', body });
 }
 
 /** The stored spec's full amortization schedule (7.3 endpoint). */
