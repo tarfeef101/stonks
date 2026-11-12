@@ -544,7 +544,18 @@
 		const py = (frac: number) => PLOT.y0 + (1 - frac) * (PLOT.y1 - PLOT.y0);
 		const t0 = Date.parse(s.payments[0].date + 'T00:00:00Z');
 		const t1 = Date.parse(s.payments[n - 1].date + 'T00:00:00Z');
-		const span = Math.max(1, t1 - t0);
+		// Round 31: a live what-if scenario is overlaid on this chart,
+		// its payments mapped BY DATE onto the shared time axis. Both
+		// schedules share the mortgage's start date, so the axis
+		// widens only when the scenario payoff lands AFTER the stored
+		// one; the stored curve is then rescaled into the wider
+		// window via storedFrac (= 1 without a scenario, keeping every
+		// coordinate identical to the plain chart).
+		const scenDate =
+			whatIf !== null && whatIf.schedule.payments.length >= 2 ? whatIf.payoff_date : null;
+		const tEnd = scenDate !== null ? Math.max(t1, Date.parse(scenDate + 'T00:00:00Z')) : t1;
+		const span = Math.max(1, tEnd - t0);
+		const storedFrac = (t1 - t0) / span;
 		const pts: {
 			x: number;
 			by: number;
@@ -557,7 +568,7 @@
 			const p = s.payments[i];
 			const bc = toCents(p.balance);
 			pts.push({
-				x: Number(px(i / (n - 1)).toFixed(2)),
+				x: Number(px((i / (n - 1)) * storedFrac).toFixed(2)),
 				by: Number(py(bc / pc).toFixed(2)),
 				ey: Number(py(1 - bc / pc).toFixed(2)),
 				balance: p.balance,
@@ -572,10 +583,14 @@
 			label: compactNumberFormat(selectedCurrency).format((pc * f) / 100)
 		}));
 		// x-axis year ticks: the first payment, then a step of years
-		// (coarser for long schedules), then the payoff.
+		// (coarser for long schedules), then the payoff — over the
+		// widened domain when the scenario payoff is later.
 		const startYear = Number(s.payments[0].date.slice(0, 4));
-		const endYear = Number(s.payments[n - 1].date.slice(0, 4));
-		const spanYears = (t1 - t0) / (365.25 * 86400000);
+		const endYear =
+			scenDate !== null && scenDate > s.payments[n - 1].date
+				? Number(scenDate.slice(0, 4))
+				: Number(s.payments[n - 1].date.slice(0, 4));
+		const spanYears = (tEnd - t0) / (365.25 * 86400000);
 		const step = spanYears >= 10 ? 5 : spanYears >= 4 ? 2 : 1;
 		const xTicks: { x: number; label: string }[] = [
 			{ x: PLOT.x0, label: s.payments[0].date.slice(0, 4) }
@@ -601,7 +616,9 @@
 		for (let i = 0; i < n; i++) {
 			if (s.payments[i].date <= todayStr) iNow = i;
 		}
-		const fNow = tNow * (n - 1);
+		// storedFrac: on a widened domain the stored curve occupies
+		// only its first storedFrac of the axis.
+		const fNow = tNow * storedFrac * (n - 1);
 		const i0 = Math.max(0, Math.min(n - 2, Math.floor(fNow)));
 		const fr = (todayX - pts[i0].x) / (pts[i0 + 1].x - pts[i0].x || 1);
 		const byNow = pts[i0].by + fr * (pts[i0 + 1].by - pts[i0].by);
@@ -640,11 +657,42 @@
 			}
 		}
 		const todayLxFinal = Math.min(PLOT.x1 - 40, Math.max(PLOT.x0 + 40, todayLx));
+		// The scenario overlay: the what-if schedule mapped by date
+		// onto the shared axis (same y scale — the principal is
+		// shared), ending in a payoff dot; dashed strokes keep the
+		// stored curves primary.
+		let scenario: {
+			balance: string;
+			equity: string;
+			payoffX: number;
+			payoffY: number;
+		} | null = null;
+		if (scenDate !== null && whatIf !== null) {
+			const wPts: { x: number; by: number; ey: number }[] = [];
+			for (const p of whatIf.schedule.payments) {
+				const bc = toCents(p.balance);
+				const t = Math.max(0, (Date.parse(p.date + 'T00:00:00Z') - t0) / span);
+				wPts.push({
+					x: Number(px(t).toFixed(2)),
+					by: Number(py(bc / pc).toFixed(2)),
+					ey: Number(py(1 - bc / pc).toFixed(2))
+				});
+			}
+			const wl = wPts[wPts.length - 1];
+			scenario = {
+				balance: wPts.map((p) => `${p.x},${p.by}`).join(' '),
+				equity: wPts.map((p) => `${p.x},${p.ey}`).join(' '),
+				payoffX: wl.x,
+				payoffY: wl.by
+			};
+		}
 		return {
 			pts,
 			n,
+			storedFrac,
 			balance: pts.map((p) => `${p.x},${p.by}`).join(' '),
 			equity: pts.map((p) => `${p.x},${p.ey}`).join(' '),
+			scenario,
 			yTicks,
 			xTicks,
 			today: {
@@ -672,7 +720,9 @@
 		const r = svg.getBoundingClientRect();
 		const vx = ((e.clientX - r.left) / r.width) * CHART_W;
 		const t = (vx - PLOT.x0) / (PLOT.x1 - PLOT.x0);
-		const i = Math.min(c.n - 1, Math.max(0, Math.round(t * (c.n - 1))));
+		// storedFrac: on a widened (scenario) domain the stored
+		// points occupy only the first storedFrac of the axis.
+		const i = Math.min(c.n - 1, Math.max(0, Math.round(t * c.storedFrac * (c.n - 1))));
 		if (i !== hoverI) hoverI = i;
 	}
 
@@ -1177,6 +1227,43 @@
 								vector-effect="non-scaling-stroke"
 								class="text-green-600 dark:text-green-400"
 							/>
+							<!-- Round 31: the live what-if scenario,
+							 mapped by date onto the shared axis
+							 (dashed, same colors, so the stored
+							 curves stay primary) with a payoff dot
+							 where it ends. -->
+							{#if chart.scenario}
+								<polyline
+									points={chart.scenario.balance}
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.5"
+									stroke-dasharray="5 4"
+									vector-effect="non-scaling-stroke"
+									class="text-zinc-400"
+								/>
+								<polyline
+									points={chart.scenario.equity}
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.5"
+									stroke-dasharray="5 4"
+									vector-effect="non-scaling-stroke"
+									class="text-green-600 dark:text-green-400"
+								/>
+								<circle
+									cx={chart.scenario.payoffX}
+									cy={chart.scenario.payoffY}
+									r="5.5"
+									class="fill-white dark:fill-zinc-900"
+								/>
+								<circle
+									cx={chart.scenario.payoffX}
+									cy={chart.scenario.payoffY}
+									r="3.5"
+									class="fill-sky-500 dark:fill-sky-400"
+								/>
+							{/if}
 							<!-- In-plot "now" labels: the real
 							 post-payment balance/equity just right
 							 of the today line, masked so the curves
@@ -1344,6 +1431,14 @@
 									'mortgage.chart_legend_equity'
 								)}
 							</span>
+							{#if chart.scenario}
+								<span class="flex items-center gap-1.5">
+									<span
+										class="inline-block h-0 w-4 border-t-2 border-dashed border-zinc-400 dark:border-zinc-600"
+									></span>
+									{$_('mortgage.chart_legend_scenario')}
+								</span>
+							{/if}
 						</div>
 					{:else}
 						<p class="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.empty')}</p>

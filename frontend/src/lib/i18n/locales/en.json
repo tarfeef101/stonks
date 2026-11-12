@@ -240,6 +240,7 @@
 		"chart_aria": "Line chart of the remaining balance and the growing equity across the amortization schedule",
 		"chart_legend_balance": "Balance",
 		"chart_legend_equity": "Equity",
+		"chart_legend_scenario": "Scenario (dashed)",
 		"table_title": "Amortization schedule",
 		"table_hint": "Click a year to expand its payments.",
 		"col_year": "Year",
