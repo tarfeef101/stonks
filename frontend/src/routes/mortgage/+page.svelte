@@ -27,6 +27,53 @@
 
 	const nfCache: Record<string, Intl.NumberFormat> = {};
 
+	// Compact (axis-label) formatter cache: same symbol contract as
+	// numberFormat() — en-CA + CAD → "CA$121k"; unknown codes degrade
+	// to a plain compact number.
+	const compactCache: Record<string, Intl.NumberFormat> = {};
+
+	function compactNumberFormat(currency: string | null): Intl.NumberFormat {
+		const key = 'c:' + (currency ?? '');
+		let nf = compactCache[key];
+		if (nf === undefined) {
+			if (currency !== null && /^[A-Z]{3}$/.test(currency)) {
+				try {
+					nf = new Intl.NumberFormat(undefined, {
+						style: 'currency',
+						currency,
+						notation: 'compact',
+						maximumFractionDigits: 1
+					});
+				} catch {
+					// not a code Intl knows — fall through to plain
+				}
+			}
+			if (nf === undefined) {
+				nf = new Intl.NumberFormat(undefined, {
+					notation: 'compact',
+					maximumFractionDigits: 1
+				});
+			}
+			compactCache[key] = nf;
+		}
+		return nf;
+	}
+
+	// The "today" line's label: the browser's current calendar date,
+	// assembled from parts (en-CA) so the separator is never a locale
+	// surprise — YYYY-MM-DD, same shape as the API's dates.
+	const TODAY_FMT = new Intl.DateTimeFormat('en-CA', {
+		year: 'numeric',
+		month: '2-digit',
+		day: '2-digit'
+	});
+
+	function todayISO(): string {
+		const p = TODAY_FMT.formatToParts();
+		const g = (t: string) => p.find((x) => x.type === t)?.value ?? '';
+		return `${g('year')}-${g('month')}-${g('day')}`;
+	}
+
 	/** The display formatter for a currency code (cached per code):
 	 * the browser locale + that currency, or a plain grouped 2-decimal
 	 * number when the code is missing or Intl does not know it. */
@@ -471,33 +518,117 @@
 	}
 
 	// --- Chart + table geometry -------------------------------------------
-	const EQUITY_W = 100;
-	const EQUITY_H = 40;
+	// Uniform-scale viewBox (1 unit ≈ 1 px at ~800 px display width) so
+	// the axis labels, the "today" line and the hover crosshair are
+	// crisp SVG text. The series/ticks are pure float coordinate math;
+	// the only reactive piece is the hover index.
+	const CHART_W = 800;
+	const PLOT = {
+		x0: 108, // left margin: the y-axis money labels
+		x1: 788,
+		y0: 20, // top margin: the "today" label
+		y1: 224 // bottom margin: the x-axis year ticks
+	};
 
-	/** The balance/equity polylines scaled into the fixed viewBox, or
-	 * null when the schedule is too short or the stored principal is
-	 * not a positive amount (pure float coordinate math). */
-	const equitySeries = $derived.by(() => {
+	/** All of the chart's static render inputs (series, axis ticks,
+	 * the today line), or null when the schedule is too short or the
+	 * stored principal is not a positive amount. */
+	const chart = $derived.by(() => {
 		const m = selectedMortgage();
 		const s = amortization;
 		if (m === null || s === null) return null;
 		const pc = toCents(m.principal);
 		const n = s.payments.length;
 		if (n < 2 || pc <= 0) return null;
-		const balance: string[] = [];
-		const equity: string[] = [];
-		// Full float coordinates: snapping to integers stair-steps
-		// both lines at this viewBox's display size.
+		const px = (t: number) => PLOT.x0 + t * (PLOT.x1 - PLOT.x0);
+		const py = (frac: number) => PLOT.y0 + (1 - frac) * (PLOT.y1 - PLOT.y0);
+		const t0 = Date.parse(s.payments[0].date + 'T00:00:00Z');
+		const t1 = Date.parse(s.payments[n - 1].date + 'T00:00:00Z');
+		const span = Math.max(1, t1 - t0);
+		const pts: {
+			x: number;
+			by: number;
+			ey: number;
+			balance: string;
+			equityC: number;
+			date: string;
+		}[] = [];
 		for (let i = 0; i < n; i++) {
-			const bc = toCents(s.payments[i].balance);
-			const x = ((i / (n - 1)) * EQUITY_W).toFixed(2);
-			const balanceY = (EQUITY_H * (1 - bc / pc)).toFixed(2);
-			const equityY = ((EQUITY_H * bc) / pc).toFixed(2);
-			balance.push(`${x},${balanceY}`);
-			equity.push(`${x},${equityY}`);
+			const p = s.payments[i];
+			const bc = toCents(p.balance);
+			pts.push({
+				x: Number(px(i / (n - 1)).toFixed(2)),
+				by: Number(py(bc / pc).toFixed(2)),
+				ey: Number(py(1 - bc / pc).toFixed(2)),
+				balance: p.balance,
+				equityC: pc - bc,
+				date: p.date
+			});
 		}
-		return { balance: balance.join(' '), equity: equity.join(' ') };
+		// y-axis value ticks at quarter-steps of the principal,
+		// compact currency in the account's currency.
+		const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => ({
+			y: Number(py(f).toFixed(1)),
+			label: compactNumberFormat(selectedCurrency).format((pc * f) / 100)
+		}));
+		// x-axis year ticks: the first payment, then a step of years
+		// (coarser for long schedules), then the payoff.
+		const startYear = Number(s.payments[0].date.slice(0, 4));
+		const endYear = Number(s.payments[n - 1].date.slice(0, 4));
+		const spanYears = (t1 - t0) / (365.25 * 86400000);
+		const step = spanYears >= 10 ? 5 : spanYears >= 4 ? 2 : 1;
+		const xTicks: { x: number; label: string }[] = [
+			{ x: PLOT.x0, label: s.payments[0].date.slice(0, 4) }
+		];
+		for (let y = startYear + step; y <= endYear; y += step) {
+			const t = (Date.parse(`${y}-01-01T00:00:00Z`) - t0) / span;
+			if (t >= 0 && t <= 1) xTicks.push({ x: Number(px(t).toFixed(2)), label: String(y) });
+		}
+		if (String(endYear) !== xTicks[xTicks.length - 1].label) {
+			xTicks.push({ x: PLOT.x1, label: String(endYear) });
+		}
+		// The static "today" line: the current date clamped into the
+		// schedule window (a not-yet-started or paid-off loan pins it
+		// to the matching edge).
+		const todayStr = todayISO();
+		const tNow = Math.min(1, Math.max(0, (Date.parse(todayStr + 'T00:00:00Z') - t0) / span));
+		const todayX = Number(px(tNow).toFixed(2));
+		return {
+			pts,
+			n,
+			balance: pts.map((p) => `${p.x},${p.by}`).join(' '),
+			equity: pts.map((p) => `${p.x},${p.ey}`).join(' '),
+			yTicks,
+			xTicks,
+			today: {
+				x: todayX,
+				lx: Math.min(PLOT.x1 - 40, Math.max(PLOT.x0 + 40, todayX)),
+				label: todayStr
+			}
+		};
 	});
+
+	/** The payment index under the cursor (the hover crosshair), or
+	 * null when the pointer is off the chart. */
+	let hoverI = $state<number | null>(null);
+	let chartSvg = $state<SVGSVGElement | null>(null);
+
+	/** Map the cursor's clientX into the viewBox, then to the nearest
+	 * payment index (the crosshair snaps to data points). */
+	function chartMove(e: MouseEvent): void {
+		const svg = chartSvg;
+		const c = chart;
+		if (svg === null || c === null) return;
+		const r = svg.getBoundingClientRect();
+		const vx = ((e.clientX - r.left) / r.width) * CHART_W;
+		const t = (vx - PLOT.x0) / (PLOT.x1 - PLOT.x0);
+		const i = Math.min(c.n - 1, Math.max(0, Math.round(t * (c.n - 1))));
+		if (i !== hoverI) hoverI = i;
+	}
+
+	function chartLeave(): void {
+		hoverI = null;
+	}
 
 	/** The payments grouped into year rows (calendar order); the yearly
 	 * interest/principal totals are summed in integer cents, the end
@@ -854,16 +985,105 @@
 				<!-- Balance vs equity over the schedule (svg-polyline idiom). -->
 				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.chart_title')}</p>
-					{#if equitySeries}
+					{#if chart}
 						<svg
-							viewBox="0 0 100 40"
-							preserveAspectRatio="none"
-							class="mt-2 h-28 w-full"
+							bind:this={chartSvg}
+							viewBox="0 0 800 260"
+							class="mt-2 w-full cursor-crosshair"
 							role="img"
 							aria-label={$_('mortgage.chart_aria')}
+							onmousemove={chartMove}
+							onmouseleave={chartLeave}
 						>
+							{#each chart.yTicks as yt (yt.y)}
+								<line
+									x1={PLOT.x0}
+									y1={yt.y}
+									x2={PLOT.x1}
+									y2={yt.y}
+									stroke="currentColor"
+									stroke-width="1"
+									class="text-zinc-100 dark:text-zinc-800"
+								/>
+								<text
+									x={PLOT.x0 - 8}
+									y={yt.y + 4}
+									text-anchor="end"
+									font-size="12"
+									fill="currentColor"
+									class="text-zinc-500 dark:text-zinc-400"
+								>{yt.label}</text
+								>
+							{/each}
+							{#each chart.xTicks as xt (xt.label + xt.x)}
+								<line
+									x1={xt.x}
+									y1={PLOT.y1}
+									x2={xt.x}
+									y2={PLOT.y1 + 5}
+									stroke="currentColor"
+									stroke-width="1"
+									class="text-zinc-300 dark:text-zinc-700"
+								/>
+								<text
+									x={xt.x}
+									y={PLOT.y1 + 18}
+									text-anchor="middle"
+									font-size="12"
+									fill="currentColor"
+									class="text-zinc-500 dark:text-zinc-400"
+								>{xt.label}</text
+								>
+							{/each}
+							<line
+								x1={PLOT.x0}
+								y1={PLOT.y0}
+								x2={PLOT.x0}
+								y2={PLOT.y1}
+								stroke="currentColor"
+								stroke-width="1"
+								class="text-zinc-300 dark:text-zinc-700"
+							/>
+							<line
+								x1={PLOT.x0}
+								y1={PLOT.y1}
+								x2={PLOT.x1}
+								y2={PLOT.y1}
+								stroke="currentColor"
+								stroke-width="1"
+								class="text-zinc-300 dark:text-zinc-700"
+							/>
+							<!-- Static "today" line (current date, clamped
+							 into the schedule window) + its label. -->
+							<line
+								x1={chart.today.x}
+								y1={PLOT.y0}
+								x2={chart.today.x}
+								y2={PLOT.y1}
+								stroke="currentColor"
+								stroke-width="1.5"
+								class="text-amber-500"
+							/>
+							<rect
+								x={chart.today.lx - 40}
+								y={PLOT.y0 - 17}
+								width="80"
+								height="14"
+								rx="2"
+								class="fill-white dark:fill-zinc-900"
+							/>
+							<text
+								x={chart.today.lx}
+								y={PLOT.y0 - 6}
+								text-anchor="middle"
+								font-size="11"
+								font-weight="600"
+								fill="currentColor"
+								class="text-amber-600 dark:text-amber-400"
+							>{chart.today.label}</text
+							>
 							<polyline
-								points={equitySeries.balance}
+								points={chart.balance}
 								fill="none"
 								stroke="currentColor"
 								stroke-width="1.5"
@@ -871,13 +1091,128 @@
 								class="text-zinc-400"
 							/>
 							<polyline
-								points={equitySeries.equity}
+								points={chart.equity}
 								fill="none"
 								stroke="currentColor"
 								stroke-width="1.5"
 								vector-effect="non-scaling-stroke"
 								class="text-green-600 dark:text-green-400"
 							/>
+							<!-- Hover crosshair: dotted guides from the two
+							 points (on each line at the cursor's x) to
+							 both axes, the points themselves, value
+							 labels at the y-axis and the date at the
+							 x-axis (masked so they sit over ticks). -->
+							{#if hoverI !== null && hoverI < chart.n}
+								{@const hp = chart.pts[hoverI]}
+								{@const balLbl = money(hp.balance, selectedCurrency)}
+								{@const eqLbl = moneyNum(hp.equityC / 100, selectedCurrency)}
+								{@const close = Math.abs(hp.by - hp.ey) < 16}
+								{@const balTop = hp.by <= hp.ey}
+								{@const balLy = close ? (balTop ? hp.by - 11 : hp.by + 5) : hp.by + 4}
+								{@const eqLy = close ? (balTop ? hp.ey + 5 : hp.ey - 11) : hp.ey + 4}
+								{@const balW = balLbl.length * 6.8 + 8}
+								{@const eqW = eqLbl.length * 6.8 + 8}
+								{@const dateLx = Math.min(PLOT.x1 - 40, Math.max(PLOT.x0 + 40, hp.x))}
+								<line
+									x1={hp.x}
+									y1={hp.by}
+									x2={hp.x}
+									y2={PLOT.y1}
+									stroke="currentColor"
+									stroke-width="1"
+									stroke-dasharray="4 3"
+									class="text-zinc-400"
+								/>
+								<line
+									x1={PLOT.x0}
+									y1={hp.by}
+									x2={hp.x}
+									y2={hp.by}
+									stroke="currentColor"
+									stroke-width="1"
+									stroke-dasharray="4 3"
+									class="text-zinc-400"
+								/>
+								<circle cx={hp.x} cy={hp.by} r="5.5" class="fill-white dark:fill-zinc-900" />
+								<circle cx={hp.x} cy={hp.by} r="3.5" class="fill-zinc-400" />
+								<line
+									x1={hp.x}
+									y1={hp.ey}
+									x2={hp.x}
+									y2={PLOT.y1}
+									stroke="currentColor"
+									stroke-width="1"
+									stroke-dasharray="4 3"
+									class="text-green-600 dark:text-green-400"
+								/>
+								<line
+									x1={PLOT.x0}
+									y1={hp.ey}
+									x2={hp.x}
+									y2={hp.ey}
+									stroke="currentColor"
+									stroke-width="1"
+									stroke-dasharray="4 3"
+									class="text-green-600 dark:text-green-400"
+								/>
+								<circle cx={hp.x} cy={hp.ey} r="5.5" class="fill-white dark:fill-zinc-900" />
+								<circle cx={hp.x} cy={hp.ey} r="3.5" class="fill-green-600 dark:fill-green-400" />
+								<rect
+									x={PLOT.x0 - 8 - balW}
+									y={balLy - 11}
+									width={balW}
+									height="14"
+									rx="2"
+									class="fill-white dark:fill-zinc-900"
+								/>
+								<text
+									x={PLOT.x0 - 8}
+									y={balLy}
+									text-anchor="end"
+									font-size="12"
+									font-weight="600"
+									fill="currentColor"
+									class="text-zinc-700 dark:text-zinc-200"
+								>{balLbl}</text
+								>
+								<rect
+									x={PLOT.x0 - 8 - eqW}
+									y={eqLy - 11}
+									width={eqW}
+									height="14"
+									rx="2"
+									class="fill-white dark:fill-zinc-900"
+								/>
+								<text
+									x={PLOT.x0 - 8}
+									y={eqLy}
+									text-anchor="end"
+									font-size="12"
+									font-weight="600"
+									fill="currentColor"
+									class="text-zinc-700 dark:text-zinc-200"
+								>{eqLbl}</text
+								>
+								<rect
+									x={dateLx - 40}
+									y={PLOT.y1 + 6}
+									width="80"
+									height="14"
+									rx="2"
+									class="fill-white dark:fill-zinc-900"
+								/>
+								<text
+									x={dateLx}
+									y={PLOT.y1 + 17}
+									text-anchor="middle"
+									font-size="12"
+									font-weight="600"
+									fill="currentColor"
+									class="text-zinc-700 dark:text-zinc-200"
+								>{hp.date}</text
+								>
+							{/if}
 						</svg>
 						<div class="mt-2 flex items-center gap-4 text-xs text-zinc-600 dark:text-zinc-400">
 							<span class="flex items-center gap-1.5">
