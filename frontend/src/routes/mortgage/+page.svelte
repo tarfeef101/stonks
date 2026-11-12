@@ -593,6 +593,41 @@
 		const todayStr = todayISO();
 		const tNow = Math.min(1, Math.max(0, (Date.parse(todayStr + 'T00:00:00Z') - t0) / span));
 		const todayX = Number(px(tNow).toFixed(2));
+		// "Where am I at right now": the most recent payment on or
+		// before today supplies the real post-payment balance/equity
+		// for the y-axis labels; the interpolated y-crossings anchor
+		// where those labels sit.
+		let iNow = 0;
+		for (let i = 0; i < n; i++) {
+			if (s.payments[i].date <= todayStr) iNow = i;
+		}
+		const fNow = tNow * (n - 1);
+		const i0 = Math.max(0, Math.min(n - 2, Math.floor(fNow)));
+		const fr = (todayX - pts[i0].x) / (pts[i0 + 1].x - pts[i0].x || 1);
+		const byNow = pts[i0].by + fr * (pts[i0 + 1].by - pts[i0].by);
+		const eyNow = pts[i0].ey + fr * (pts[i0 + 1].ey - pts[i0].ey);
+		// y-axis label baselines at the crossings: the hover's
+		// close-curve offsets, plus a nudge off the quarter-step tick
+		// labels so a static label never parks over an axis index.
+		const closeNow = Math.abs(byNow - eyNow) < 16;
+		const balTopNow = byNow <= eyNow;
+		let balLy = closeNow ? (balTopNow ? byNow - 11 : byNow + 5) : byNow + 4;
+		let eqLy = closeNow ? (balTopNow ? eyNow + 5 : eyNow - 11) : eyNow + 4;
+		for (const yt of yTicks) {
+			const tly = yt.y + 4;
+			if (Math.abs(balLy - tly) < 13) balLy = balLy < tly ? tly - 13 : tly + 13;
+			if (Math.abs(eqLy - tly) < 13) eqLy = eqLy < tly ? tly - 13 : tly + 13;
+		}
+		// Date label below the axis, pushed a tick-width clear of any
+		// year tick (the ticks re-render over the mask, but the text
+		// must not sit on a tick label).
+		let todayLx = Math.min(PLOT.x1 - 40, Math.max(PLOT.x0 + 40, todayX));
+		for (const xt of xTicks) {
+			if (Math.abs(xt.x - todayLx) < 50) {
+				todayLx = xt.x <= todayX ? xt.x + 50 : xt.x - 50;
+			}
+		}
+		const todayLxFinal = Math.min(PLOT.x1 - 40, Math.max(PLOT.x0 + 40, todayLx));
 		return {
 			pts,
 			n,
@@ -602,8 +637,11 @@
 			xTicks,
 			today: {
 				x: todayX,
-				lx: Math.min(PLOT.x1 - 40, Math.max(PLOT.x0 + 40, todayX)),
-				label: todayStr
+				lx: todayLxFinal,
+				label: todayStr,
+				iNow,
+				balLy: Number(balLy.toFixed(2)),
+				eqLy: Number(eqLy.toFixed(2))
 			}
 		};
 	});
@@ -986,6 +1024,14 @@
 				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.chart_title')}</p>
 					{#if chart}
+						<!-- "Where am I at right now": the most recent
+						 payment's post-payment balance/equity, labelled
+						 at the y-axis crossings of the today line. -->
+						{@const tp = chart.pts[chart.today.iNow]}
+						{@const balNowLbl = money(tp.balance, selectedCurrency)}
+						{@const eqNowLbl = moneyNum(tp.equityC / 100, selectedCurrency)}
+						{@const balNowW = balNowLbl.length * 6.8 + 8}
+						{@const eqNowW = eqNowLbl.length * 6.8 + 8}
 						<svg
 							bind:this={chartSvg}
 							viewBox="0 0 800 260"
@@ -1015,6 +1061,30 @@
 								>{yt.label}</text
 								>
 							{/each}
+							<!-- Static "today" date label below the
+							 axis, mirroring the hover date label.
+							 Drawn before the tick labels so a tick
+							 re-renders over the mask when the two
+							 come close; the text itself is nudged
+							 clear in the chart derived. -->
+							<rect
+								x={chart.today.lx - 40}
+								y={PLOT.y1 + 6}
+								width="80"
+								height="14"
+								rx="2"
+								class="fill-white dark:fill-zinc-900"
+							/>
+							<text
+								x={chart.today.lx}
+								y={PLOT.y1 + 17}
+								text-anchor="middle"
+								font-size="12"
+								font-weight="600"
+								fill="currentColor"
+								class="text-amber-600 dark:text-amber-400"
+							>{chart.today.label}</text
+							>
 							{#each chart.xTicks as xt (xt.label + xt.x)}
 								<line
 									x1={xt.x}
@@ -1054,7 +1124,10 @@
 								class="text-zinc-300 dark:text-zinc-700"
 							/>
 							<!-- Static "today" line (current date, clamped
-							 into the schedule window) + its label. -->
+							 into the schedule window) + y-axis
+							 balance/equity labels at its crossings.
+							 The date label sits below the axis, in
+							 the tick band. -->
 							<line
 								x1={chart.today.x}
 								y1={PLOT.y0}
@@ -1065,22 +1138,40 @@
 								class="text-amber-500"
 							/>
 							<rect
-								x={chart.today.lx - 40}
-								y={PLOT.y0 - 17}
-								width="80"
+								x={PLOT.x0 - 8 - balNowW}
+								y={chart.today.balLy - 11}
+								width={balNowW}
 								height="14"
 								rx="2"
 								class="fill-white dark:fill-zinc-900"
 							/>
 							<text
-								x={chart.today.lx}
-								y={PLOT.y0 - 6}
-								text-anchor="middle"
-								font-size="11"
+								x={PLOT.x0 - 8}
+								y={chart.today.balLy}
+								text-anchor="end"
+								font-size="12"
 								font-weight="600"
 								fill="currentColor"
-								class="text-amber-600 dark:text-amber-400"
-							>{chart.today.label}</text
+								class="text-zinc-700 dark:text-zinc-200"
+							>{balNowLbl}</text
+							>
+							<rect
+								x={PLOT.x0 - 8 - eqNowW}
+								y={chart.today.eqLy - 11}
+								width={eqNowW}
+								height="14"
+								rx="2"
+								class="fill-white dark:fill-zinc-900"
+							/>
+							<text
+								x={PLOT.x0 - 8}
+								y={chart.today.eqLy}
+								text-anchor="end"
+								font-size="12"
+								font-weight="600"
+								fill="currentColor"
+								class="text-zinc-700 dark:text-zinc-200"
+							>{eqNowLbl}</text
 							>
 							<polyline
 								points={chart.balance}
