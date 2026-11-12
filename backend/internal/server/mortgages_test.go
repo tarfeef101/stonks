@@ -114,6 +114,8 @@ func (m *memMortgageStore) Create(_ context.Context, userID string, in repo.Mort
 			ExtraPaymentAmount:    in.ExtraPaymentAmount,
 			ExtraPaymentFrequency: in.ExtraPaymentFrequency,
 			ExtraPrepaymentType:   in.ExtraPrepaymentType,
+			TermYears:             in.TermYears,
+			RateType:              in.RateType,
 		},
 	}
 	m.rows = append(m.rows, memMortgageRow{userID: userID, m: mg})
@@ -152,6 +154,15 @@ func (m *memMortgageStore) Update(_ context.Context, userID, id string, p repo.M
 		}
 		if p.ExtraPrepaymentType != nil {
 			r.m.Spec.ExtraPrepaymentType = *p.ExtraPrepaymentType
+		}
+		if p.TermYears != nil {
+			r.m.Spec.TermYears = *p.TermYears
+		}
+		if p.RateType != nil {
+			r.m.Spec.RateType = *p.RateType
+		}
+		if p.RateEvents != nil {
+			r.m.Spec.RateEvents = p.RateEvents
 		}
 		m.rows[i].m = r.m
 		return r.m, nil
@@ -231,6 +242,7 @@ var wantMortgageKeys = []string{
 	"id", "account_id", "principal", "annual_rate", "amortization_years",
 	"start_date", "payment_frequency", "extra_payment_amount",
 	"extra_payment_frequency", "extra_prepayment_type",
+	"term_years", "rate_type", "rate_events",
 }
 
 // jsonKeyOrder returns the top-level keys of a JSON object body in wire
@@ -331,6 +343,15 @@ func TestMortgagesCRUD(t *testing.T) {
 	if row["extra_prepayment_type"] != "term" {
 		t.Errorf("extra_prepayment_type = %v, want \"term\"", row["extra_prepayment_type"])
 	}
+	if row["term_years"] != float64(0) {
+		t.Errorf("term_years = %v, want 0 (the create default)", row["term_years"])
+	}
+	if row["rate_type"] != "fixed" {
+		t.Errorf("rate_type = %v, want \"fixed\" (the create default)", row["rate_type"])
+	}
+	if !strings.Contains(out, `"rate_events":[]`) {
+		t.Errorf("create body = %s, want rate_events exactly [] (no events at create)", out)
+	}
 	if _, ok := row["created_at"]; ok {
 		t.Error("body carries created_at (bookkeeping stays server-side)")
 	}
@@ -341,7 +362,7 @@ func TestMortgagesCRUD(t *testing.T) {
 
 	// Second create (different values): create order.
 	code, out = doReq(t, h, http.MethodPost, "/api/v1/mortgages",
-		withField(t, withField(t, withField(t, baseMortgageBody(), "principal", "200000"), "amortization_years", 15), "payment_frequency", "semi_monthly"), hdr)
+		withField(t, withField(t, withField(t, withField(t, withField(t, baseMortgageBody(), "principal", "200000"), "amortization_years", 15), "payment_frequency", "semi_monthly"), "term_years", 5), "rate_type", "variable"), hdr)
 	if code != http.StatusCreated {
 		t.Fatalf("create 2: status = %d, want 201 (body %s)", code, out)
 	}
@@ -362,7 +383,8 @@ func TestMortgagesCRUD(t *testing.T) {
 	if list[0].ID != id1 || list[1].ID != id2 {
 		t.Errorf("list = [%s, %s], want [%s, %s] in create order", list[0].ID, list[1].ID, id1, id2)
 	}
-	if list[1].Principal != "200000.00" || list[1].AmortizationYears != 15 || list[1].PaymentFrequency != "semi_monthly" {
+	if list[1].Principal != "200000.00" || list[1].AmortizationYears != 15 || list[1].PaymentFrequency != "semi_monthly" ||
+		list[1].TermYears != 5 || list[1].RateType != "variable" {
 		t.Errorf("second row = %+v, want the patched-in values", list[1])
 	}
 	ids := []string{list[0].ID, list[1].ID}
@@ -423,6 +445,31 @@ func TestMortgagesCRUD(t *testing.T) {
 	}
 }
 
+// TestMortgagesCreateIgnoresEvents pins the round-23 create rule: rate
+// events are never settable on a create (they are recorded over time —
+// via the PATCH full-array replacement, or the round-25 matcher — not
+// invented at create), so a client-sent rate_events is silently ignored
+// and the created row is served with exactly [].
+func TestMortgagesCreateIgnoresEvents(t *testing.T) {
+	store := &memMortgageStore{}
+	h, key := newMortgageServer(t, newMortgageAccounts(), store)
+	hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
+	events := []map[string]any{
+		{"effective_date": "2020-07-01", "annual_rate": "5.50", "rate_type": "fixed", "action": "re_amortize"},
+	}
+	code, out := doReq(t, h, http.MethodPost, "/api/v1/mortgages",
+		withField(t, baseMortgageBody(), "rate_events", events), hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("create: status = %d, want 201 (body %s)", code, out)
+	}
+	if !strings.Contains(out, `"rate_events":[]`) {
+		t.Fatalf("create body = %s, want rate_events exactly [] (client-sent events are ignored on create)", out)
+	}
+	if store.createCalls != 1 {
+		t.Errorf("store create calls = %d, want 1", store.createCalls)
+	}
+}
+
 // TestMortgagesCreateRequired covers the POST all-9-required rule: each
 // missing field is exactly "<name> is required".
 func TestMortgagesCreateRequired(t *testing.T) {
@@ -472,6 +519,9 @@ func TestMortgagesCreateValidation(t *testing.T) {
 		{"extra_amount_negative", withField(t, baseMortgageBody(), "extra_payment_amount", "-1"), "extra_payment_amount must not be negative"},
 		{"extra_frequency_bad", withField(t, baseMortgageBody(), "extra_payment_frequency", "biweekly"), "extra_payment_frequency must be monthly, quarterly, or yearly"},
 		{"prepayment_type_bad", withField(t, baseMortgageBody(), "extra_prepayment_type", "interest"), "extra_prepayment_type must be term or principal"},
+		{"term_years_above_40", withField(t, baseMortgageBody(), "term_years", 41), "term_years must be between 0 and 40"},
+		{"term_years_negative", withField(t, baseMortgageBody(), "term_years", -1), "term_years must be between 0 and 40"},
+		{"rate_type_bad", withField(t, baseMortgageBody(), "rate_type", "arm"), "rate_type must be fixed or variable"},
 		{"two_problems_joined", withField(t, withField(t, baseMortgageBody(), "principal", "0"), "annual_rate", "abc"),
 			"principal must be greater than zero; annual_rate must be a number"},
 		{"account_missing_plus_bad_principal", withField(t, withoutField(t, baseMortgageBody(), "account_id"), "principal", "abc"),
@@ -604,6 +654,101 @@ func TestMortgagesPatch(t *testing.T) {
 	if row["amortization_years"] != float64(25) {
 		t.Errorf("amortization_years = %v, want 25", row["amortization_years"])
 	}
+
+	// Round 23: a non-nil rate_events FULLY replaces the stored events,
+	// canonicalizing each annual_rate to the 2-decimal percent string;
+	// the other spec fields stay verbatim.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1,
+		`{"rate_events":[{"effective_date":"2020-07-01","annual_rate":"5","rate_type":"fixed","action":"re_amortize"}]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch events: status = %d, want 200 (body %s)", code, out)
+	}
+	row = nil
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	evs, ok := row["rate_events"].([]any)
+	if !ok || len(evs) != 1 {
+		t.Fatalf("rate_events = %v, want exactly one event", row["rate_events"])
+	}
+	ev := evs[0].(map[string]any)
+	if ev["effective_date"] != "2020-07-01" || ev["annual_rate"] != "5.00" || ev["rate_type"] != "fixed" || ev["action"] != "re_amortize" {
+		t.Errorf("event = %v, want the canonical 5.00 and the verbatim fields", ev)
+	}
+	if row["annual_rate"] != "4.99" || row["term_years"] != float64(0) {
+		t.Errorf("event patch left other fields alone: annual_rate = %v, term_years = %v", row["annual_rate"], row["term_years"])
+	}
+
+	// term_years / rate_type are ordinary patch fields.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1,
+		`{"term_years":5,"rate_type":"variable"}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch term: status = %d, want 200 (body %s)", code, out)
+	}
+	row = nil
+	if err := json.Unmarshal([]byte(out), &row); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	if row["term_years"] != float64(5) || row["rate_type"] != "variable" {
+		t.Errorf("term_years/rate_type = %v/%v, want 5/variable", row["term_years"], row["rate_type"])
+	}
+
+	// An empty array is a valid full-array replacement: it clears.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1, `{"rate_events":[]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch clear: status = %d, want 200 (body %s)", code, out)
+	}
+	if !strings.Contains(out, `"rate_events":[]`) {
+		t.Errorf("cleared body = %s, want rate_events exactly []", out)
+	}
+
+	// null = absent: with nothing else present, an empty patch.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1, `{"rate_events":null}`, hdr)
+	expectAPIError(t, code, out, http.StatusBadRequest, "invalid_request", "empty patch: provide at least one field")
+
+	// Per-event 400s, EXACTLY as pinned. The stored start date
+	// (2020-06-01) anchors the after-start check; a patch start_date
+	// overrides it when present.
+	eventCases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"bad_date_form", `{"rate_events":[{"effective_date":"2020/07/01","annual_rate":"5","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event effective_date must be a date in YYYY-MM-DD form"},
+		{"before_stored_start", `{"rate_events":[{"effective_date":"2020-05-01","annual_rate":"5","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event effective_date must be after start_date"},
+		{"rate_not_a_number", `{"rate_events":[{"effective_date":"2020-07-01","annual_rate":"abc","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event annual_rate must be a number"},
+		{"rate_zero", `{"rate_events":[{"effective_date":"2020-07-01","annual_rate":"0","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event annual_rate must be greater than 0 and at most 100"},
+		{"rate_above_100", `{"rate_events":[{"effective_date":"2020-07-01","annual_rate":"100.01","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event annual_rate must be greater than 0 and at most 100"},
+		{"rate_type_bad", `{"rate_events":[{"effective_date":"2020-07-01","annual_rate":"5","rate_type":"arm","action":"re_amortize"}]}`,
+			"rate event rate_type must be fixed or variable"},
+		{"action_bad", `{"rate_events":[{"effective_date":"2020-07-01","annual_rate":"5","rate_type":"fixed","action":"swap"}]}`,
+			"rate event action must be re_amortize or keep_payment"},
+		{"not_ascending", `{"rate_events":[{"effective_date":"2020-08-01","annual_rate":"5","rate_type":"fixed","action":"re_amortize"},{"effective_date":"2020-07-01","annual_rate":"5","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event effective_dates must be strictly ascending"},
+		{"patch_start_overrides_stored", `{"start_date":"2021-01-01","rate_events":[{"effective_date":"2020-12-01","annual_rate":"5","rate_type":"fixed","action":"re_amortize"}]}`,
+			"rate event effective_date must be after start_date"},
+	}
+	for _, tc := range eventCases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := store.updateCalls
+			code, out := doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1, tc.body, hdr)
+			expectAPIError(t, code, out, http.StatusBadRequest, "invalid_request", tc.want)
+			if store.updateCalls != before {
+				t.Errorf("store update calls = %d, want %d (400 before any store update)", store.updateCalls, before)
+			}
+		})
+	}
+
+	// The row is fetched BEFORE body validation: an unknown well-formed
+	// id 404s even with a malformed body (no existence disclosure).
+	code, out = doReq(t, h, http.MethodPatch,
+		"/api/v1/mortgages/99999999-9999-9999-9999-999999999999", `{"annual_rate":"abc"}`, hdr)
+	expectAPIError(t, code, out, http.StatusNotFound, "not_found", "mortgage not found")
 
 	// Malformed id: 404 before the store.
 	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/not-a-uuid", `{"annual_rate":"5"}`, hdr)

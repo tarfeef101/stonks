@@ -1,14 +1,16 @@
 // Mortgage store tests (plan step 7.1, migration 0009): one shared
 // postgres:18 testcontainer (newTestEnv) with subtests covering the
-// CRUD round trip (the whole 8-field spec sealed as ONE pack),
-// created_at ordering, the whole-blob re-seal on update, the no-op
-// update rule, the not-found sentinels, per-user isolation, wrong-DEK
-// decryption failure, and the account FK.
+// CRUD round trip (the whole spec, term metadata included, sealed as
+// ONE pack), created_at ordering, the whole-blob re-seal on update,
+// the no-op update rule, the rate-event full-replacement update
+// (replace, no-op, clear), the not-found sentinels, per-user
+// isolation, wrong-DEK decryption failure, and the account FK.
 package repo
 
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +57,8 @@ func TestMortgageStore(t *testing.T) {
 		t.Fatalf("seed account b: %v", err)
 	}
 
+	// TermYears/RateType are the term metadata settable on create;
+	// rate events are NOT (they are added via the PATCH path).
 	full := MortgageIn{
 		AccountID:             acctA.ID,
 		Principal:             "500000.00",
@@ -65,6 +69,8 @@ func TestMortgageStore(t *testing.T) {
 		ExtraPaymentAmount:    "0.00",
 		ExtraPaymentFrequency: "monthly",
 		ExtraPrepaymentType:   "term",
+		TermYears:             5,
+		RateType:              "fixed",
 	}
 	fullSpec := MortgageSpec{
 		Principal:             full.Principal,
@@ -75,6 +81,8 @@ func TestMortgageStore(t *testing.T) {
 		ExtraPaymentAmount:    full.ExtraPaymentAmount,
 		ExtraPaymentFrequency: full.ExtraPaymentFrequency,
 		ExtraPrepaymentType:   full.ExtraPrepaymentType,
+		TermYears:             full.TermYears,
+		RateType:              full.RateType,
 	}
 
 	t.Run("create + get round trip", func(t *testing.T) {
@@ -82,14 +90,14 @@ func TestMortgageStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if created.ID == "" || created.UserID != aid || created.AccountID != acctA.ID || created.Spec != fullSpec {
+		if created.ID == "" || created.UserID != aid || created.AccountID != acctA.ID || !reflect.DeepEqual(created.Spec, fullSpec) {
 			t.Fatalf("created: %+v", created)
 		}
 		got, err := ms.Get(ctx, aid, created.ID, a.dek)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
-		if got != created {
+		if got.ID != created.ID || got.UserID != created.UserID || got.AccountID != created.AccountID || !reflect.DeepEqual(got.Spec, created.Spec) {
 			t.Fatalf("get: want %+v, got %+v", created, got)
 		}
 		// No plaintext spec in the DB: the blob is a sealed pack and
@@ -161,7 +169,7 @@ func TestMortgageStore(t *testing.T) {
 		want.AnnualRate = "5.49"
 		want.AmortizationYears = 30
 		want.ExtraPaymentAmount = "250.00"
-		if updated.Spec != want {
+		if !reflect.DeepEqual(updated.Spec, want) {
 			t.Fatalf("updated spec: %+v, want %+v", updated.Spec, want)
 		}
 		if updated.AccountID != acctA.ID || updated.ID != created.ID {
@@ -177,7 +185,7 @@ func TestMortgageStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get after update: %v", err)
 		}
-		if got.Spec != want {
+		if !reflect.DeepEqual(got.Spec, want) {
 			t.Fatalf("get after update: %+v, want %+v", got.Spec, want)
 		}
 		if err := ms.Delete(ctx, aid, created.ID); err != nil {
@@ -209,6 +217,8 @@ func TestMortgageStore(t *testing.T) {
 			ExtraPaymentAmount:    strPtr(fullSpec.ExtraPaymentAmount),
 			ExtraPaymentFrequency: strPtr(fullSpec.ExtraPaymentFrequency),
 			ExtraPrepaymentType:   strPtr(fullSpec.ExtraPrepaymentType),
+			TermYears:             intPtr(fullSpec.TermYears),
+			RateType:              strPtr(fullSpec.RateType),
 		}, a.dek)
 		if err != nil {
 			t.Fatalf("no-op (unchanged) update: %v", err)
@@ -216,8 +226,62 @@ func TestMortgageStore(t *testing.T) {
 		if ts := rowUpdatedAt(t, env.pool, ctx, created.ID); !ts.Equal(tsBefore) {
 			t.Fatalf("unchanged patch must not touch updated_at: %v -> %v", tsBefore, ts)
 		}
-		if got.Spec != fullSpec {
+		if !reflect.DeepEqual(got.Spec, fullSpec) {
 			t.Fatalf("row must be unchanged: %+v", got)
+		}
+		if err := ms.Delete(ctx, aid, created.ID); err != nil {
+			t.Fatalf("cleanup delete: %v", err)
+		}
+	})
+
+	t.Run("update rate events: full-array replacement", func(t *testing.T) {
+		created, err := ms.Create(ctx, aid, full, a.dek)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		events := []RateEvent{
+			{EffectiveDate: "2028-01-15", AnnualRate: "4.00", Action: "re_amortize"},
+			{EffectiveDate: "2031-01-15", AnnualRate: "6.50", RateType: "fixed", Action: "re_amortize"},
+		}
+		tsBefore := rowUpdatedAt(t, env.pool, ctx, created.ID)
+		// Replace: the stored events become exactly this slice, and
+		// the re-seal preserves the term metadata.
+		updated, err := ms.Update(ctx, aid, created.ID, MortgagePatch{RateEvents: events}, a.dek)
+		if err != nil {
+			t.Fatalf("update (replace): %v", err)
+		}
+		if !reflect.DeepEqual(updated.Spec.RateEvents, events) {
+			t.Fatalf("rate events: %+v, want %+v", updated.Spec.RateEvents, events)
+		}
+		if updated.Spec.TermYears != fullSpec.TermYears || updated.Spec.RateType != fullSpec.RateType {
+			t.Fatalf("term metadata lost in the re-seal: %+v", updated.Spec)
+		}
+		tsAfter := rowUpdatedAt(t, env.pool, ctx, created.ID)
+		if !tsAfter.After(tsBefore) {
+			t.Fatalf("replace must move updated_at: %v -> %v", tsBefore, tsAfter)
+		}
+		// The identical slice again is a no-op (DeepEqual match):
+		// updated_at stays put.
+		if _, err := ms.Update(ctx, aid, created.ID, MortgagePatch{RateEvents: events}, a.dek); err != nil {
+			t.Fatalf("update (no-op): %v", err)
+		}
+		if ts := rowUpdatedAt(t, env.pool, ctx, created.ID); !ts.Equal(tsAfter) {
+			t.Fatalf("identical events must not touch updated_at: %v -> %v", tsAfter, ts)
+		}
+		// An explicit empty slice clears the events (a nil stored
+		// slice and an empty slice are different values).
+		if _, err := ms.Update(ctx, aid, created.ID, MortgagePatch{RateEvents: []RateEvent{}}, a.dek); err != nil {
+			t.Fatalf("update (clear): %v", err)
+		}
+		got, err := ms.Get(ctx, aid, created.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get after clear: %v", err)
+		}
+		if len(got.Spec.RateEvents) != 0 {
+			t.Fatalf("clear must leave no events: %+v", got.Spec.RateEvents)
+		}
+		if ts := rowUpdatedAt(t, env.pool, ctx, created.ID); !ts.After(tsAfter) {
+			t.Fatalf("clear must move updated_at: %v -> %v", tsAfter, ts)
 		}
 		if err := ms.Delete(ctx, aid, created.ID); err != nil {
 			t.Fatalf("cleanup delete: %v", err)

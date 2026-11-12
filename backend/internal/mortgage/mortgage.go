@@ -32,6 +32,29 @@ type Spec struct {
 	ExtraPaymentAmount    float64 // >= 0; 0 = no recurring extra
 	ExtraPaymentFrequency string  // "monthly" | "quarterly" | "yearly"
 	ExtraPrepaymentType   string  // "term" | "principal"
+	TermYears             int     // 0 = none (legacy spec); otherwise the renewable term length in years (metadata only)
+	RateType              string  // "fixed" | "variable" ("" tolerated as fixed); metadata only
+	RateEvents            []RateEvent
+}
+
+// RateEvent is a rate change or renewal applied to the simulation. An event
+// takes effect on the first payment dated >= Date: the period rate switches
+// to AnnualRate for that payment and every payment after it.
+//
+//	Action "re_amortize" (a standard renewal): the regular payment is
+//	recomputed over the remaining original amortization, so the payoff
+//	date is preserved.
+//
+//	Action "keep_payment": the regular payment is unchanged and the payoff
+//	date floats — earlier for a rate cut, later for a rate hike (the
+//	amortization extends past the original end date when needed).
+//
+// RateType is metadata only (a fixed/variable switch carries no math).
+type RateEvent struct {
+	Date       time.Time // > StartDate, strictly ascending within RateEvents
+	AnnualRate float64   // percent, 0 < v <= 100
+	RateType   string    // "fixed" | "variable" ("" = unchanged); metadata only
+	Action     string    // "re_amortize" | "keep_payment"
 }
 
 // Payment is one row of an amortisation schedule.
@@ -172,6 +195,29 @@ func validate(spec Spec) error {
 	if spec.ExtraPrepaymentType != "term" && spec.ExtraPrepaymentType != "principal" {
 		return errors.New("extra prepayment type must be term or principal")
 	}
+	if spec.TermYears < 0 || spec.TermYears > 40 {
+		return errors.New("term years must be between 0 and 40")
+	}
+	if spec.RateType != "" && spec.RateType != "fixed" && spec.RateType != "variable" {
+		return errors.New("rate type must be fixed or variable")
+	}
+	for i, ev := range spec.RateEvents {
+		if !ev.Date.After(spec.StartDate) {
+			return errors.New("rate event date must be after the start date")
+		}
+		if math.IsNaN(ev.AnnualRate) || ev.AnnualRate <= 0 || ev.AnnualRate > 100 {
+			return errors.New("rate event annual rate must be between 0 and 100")
+		}
+		if ev.RateType != "" && ev.RateType != "fixed" && ev.RateType != "variable" {
+			return errors.New("rate event rate type must be fixed or variable")
+		}
+		if ev.Action != "re_amortize" && ev.Action != "keep_payment" {
+			return errors.New("rate event action must be re_amortize or keep_payment")
+		}
+		if i > 0 && !ev.Date.After(spec.RateEvents[i-1].Date) {
+			return errors.New("rate event dates must be strictly ascending")
+		}
+	}
 	return nil
 }
 
@@ -203,10 +249,24 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 		totalInt   float64
 		oneApplied bool
 	)
+	cap := n // amortization horizon; keep_payment rate hikes extend it
+	evIdx := 0
+	pendingAction := ""
 	d := start
 	for k := 1; ; k++ {
 		if k > 1 {
 			d = stepDate(d, spec.PaymentFrequency)
+		}
+		// Rate events take effect on the first payment dated >= the event
+		// date: the period rate switches BEFORE this period's interest is
+		// accrued, so the event's own payment is already at the new rate.
+		// At most one event can fire per period (dates are strictly
+		// ascending and no two payments share a date).
+		if evIdx < len(spec.RateEvents) && !d.Before(spec.RateEvents[evIdx].Date) {
+			ev := spec.RateEvents[evIdx]
+			r = PeriodicRate(ev.AnnualRate, ppy)
+			pendingAction = ev.Action
+			evIdx++
 		}
 		interest := bal * r
 		// Recurring extra: due when the payment lands in a new calendar
@@ -223,7 +283,7 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 			extraDue += one.Amount
 			oneApplied = true
 		}
-		final := k == n || bal+interest <= pay+extraDue
+		final := k == cap || bal+interest <= pay+extraDue
 		if final {
 			// The extra is applied to the balance first and trimmed if it
 			// would overshoot; the regular portion then pays off the rest.
@@ -260,8 +320,36 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 		totalOut := pay + extraDue
 		bal = bal + interest - totalOut
 		if spec.ExtraPrepaymentType == "principal" && extraDue > 0 {
-			pay = amortize(bal, r, n-k) // re-amortize the remainder over the remaining term
+			pay = amortize(bal, r, cap-k) // re-amortize the remainder over the remaining term
 		}
+		// The fired event's action lands AFTER this payment, on the new
+		// balance (same idiom as the principal-mode re-amortization).
+		switch pendingAction {
+		case "re_amortize":
+			if n-k > 0 {
+				pay = amortize(bal, r, n-k) // the renewal preserves the original payoff date
+				cap = n
+			}
+			// n-k <= 0 (an event past the original end, only reachable after
+			// a keep_payment extension): keep the current payment/horizon,
+			// the rate switch still stands.
+		case "keep_payment":
+			var m int
+			if r == 0 {
+				m = int(math.Ceil(bal / pay))
+			} else if pay <= bal*r {
+				return Schedule{}, errors.New("the payment cannot cover the interest after the rate change")
+			} else {
+				m = int(math.Ceil(-math.Log(1-bal*r/pay) / math.Log(1+r)))
+			}
+			if m > 4800 {
+				return Schedule{}, errors.New("the payment cannot cover the interest after the rate change")
+			}
+			if k+m > cap {
+				cap = k + m
+			}
+		}
+		pendingAction = ""
 		payments = append(payments, Payment{
 			Index:     k,
 			Date:      d,
@@ -274,4 +362,23 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 		totalPaid += totalOut
 		totalInt += interest
 	}
+}
+
+// NextRenewalDate returns the date the current term expires: start +
+// TermYears, or — when the spec carries re_amortize renewal events — the
+// LAST such event's date + TermYears (each renewal starts a new term).
+// keep_payment events do not move it. ok is false when TermYears is zero
+// (no term metadata, e.g. a legacy spec).
+func NextRenewalDate(spec Spec) (time.Time, bool) {
+	if spec.TermYears <= 0 {
+		return time.Time{}, false
+	}
+	base := spec.StartDate
+	for i := len(spec.RateEvents) - 1; i >= 0; i-- {
+		if spec.RateEvents[i].Action == "re_amortize" {
+			base = spec.RateEvents[i].Date
+			break
+		}
+	}
+	return time.Date(base.Year()+spec.TermYears, base.Month(), base.Day(), 0, 0, 0, 0, time.UTC), true
 }

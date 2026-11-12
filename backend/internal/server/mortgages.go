@@ -31,24 +31,50 @@ type MortgageStore interface {
 	Delete(ctx context.Context, userID, id string) error
 }
 
+// rateEvent is the wire shape of one stored rate change (round 23):
+// served on the GET/POST bodies and accepted by the PATCH body, where a
+// non-nil array FULLY replaces the stored events (an empty array clears
+// them; nil = untouched). annual_rate is the canonical 2-decimal percent
+// string, like the base spec's annual_rate.
+type rateEvent struct {
+	EffectiveDate string `json:"effective_date"`
+	AnnualRate    string `json:"annual_rate"`
+	RateType      string `json:"rate_type"`
+	Action        string `json:"action"`
+}
+
 // mortgageOut is the wire DTO (RAW, no envelope, NO timestamps — the 3.1
 // convention), the account plus the 8 spec fields in the pinned field
-// order. Amounts are canonical 2-decimal strings; annual_rate is a
-// percent string (e.g. "4.99"); amortization_years is a JSON integer.
+// order, then the term/renewal metadata (round 23, appended LAST).
+// Amounts are canonical 2-decimal strings; annual_rate is a
+// percent string (e.g. "4.99"); amortization_years and term_years are
+// JSON integers. rate_events is [] when the spec carries none.
 type mortgageOut struct {
-	ID                    string `json:"id"`
-	AccountID             string `json:"account_id"`
-	Principal             string `json:"principal"`
-	AnnualRate            string `json:"annual_rate"`
-	AmortizationYears     int    `json:"amortization_years"`
-	StartDate             string `json:"start_date"`
-	PaymentFrequency      string `json:"payment_frequency"`
-	ExtraPaymentAmount    string `json:"extra_payment_amount"`
-	ExtraPaymentFrequency string `json:"extra_payment_frequency"`
-	ExtraPrepaymentType   string `json:"extra_prepayment_type"`
+	ID                    string      `json:"id"`
+	AccountID             string      `json:"account_id"`
+	Principal             string      `json:"principal"`
+	AnnualRate            string      `json:"annual_rate"`
+	AmortizationYears     int         `json:"amortization_years"`
+	StartDate             string      `json:"start_date"`
+	PaymentFrequency      string      `json:"payment_frequency"`
+	ExtraPaymentAmount    string      `json:"extra_payment_amount"`
+	ExtraPaymentFrequency string      `json:"extra_payment_frequency"`
+	ExtraPrepaymentType   string      `json:"extra_prepayment_type"`
+	TermYears             int         `json:"term_years"`
+	RateType              string      `json:"rate_type"`
+	RateEvents            []rateEvent `json:"rate_events"`
 }
 
 func toMortgageOut(m repo.Mortgage) mortgageOut {
+	events := make([]rateEvent, 0, len(m.Spec.RateEvents))
+	for _, e := range m.Spec.RateEvents {
+		events = append(events, rateEvent{
+			EffectiveDate: e.EffectiveDate,
+			AnnualRate:    e.AnnualRate,
+			RateType:      e.RateType,
+			Action:        e.Action,
+		})
+	}
 	return mortgageOut{
 		ID:                    m.ID,
 		AccountID:             m.AccountID,
@@ -60,12 +86,17 @@ func toMortgageOut(m repo.Mortgage) mortgageOut {
 		ExtraPaymentAmount:    m.Spec.ExtraPaymentAmount,
 		ExtraPaymentFrequency: m.Spec.ExtraPaymentFrequency,
 		ExtraPrepaymentType:   m.Spec.ExtraPrepaymentType,
+		TermYears:             m.Spec.TermYears,
+		RateType:              m.Spec.RateType,
+		RateEvents:            events,
 	}
 }
 
-// mortgageIn is the POST body: pointer fields, nil = absent. All 9 are
-// required (a nil field is "<name> is required"). Unknown JSON fields
-// are ignored by the decoder.
+// mortgageIn is the POST body: pointer fields, nil = absent. The 9
+// spec fields are required (a nil field is "<name> is required");
+// term_years and rate_type are optional metadata (absent = 0 / "fixed").
+// Unknown JSON fields are ignored by the decoder. Rate events are NOT
+// settable on a create — they arrive later via the PATCH path.
 type mortgageIn struct {
 	AccountID             *string `json:"account_id"`
 	Principal             *string `json:"principal"`
@@ -76,21 +107,28 @@ type mortgageIn struct {
 	ExtraPaymentAmount    *string `json:"extra_payment_amount"`
 	ExtraPaymentFrequency *string `json:"extra_payment_frequency"`
 	ExtraPrepaymentType   *string `json:"extra_prepayment_type"`
+	TermYears             *int    `json:"term_years"`
+	RateType              *string `json:"rate_type"`
 }
 
-// mortgagePatch is the PATCH body: the 8 spec fields only, all optional
-// (nil = untouched), at least one present. account_id is immutable and
-// NOT in the patch DTO — a client-sent account_id is silently ignored by
-// the decoder.
+// mortgagePatch is the PATCH body: the 8 spec fields plus the term
+// metadata (round 23), all optional (nil = untouched), at least one
+// present. rate_events, when non-nil, FULLY replaces the stored events
+// (an empty array clears them). account_id is immutable and NOT in the
+// patch DTO — a client-sent account_id is silently ignored by the
+// decoder.
 type mortgagePatch struct {
-	Principal             *string `json:"principal"`
-	AnnualRate            *string `json:"annual_rate"`
-	AmortizationYears     *int    `json:"amortization_years"`
-	StartDate             *string `json:"start_date"`
-	PaymentFrequency      *string `json:"payment_frequency"`
-	ExtraPaymentAmount    *string `json:"extra_payment_amount"`
-	ExtraPaymentFrequency *string `json:"extra_payment_frequency"`
-	ExtraPrepaymentType   *string `json:"extra_prepayment_type"`
+	Principal             *string     `json:"principal"`
+	AnnualRate            *string     `json:"annual_rate"`
+	AmortizationYears     *int        `json:"amortization_years"`
+	StartDate             *string     `json:"start_date"`
+	PaymentFrequency      *string     `json:"payment_frequency"`
+	ExtraPaymentAmount    *string     `json:"extra_payment_amount"`
+	ExtraPaymentFrequency *string     `json:"extra_payment_frequency"`
+	ExtraPrepaymentType   *string     `json:"extra_prepayment_type"`
+	TermYears             *int        `json:"term_years"`
+	RateType              *string     `json:"rate_type"`
+	RateEvents            []rateEvent `json:"rate_events"`
 }
 
 // todayUTCMidnight is the server's current calendar date at UTC
@@ -105,11 +143,17 @@ func todayUTCMidnight() time.Time {
 // specFieldProblems validates the PRESENT (non-nil) spec fields; nil =
 // absent = skipped. The caller adds the account_id problems (shape
 // validation for create; the existence/type checks run after, in the
-// handler, only when account_id was shape-valid).
+// handler, only when account_id was shape-valid). rateEvents (round 23)
+// is validated per event and as a strictly ascending sequence; each
+// event's effective_date must also be after eventStart (a zero eventStart
+// skips that check — the start_date shape problem already 400s).
 func specFieldProblems(
 	principal, annualRate, startDate, paymentFrequency,
 	extraPaymentAmount, extraPaymentFrequency, extraPrepaymentType *string,
-	amortizationYears *int,
+	amortizationYears, termYears *int,
+	rateType *string,
+	rateEvents []rateEvent,
+	eventStart time.Time,
 ) []string {
 	var problems []string
 	if principal != nil {
@@ -168,6 +212,52 @@ func specFieldProblems(
 			problems = append(problems, "extra_prepayment_type must be term or principal")
 		}
 	}
+	if termYears != nil && (*termYears < 0 || *termYears > 40) {
+		problems = append(problems, "term_years must be between 0 and 40")
+	}
+	if rateType != nil {
+		switch *rateType {
+		case "fixed", "variable":
+		default:
+			problems = append(problems, "rate_type must be fixed or variable")
+		}
+	}
+	for i, e := range rateEvents {
+		d, derr := time.Parse("2006-01-02", e.EffectiveDate)
+		if derr != nil {
+			problems = append(problems, "rate event effective_date must be a date in YYYY-MM-DD form")
+		} else {
+			if !eventStart.IsZero() && !d.After(eventStart) {
+				problems = append(problems, "rate event effective_date must be after start_date")
+			}
+			if i > 0 {
+				// Strictly ascending across the array: compare against the
+				// previous event's date (skipped when it did not parse —
+				// that already reported its own form problem).
+				prev, perr := time.Parse("2006-01-02", rateEvents[i-1].EffectiveDate)
+				if perr == nil && !d.After(prev) {
+					problems = append(problems, "rate event effective_dates must be strictly ascending")
+				}
+			}
+		}
+		v, rerr := strconv.ParseFloat(e.AnnualRate, 64)
+		switch {
+		case rerr != nil:
+			problems = append(problems, "rate event annual_rate must be a number")
+		case math.IsNaN(v) || v <= 0 || v > 100:
+			problems = append(problems, "rate event annual_rate must be greater than 0 and at most 100")
+		}
+		switch e.RateType {
+		case "fixed", "variable":
+		default:
+			problems = append(problems, "rate event rate_type must be fixed or variable")
+		}
+		switch e.Action {
+		case "re_amortize", "keep_payment":
+		default:
+			problems = append(problems, "rate event action must be re_amortize or keep_payment")
+		}
+	}
 	return problems
 }
 
@@ -209,10 +299,13 @@ func (h *handler) validateMortgageIn(in *mortgageIn) error {
 	if in.ExtraPrepaymentType == nil {
 		problems = append(problems, "extra_prepayment_type is required")
 	}
+	// Create takes the term metadata (term_years, rate_type) but NO rate
+	// events (they arrive via PATCH), so the events arg is nil and the
+	// after-start check is skipped (zero eventStart).
 	problems = append(problems, specFieldProblems(
 		in.Principal, in.AnnualRate, in.StartDate, in.PaymentFrequency,
 		in.ExtraPaymentAmount, in.ExtraPaymentFrequency, in.ExtraPrepaymentType,
-		in.AmortizationYears,
+		in.AmortizationYears, in.TermYears, in.RateType, nil, time.Time{},
 	)...)
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
@@ -221,12 +314,21 @@ func (h *handler) validateMortgageIn(in *mortgageIn) error {
 }
 
 // validateMortgagePatch checks the present spec fields only (absent =
-// untouched; no "… is required" on a patch).
-func (h *handler) validateMortgagePatch(p *mortgagePatch) error {
+// untouched; no "… is required" on a patch). The rate events are checked
+// against the EFFECTIVE start date: the patch's start_date when present,
+// else the stored one (a patch that rewrites start_date and adds events
+// in the same call is checked against the NEW start).
+func (h *handler) validateMortgagePatch(p *mortgagePatch, stored *repo.Mortgage) error {
+	var eventStart time.Time
+	if p.StartDate != nil {
+		eventStart, _ = time.Parse("2006-01-02", *p.StartDate)
+	} else if stored != nil {
+		eventStart, _ = time.Parse("2006-01-02", stored.Spec.StartDate)
+	}
 	problems := specFieldProblems(
 		p.Principal, p.AnnualRate, p.StartDate, p.PaymentFrequency,
 		p.ExtraPaymentAmount, p.ExtraPaymentFrequency, p.ExtraPrepaymentType,
-		p.AmortizationYears,
+		p.AmortizationYears, p.TermYears, p.RateType, p.RateEvents, eventStart,
 	)
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
@@ -348,6 +450,16 @@ func (h *handler) mortgagesCreate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "annual_rate must be a number")
 		return
 	}
+	// term_years and rate_type are optional metadata: absent = 0 (no term
+	// on the spec) and "fixed".
+	termYears := 0
+	if in.TermYears != nil {
+		termYears = *in.TermYears
+	}
+	rateType := "fixed"
+	if in.RateType != nil {
+		rateType = *in.RateType
+	}
 	m, err := h.mortgages.Create(r.Context(), c.row.ID, repo.MortgageIn{
 		AccountID:             *in.AccountID,
 		Principal:             principal,
@@ -358,6 +470,8 @@ func (h *handler) mortgagesCreate(w http.ResponseWriter, r *http.Request) {
 		ExtraPaymentAmount:    extraPayment,
 		ExtraPaymentFrequency: *in.ExtraPaymentFrequency,
 		ExtraPrepaymentType:   *in.ExtraPrepaymentType,
+		TermYears:             termYears,
+		RateType:              rateType,
 	}, c.dek)
 	if err != nil {
 		h.mortgageError(w, "create", err)
@@ -390,11 +504,21 @@ func (h *handler) mortgagesUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.Principal == nil && p.AnnualRate == nil && p.AmortizationYears == nil &&
 		p.StartDate == nil && p.PaymentFrequency == nil && p.ExtraPaymentAmount == nil &&
-		p.ExtraPaymentFrequency == nil && p.ExtraPrepaymentType == nil {
+		p.ExtraPaymentFrequency == nil && p.ExtraPrepaymentType == nil &&
+		p.TermYears == nil && p.RateType == nil && p.RateEvents == nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "empty patch: provide at least one field")
 		return
 	}
-	if err := h.validateMortgagePatch(&p); err != nil {
+	// The row is fetched BEFORE field validation: the rate events are
+	// checked against the stored start date when the patch carries none,
+	// and an unknown id 404s even with a malformed body (the 7.1 house
+	// order is otherwise unchanged; the empty patch still 400s first).
+	m, err := h.mortgages.Get(r.Context(), c.row.ID, id, c.dek)
+	if err != nil {
+		h.mortgageError(w, "update", err)
+		return
+	}
+	if err := h.validateMortgagePatch(&p, &m); err != nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
@@ -406,6 +530,8 @@ func (h *handler) mortgagesUpdate(w http.ResponseWriter, r *http.Request) {
 		PaymentFrequency:      p.PaymentFrequency,
 		ExtraPaymentFrequency: p.ExtraPaymentFrequency,
 		ExtraPrepaymentType:   p.ExtraPrepaymentType,
+		TermYears:             p.TermYears,
+		RateType:              p.RateType,
 	}
 	if p.Principal != nil {
 		principal, err := repo.CanonicalAmount(*p.Principal)
@@ -432,7 +558,27 @@ func (h *handler) mortgagesUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.ExtraPaymentAmount = &extraPayment
 	}
-	m, err := h.mortgages.Update(r.Context(), c.row.ID, id, patch, c.dek)
+	if p.RateEvents != nil {
+		// Full-array replacement: the events are canonicalized (rate to
+		// the 2-decimal percent string) and stored verbatim, dates and
+		// the rest as validated. A non-nil empty slice clears them.
+		events := make([]repo.RateEvent, 0, len(p.RateEvents))
+		for _, e := range p.RateEvents {
+			rate, err := strconv.ParseFloat(e.AnnualRate, 64)
+			if err != nil || math.IsNaN(rate) {
+				writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "rate event annual_rate must be a number")
+				return
+			}
+			events = append(events, repo.RateEvent{
+				EffectiveDate: e.EffectiveDate,
+				AnnualRate:    strconv.FormatFloat(rate, 'f', 2, 64),
+				RateType:      e.RateType,
+				Action:        e.Action,
+			})
+		}
+		patch.RateEvents = events
+	}
+	m, err = h.mortgages.Update(r.Context(), c.row.ID, id, patch, c.dek)
 	if err != nil {
 		h.mortgageError(w, "update", err)
 		return

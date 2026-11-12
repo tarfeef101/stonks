@@ -1,13 +1,14 @@
 // Per-user mortgage repository (plan step 7.1, migration 0009): the
 // entire mortgage spec (principal, annual_rate, amortization_years,
 // start_date, payment_frequency, extra_payment_amount/frequency,
-// extra_prepayment_type) is stored per plan §5 as ONE DEK-encrypted
-// blob — the marshalled spec sealed as a single crypto.Seal pack in
-// spec_encrypted, with NO plaintext spec columns. The amortisation
-// engine (7.2) and the UI (7.3) decrypt in-app. account_id is
-// immutable: a mortgage belongs to exactly one account. The store does
-// NOT validate the account (existence/type checks live in the server
-// layer); a bad account_id surfaces as a foreign-key violation.
+// extra_prepayment_type, term_years, rate_type, rate_events) is stored
+// per plan §5 as ONE DEK-encrypted blob — the marshalled spec sealed as
+// a single crypto.Seal pack in spec_encrypted, with NO plaintext spec
+// columns. The amortisation engine (7.2) and the UI (7.3) decrypt
+// in-app. account_id is immutable: a mortgage belongs to exactly one
+// account. The store does NOT validate the account (existence/type
+// checks live in the server layer); a bad account_id surfaces as a
+// foreign-key violation.
 package repo
 
 import (
@@ -16,24 +17,46 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"finance-tracker/internal/crypto"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// RateEvent is one stored rate change (round 23): on EffectiveDate
+// ("2006-01-02", strictly ascending across the slice) the annual rate
+// switches to AnnualRate (the canonical 2-decimal string the server
+// produced; the repo stores it as-is) and, when non-empty, the rate
+// type to RateType. Action is "re_amortize" (renewal: the payment is
+// recomputed over the remaining amortization) or "keep_payment" (the
+// payment is unchanged and the payoff date floats).
+type RateEvent struct {
+	EffectiveDate string `json:"effective_date"`
+	AnnualRate    string `json:"annual_rate"`
+	RateType      string `json:"rate_type"`
+	Action        string `json:"action"`
+}
+
 // MortgageSpec is the entire mortgage spec as one struct: marshalled to
 // JSON and sealed as ONE pack (plan §5). Amounts are canonical 2-decimal
-// strings; AmortizationYears is a JSON integer.
+// strings; AmortizationYears and TermYears are JSON integers (TermYears
+// 0 = none, metadata only); RateType is "fixed" | "variable" (""
+// tolerated as fixed); RateEvents is nil when there are none. The three
+// term/renewal fields are appended LAST so pre-existing sealed blobs
+// unmarshal to their zero values.
 type MortgageSpec struct {
-	Principal             string `json:"principal"`
-	AnnualRate            string `json:"annual_rate"`
-	AmortizationYears     int    `json:"amortization_years"`
-	StartDate             string `json:"start_date"`
-	PaymentFrequency      string `json:"payment_frequency"`
-	ExtraPaymentAmount    string `json:"extra_payment_amount"`
-	ExtraPaymentFrequency string `json:"extra_payment_frequency"`
-	ExtraPrepaymentType   string `json:"extra_prepayment_type"`
+	Principal             string      `json:"principal"`
+	AnnualRate            string      `json:"annual_rate"`
+	AmortizationYears     int         `json:"amortization_years"`
+	StartDate             string      `json:"start_date"`
+	PaymentFrequency      string      `json:"payment_frequency"`
+	ExtraPaymentAmount    string      `json:"extra_payment_amount"`
+	ExtraPaymentFrequency string      `json:"extra_payment_frequency"`
+	ExtraPrepaymentType   string      `json:"extra_prepayment_type"`
+	TermYears             int         `json:"term_years"`
+	RateType              string      `json:"rate_type"`
+	RateEvents            []RateEvent `json:"rate_events"`
 }
 
 // Mortgage is one mortgages row with its spec opened. The wire DTOs
@@ -45,7 +68,9 @@ type Mortgage struct {
 	Spec      MortgageSpec
 }
 
-// MortgageIn is the Create input: the account plus the 8 spec fields.
+// MortgageIn is the Create input: the account plus the 8 spec fields
+// and the term metadata (term_years, rate_type). Rate events are not
+// settable on create — they are added later via the PATCH path.
 type MortgageIn struct {
 	AccountID             string
 	Principal             string
@@ -56,10 +81,14 @@ type MortgageIn struct {
 	ExtraPaymentAmount    string
 	ExtraPaymentFrequency string
 	ExtraPrepaymentType   string
+	TermYears             int
+	RateType              string
 }
 
 // MortgagePatch is the Update input; nil = untouched (absent in the
-// PATCH body). AccountID is immutable and NOT patchable.
+// PATCH body). AccountID is immutable and NOT patchable. RateEvents is
+// a FULL-ARRAY replacement: nil = untouched, non-nil (including empty)
+// = the stored events become exactly this slice.
 type MortgagePatch struct {
 	Principal             *string
 	AnnualRate            *string
@@ -69,6 +98,9 @@ type MortgagePatch struct {
 	ExtraPaymentAmount    *string
 	ExtraPaymentFrequency *string
 	ExtraPrepaymentType   *string
+	TermYears             *int
+	RateType              *string
+	RateEvents            []RateEvent
 }
 
 // MortgageStore persists mortgages. One store serves every user; each
@@ -188,6 +220,8 @@ func (s *MortgageStore) Create(ctx context.Context, userID string, in MortgageIn
 		ExtraPaymentAmount:    in.ExtraPaymentAmount,
 		ExtraPaymentFrequency: in.ExtraPaymentFrequency,
 		ExtraPrepaymentType:   in.ExtraPrepaymentType,
+		TermYears:             in.TermYears,
+		RateType:              in.RateType,
 	}
 	pack, err := sealSpec(dek, spec)
 	if err != nil {
@@ -208,9 +242,9 @@ func (s *MortgageStore) Create(ctx context.Context, userID string, in MortgageIn
 // Update applies the non-nil fields of p to the user's mortgage and
 // returns the updated row. The whole spec re-seals as ONE pack. An
 // unchanged patch (all nil, or every present field equal to the
-// current spec) is a no-op: the row comes back without an UPDATE, so
-// updated_at stays put (the budgets/cards no-op rule). AccountID is
-// immutable.
+// current spec; RateEvents compared by reflect.DeepEqual) is a no-op:
+// the row comes back without an UPDATE, so updated_at stays put (the
+// budgets/cards no-op rule). AccountID is immutable.
 func (s *MortgageStore) Update(ctx context.Context, userID, id string, p MortgagePatch, dek []byte) (Mortgage, error) {
 	var pack []byte
 	err := s.pool.QueryRow(ctx, `
@@ -264,6 +298,18 @@ func (s *MortgageStore) Update(ctx context.Context, userID, id string, p Mortgag
 	}
 	if p.ExtraPrepaymentType != nil && *p.ExtraPrepaymentType != cur.ExtraPrepaymentType {
 		next.ExtraPrepaymentType = *p.ExtraPrepaymentType
+		changed = true
+	}
+	if p.TermYears != nil && *p.TermYears != cur.TermYears {
+		next.TermYears = *p.TermYears
+		changed = true
+	}
+	if p.RateType != nil && *p.RateType != cur.RateType {
+		next.RateType = *p.RateType
+		changed = true
+	}
+	if p.RateEvents != nil && !reflect.DeepEqual(p.RateEvents, cur.RateEvents) {
+		next.RateEvents = p.RateEvents
 		changed = true
 	}
 

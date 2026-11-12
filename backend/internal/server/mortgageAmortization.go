@@ -1,8 +1,9 @@
 // Amortization endpoints (plan step 7.3) over the 7.2 mortgage engine:
 // GET /api/v1/mortgages/{id}/amortization serves the stored spec's full
 // schedule; POST /api/v1/mortgages/{id}/amortization/what-if compares a
-// scenario (rate / recurring extra / one-time prepayment) against the
-// base schedule. This handler is the ONLY converter between the
+// scenario (rate / recurring extra / one-time prepayment / payment
+// frequency / renewal — round 23) against the base schedule. This
+// handler is the ONLY converter between the
 // repo.MortgageSpec canonical strings and the engine's numeric
 // mortgage.Spec: the engine (7.2) is pure and never imports the repo
 // package. Every amount is served as a canonical 2-decimal string
@@ -38,6 +39,8 @@ type paymentOut struct {
 
 // scheduleOut is the amortization body: the 7.2 Schedule in canonical
 // strings. len(payments) == payoff_index (the engine's invariant).
+// next_renewal (round 23) is the current term's expiry date when the
+// generating spec carries term metadata; omitted otherwise (omitempty).
 type scheduleOut struct {
 	BasePayment   string       `json:"base_payment"`
 	PayoffDate    string       `json:"payoff_date"`
@@ -45,6 +48,7 @@ type scheduleOut struct {
 	TotalPaid     string       `json:"total_paid"`
 	TotalInterest string       `json:"total_interest"`
 	Payments      []paymentOut `json:"payments"`
+	NextRenewal   string       `json:"next_renewal,omitempty"`
 }
 
 // whatIfPrepayment is the one-time prepayment sub-object of the what-if
@@ -54,6 +58,18 @@ type whatIfPrepayment struct {
 	Date   *string `json:"date"`
 }
 
+// whatIfRenewal is the renewal / rate-change sub-object of the what-if
+// body (round 23): on date the rate switches to annual_rate and the
+// regular payment is recomputed over the remaining amortization (a
+// re_amortize renewal event that supersedes any stored rate events
+// dated >= date). date and annual_rate are required when the object is
+// present; rate_type is optional metadata.
+type whatIfRenewal struct {
+	Date       *string `json:"date"`
+	AnnualRate *string `json:"annual_rate"`
+	RateType   *string `json:"rate_type"`
+}
+
 // whatIfIn is the POST body: ALL fields optional, at least one present.
 // A nil field keeps the stored spec value.
 type whatIfIn struct {
@@ -61,6 +77,8 @@ type whatIfIn struct {
 	ExtraPaymentAmount    *string           `json:"extra_payment_amount"`
 	ExtraPaymentFrequency *string           `json:"extra_payment_frequency"`
 	OneTimePrepayment     *whatIfPrepayment `json:"one_time_prepayment"`
+	PaymentFrequency      *string           `json:"payment_frequency"`
+	Renewal               *whatIfRenewal    `json:"renewal"`
 }
 
 // whatIfOut carries EXACTLY the plan's five what-if fields.
@@ -79,8 +97,11 @@ func fmtAmt(v float64) string {
 }
 
 // toScheduleOut maps the engine's Schedule to the wire DTO: dates as
-// YYYY-MM-DD, every amount via fmtAmt.
-func toScheduleOut(sch mortgage.Schedule) scheduleOut {
+// YYYY-MM-DD, every amount via fmtAmt. spec is the spec the schedule
+// was generated from: next_renewal is computed from IT (a what-if
+// schedule passes the composed scenario spec, so a simulated renewal
+// moves the date), and omitted when the spec carries no term.
+func toScheduleOut(sch mortgage.Schedule, spec mortgage.Spec) scheduleOut {
 	payments := make([]paymentOut, len(sch.Payments))
 	for i, p := range sch.Payments {
 		payments[i] = paymentOut{
@@ -92,7 +113,7 @@ func toScheduleOut(sch mortgage.Schedule) scheduleOut {
 			Balance:   fmtAmt(p.Balance),
 		}
 	}
-	return scheduleOut{
+	out := scheduleOut{
 		BasePayment:   fmtAmt(sch.BasePayment),
 		PayoffDate:    sch.PayoffDate.Format("2006-01-02"),
 		PayoffIndex:   sch.PayoffIndex,
@@ -100,6 +121,10 @@ func toScheduleOut(sch mortgage.Schedule) scheduleOut {
 		TotalInterest: fmtAmt(sch.TotalInterest),
 		Payments:      payments,
 	}
+	if d, ok := mortgage.NextRenewalDate(spec); ok {
+		out.NextRenewal = d.Format("2006-01-02")
+	}
+	return out
 }
 
 // specToEngine converts a stored repo.Mortgage into the engine's numeric
@@ -124,6 +149,25 @@ func specToEngine(m repo.Mortgage) (mortgage.Spec, error) {
 	if err != nil {
 		return mortgage.Spec{}, errors.New("stored start_date " + m.Spec.StartDate + " does not parse: " + err.Error())
 	}
+	events := make([]mortgage.RateEvent, 0, len(m.Spec.RateEvents))
+	for i, e := range m.Spec.RateEvents {
+		d, err := time.Parse("2006-01-02", e.EffectiveDate)
+		if err != nil {
+			return mortgage.Spec{}, errors.New("stored rate event " + strconv.Itoa(i) +
+				" effective_date " + e.EffectiveDate + " does not parse: " + err.Error())
+		}
+		er, err := strconv.ParseFloat(e.AnnualRate, 64)
+		if err != nil {
+			return mortgage.Spec{}, errors.New("stored rate event " + strconv.Itoa(i) +
+				" annual_rate " + e.AnnualRate + " does not parse: " + err.Error())
+		}
+		events = append(events, mortgage.RateEvent{
+			Date:       d,
+			AnnualRate: er,
+			RateType:   e.RateType,
+			Action:     e.Action,
+		})
+	}
 	return mortgage.Spec{
 		Principal:             principal,
 		AnnualRate:            rate,
@@ -133,6 +177,9 @@ func specToEngine(m repo.Mortgage) (mortgage.Spec, error) {
 		ExtraPaymentAmount:    extra,
 		ExtraPaymentFrequency: m.Spec.ExtraPaymentFrequency,
 		ExtraPrepaymentType:   m.Spec.ExtraPrepaymentType,
+		TermYears:             m.Spec.TermYears,
+		RateType:              m.Spec.RateType,
+		RateEvents:            events,
 	}, nil
 }
 
@@ -140,7 +187,10 @@ func specToEngine(m repo.Mortgage) (mortgage.Spec, error) {
 // and returns their problems (the caller "; "-joins them into ONE 400).
 // Nil fields are skipped (absent = keep the stored value). The Canonical
 // amount errors are passed through verbatim (the 7.1 wording).
-func whatIfProblems(in *whatIfIn) []string {
+// storedStart is the stored spec's start date (zero when unparseable —
+// the renewal after-start check is then skipped; the stored spec always
+// parsed at create/patch, so this is a backstop, not a path).
+func whatIfProblems(in *whatIfIn, storedStart time.Time) []string {
 	var problems []string
 	if in.AnnualRate != nil {
 		v, err := strconv.ParseFloat(*in.AnnualRate, 64)
@@ -182,6 +232,45 @@ func whatIfProblems(in *whatIfIn) []string {
 			problems = append(problems, "one_time_prepayment.date must be a date in YYYY-MM-DD form")
 		}
 	}
+	if in.PaymentFrequency != nil {
+		switch *in.PaymentFrequency {
+		case "monthly", "semi_monthly", "biweekly":
+		default:
+			problems = append(problems, "payment_frequency must be monthly, semi_monthly, or biweekly")
+		}
+	}
+	if in.Renewal != nil {
+		ren := in.Renewal
+		if ren.Date == nil {
+			problems = append(problems, "renewal.date is required")
+		} else {
+			d, err := time.Parse("2006-01-02", *ren.Date)
+			switch {
+			case err != nil:
+				problems = append(problems, "renewal.date must be a date in YYYY-MM-DD form")
+			case !storedStart.IsZero() && !d.After(storedStart):
+				problems = append(problems, "renewal.date must be after the start date")
+			}
+		}
+		if ren.AnnualRate == nil {
+			problems = append(problems, "renewal.annual_rate is required")
+		} else {
+			v, err := strconv.ParseFloat(*ren.AnnualRate, 64)
+			switch {
+			case err != nil:
+				problems = append(problems, "renewal.annual_rate must be a number")
+			case math.IsNaN(v) || v <= 0 || v > 100:
+				problems = append(problems, "renewal.annual_rate must be greater than 0 and at most 100")
+			}
+		}
+		if ren.RateType != nil {
+			switch *ren.RateType {
+			case "fixed", "variable":
+			default:
+				problems = append(problems, "renewal.rate_type must be fixed or variable")
+			}
+		}
+	}
 	return problems
 }
 
@@ -220,7 +309,7 @@ func (h *handler) mortgageAmortizationGet(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, toScheduleOut(sch))
+	writeJSON(w, http.StatusOK, toScheduleOut(sch, spec))
 }
 
 // mortgageWhatIfPost serves POST /api/v1/mortgages/{id}/amortization/what-if.
@@ -254,11 +343,15 @@ func (h *handler) mortgageWhatIfPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.AnnualRate == nil && in.ExtraPaymentAmount == nil &&
-		in.ExtraPaymentFrequency == nil && in.OneTimePrepayment == nil {
+		in.ExtraPaymentFrequency == nil && in.OneTimePrepayment == nil &&
+		in.PaymentFrequency == nil && in.Renewal == nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "empty what-if: provide at least one field")
 		return
 	}
-	if problems := whatIfProblems(&in); len(problems) > 0 {
+	// The renewal is checked against the stored start date (the row was
+	// fetched before the body validation, per the house order).
+	storedStart, _ := time.Parse("2006-01-02", m.Spec.StartDate)
+	if problems := whatIfProblems(&in, storedStart); len(problems) > 0 {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, strings.Join(problems, "; "))
 		return
 	}
@@ -290,6 +383,18 @@ func (h *handler) mortgageWhatIfPost(w http.ResponseWriter, r *http.Request) {
 		d, _ := time.Parse("2006-01-02", *in.OneTimePrepayment.Date)
 		sc.OneTimePrepayment = &mortgage.Prepayment{Amount: v, Date: d}
 	}
+	if in.PaymentFrequency != nil {
+		sc.PaymentFrequency = in.PaymentFrequency
+	}
+	if in.Renewal != nil {
+		rate, _ := strconv.ParseFloat(*in.Renewal.AnnualRate, 64)
+		d, _ := time.Parse("2006-01-02", *in.Renewal.Date)
+		ren := &mortgage.Renewal{Date: d, AnnualRate: rate}
+		if in.Renewal.RateType != nil {
+			ren.RateType = *in.Renewal.RateType
+		}
+		sc.Renewal = ren
+	}
 	cmp, err := mortgage.WhatIf(spec, sc)
 	if err != nil {
 		if err.Error() == "one-time prepayment date is after the payoff date" {
@@ -302,11 +407,14 @@ func (h *handler) mortgageWhatIfPost(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
 		return
 	}
+	// The schedule's next_renewal is computed from the COMPOSED spec (the
+	// simulated renewal replaces the stored events dated on/after it, so
+	// the date moves); without term metadata it stays omitted.
 	writeJSON(w, http.StatusOK, whatIfOut{
 		PayoffDate:    cmp.PayoffDate.Format("2006-01-02"),
 		TotalInterest: fmtAmt(cmp.TotalInterest),
 		MonthsSaved:   cmp.MonthsSaved,
 		InterestSaved: fmtAmt(cmp.InterestSaved), // sign preserved
-		Schedule:      toScheduleOut(cmp.Schedule),
+		Schedule:      toScheduleOut(cmp.Schedule, mortgage.EffectiveSpec(spec, sc)),
 	})
 }

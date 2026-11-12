@@ -221,6 +221,74 @@ func TestMortgageAmortizationGetErrors(t *testing.T) {
 	expectAPIError(t, code, out, http.StatusServiceUnavailable, "internal", "database not configured")
 }
 
+// TestMortgageAmortizationNextRenewal covers the round-23 next_renewal
+// field: omitted (key order unchanged) when the spec carries no term
+// metadata; present and APPENDED LAST when it does (start +
+// term_years); and driven by the LAST stored re_amortize event (a
+// renewal event dated at the expiry moves it forward by another term).
+func TestMortgageAmortizationNextRenewal(t *testing.T) {
+	store := &memMortgageStore{}
+	h, key := newMortgageServer(t, newMortgageAccounts(), store)
+	hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
+
+	// REF loan (no term metadata): the key order is the pre-round-23
+	// one and the body carries no next_renewal key at all.
+	idRef := createRefMortgage(t, h, hdr)
+	code, out := doReq(t, h, http.MethodGet, "/api/v1/mortgages/"+idRef+"/amortization", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("get: status = %d, want 200 (body %s)", code, out)
+	}
+	if !reflect.DeepEqual(jsonKeyOrder(t, out), wantScheduleKeys) {
+		t.Fatalf("ref keys = %v, want exact order %v (no next_renewal)", jsonKeyOrder(t, out), wantScheduleKeys)
+	}
+	if strings.Contains(out, "next_renewal") {
+		t.Fatalf("ref body = %s, must not carry a next_renewal key (no term metadata)", out)
+	}
+
+	// Term loan: start 2026-01-15 + term_years 5 -> 2031-01-15, the
+	// key APPENDED LAST.
+	code, out = doReq(t, h, http.MethodPost, "/api/v1/mortgages",
+		withField(t, refMortgageBody(), "term_years", 5), hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("create term: status = %d, want 201 (body %s)", code, out)
+	}
+	idTerm := idFrom(t, out)
+	code, out = doReq(t, h, http.MethodGet, "/api/v1/mortgages/"+idTerm+"/amortization", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("get term: status = %d, want 200 (body %s)", code, out)
+	}
+	wantTermKeys := append(append([]string{}, wantScheduleKeys...), "next_renewal")
+	if !reflect.DeepEqual(jsonKeyOrder(t, out), wantTermKeys) {
+		t.Fatalf("term keys = %v, want exact order %v (next_renewal last)", jsonKeyOrder(t, out), wantTermKeys)
+	}
+	var sch scheduleOut
+	if err := json.Unmarshal([]byte(out), &sch); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	if sch.NextRenewal != "2031-01-15" {
+		t.Errorf("next_renewal = %q, want \"2031-01-15\" (start 2026-01-15 + term_years 5)", sch.NextRenewal)
+	}
+
+	// A stored renewal event dated at the expiry moves the date to the
+	// event date + term_years.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+idTerm,
+		`{"rate_events":[{"effective_date":"2031-01-15","annual_rate":"4.99","rate_type":"fixed","action":"re_amortize"}]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch event: status = %d, want 200 (body %s)", code, out)
+	}
+	code, out = doReq(t, h, http.MethodGet, "/api/v1/mortgages/"+idTerm+"/amortization", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("get after patch: status = %d, want 200 (body %s)", code, out)
+	}
+	sch = scheduleOut{}
+	if err := json.Unmarshal([]byte(out), &sch); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	if sch.NextRenewal != "2036-01-15" {
+		t.Errorf("next_renewal = %q, want \"2036-01-15\" (last re_amortize event 2031-01-15 + term_years 5)", sch.NextRenewal)
+	}
+}
+
 // TestMortgageWhatIfEmpty covers the empty-body rule: POST {} is 400
 // "empty what-if: provide at least one field"; the id check runs FIRST
 // (malformed id + empty body -> 404, not 400); a JSON null field is
@@ -242,6 +310,12 @@ func TestMortgageWhatIfEmpty(t *testing.T) {
 	// All fields present as JSON null: nil pointers = absent = empty.
 	code, out = doReq(t, h, http.MethodPost, "/api/v1/mortgages/"+id+"/amortization/what-if",
 		`{"annual_rate":null,"extra_payment_amount":null,"extra_payment_frequency":null,"one_time_prepayment":null}`, hdr)
+	expectAPIError(t, code, out, http.StatusBadRequest, "invalid_request", "empty what-if: provide at least one field")
+
+	// The round-23 fields nil out the same way (a pointer / struct
+	// pointer both nil on null).
+	code, out = doReq(t, h, http.MethodPost, "/api/v1/mortgages/"+id+"/amortization/what-if",
+		`{"payment_frequency":null,"renewal":null}`, hdr)
 	expectAPIError(t, code, out, http.StatusBadRequest, "invalid_request", "empty what-if: provide at least one field")
 }
 
@@ -353,6 +427,118 @@ func TestMortgageWhatIfRecurringExtra(t *testing.T) {
 	}
 }
 
+// TestMortgageWhatIfRenewal covers the round-23 renewal scenario: a
+// term loan (start 2026-01-15 + term_years 5 -> expires 2031-01-15).
+// Renewing at the SAME rate is a full no-op (the composed re_amortize
+// event at 4.99 recomputes the exact same payment): verbatim the REF
+// schedule, months_saved 0, interest_saved exactly "0.00" (zero, not
+// "-0.00"), and the schedule's next_renewal MOVES to the simulated
+// term's expiry (2031-01-15 + 5). Renewing at a HIGHER rate keeps the
+// payoff (the payment is recomputed over the remaining amortization)
+// but the interest_saved goes NEGATIVE.
+func TestMortgageWhatIfRenewal(t *testing.T) {
+	store := &memMortgageStore{}
+	h, key := newMortgageServer(t, newMortgageAccounts(), store)
+	hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
+	code, out := doReq(t, h, http.MethodPost, "/api/v1/mortgages",
+		withField(t, refMortgageBody(), "term_years", 5), hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("create term: status = %d, want 201 (body %s)", code, out)
+	}
+	id := idFrom(t, out)
+
+	// Same-rate renewal: a verbatim no-op with a moved next_renewal.
+	code, out = doReq(t, h, http.MethodPost, "/api/v1/mortgages/"+id+"/amortization/what-if",
+		`{"renewal":{"date":"2031-01-15","annual_rate":"4.99"}}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("what-if: status = %d, want 200 (body %s)", code, out)
+	}
+	var res whatIfOut
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	if res.MonthsSaved != 0 {
+		t.Errorf("months_saved = %d, want 0 (a same-rate renewal is a no-op)", res.MonthsSaved)
+	}
+	if res.PayoffDate != refPayoffDate || res.Schedule.PayoffIndex != refPayoffIndex {
+		t.Errorf("payoff = %q/%d, want %q/%d (unchanged)", res.PayoffDate, res.Schedule.PayoffIndex, refPayoffDate, refPayoffIndex)
+	}
+	if res.TotalInterest != refTotalInterest {
+		t.Errorf("total_interest = %q, want %q (verbatim the REF)", res.TotalInterest, refTotalInterest)
+	}
+	if res.InterestSaved != "0.00" {
+		t.Errorf("interest_saved = %q, want exactly \"0.00\" (zero, not \"-0.00\")", res.InterestSaved)
+	}
+	if res.Schedule.BasePayment != refBasePayment {
+		t.Errorf("schedule.base_payment = %q, want %q (same rate, same payment)", res.Schedule.BasePayment, refBasePayment)
+	}
+	if res.Schedule.NextRenewal != "2036-01-15" {
+		t.Errorf("schedule.next_renewal = %q, want \"2036-01-15\" (the simulated renewal's term expiry)", res.Schedule.NextRenewal)
+	}
+
+	// Higher-rate renewal: the payoff stays (recomputed payment over
+	// the remaining amortization) but the interest_saved is negative.
+	code, out = doReq(t, h, http.MethodPost, "/api/v1/mortgages/"+id+"/amortization/what-if",
+		`{"renewal":{"date":"2031-01-15","annual_rate":"6.00"}}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("what-if 6.00: status = %d, want 200 (body %s)", code, out)
+	}
+	var res2 whatIfOut
+	if err := json.Unmarshal([]byte(out), &res2); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	if res2.MonthsSaved != 0 || res2.PayoffDate != refPayoffDate || res2.Schedule.PayoffIndex != refPayoffIndex {
+		t.Errorf("payoff = %q/%d, months_saved = %d, want unchanged %q/%d and 0", res2.PayoffDate, res2.Schedule.PayoffIndex, res2.MonthsSaved, refPayoffDate, refPayoffIndex)
+	}
+	if res2.InterestSaved != "-59219.99" {
+		t.Errorf("interest_saved = %q, want \"-59219.99\" (a rate increase costs interest)", res2.InterestSaved)
+	}
+	if res2.Schedule.NextRenewal != "2036-01-15" {
+		t.Errorf("schedule.next_renewal = %q, want \"2036-01-15\"", res2.Schedule.NextRenewal)
+	}
+}
+
+// TestMortgageWhatIfPaymentFrequency covers the round-23 frequency
+// scenario on the REF loan: switching monthly -> biweekly recomputes
+// the payment over 26 periods a year (1339.37 vs 2905.18), the payoff
+// index counts PERIODS (650 biweekly periods, not 300 months), so
+// months_saved is NEGATIVE in period terms (300 - 650 = -350) while
+// interest_saved is a small positive (the real-time payoff moves
+// earlier).
+func TestMortgageWhatIfPaymentFrequency(t *testing.T) {
+	store := &memMortgageStore{}
+	h, key := newMortgageServer(t, newMortgageAccounts(), store)
+	hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
+	id := createRefMortgage(t, h, hdr)
+
+	code, out := doReq(t, h, http.MethodPost, "/api/v1/mortgages/"+id+"/amortization/what-if",
+		`{"payment_frequency":"biweekly"}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("what-if: status = %d, want 200 (body %s)", code, out)
+	}
+	var res whatIfOut
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, out)
+	}
+	if res.Schedule.PayoffIndex != 650 {
+		t.Errorf("schedule.payoff_index = %d, want 650 (biweekly periods, not months)", res.Schedule.PayoffIndex)
+	}
+	if res.MonthsSaved != -350 {
+		t.Errorf("months_saved = %d, want -350 (periods, not months: 300 - 650)", res.MonthsSaved)
+	}
+	if res.InterestSaved != "963.73" {
+		t.Errorf("interest_saved = %q, want \"963.73\"", res.InterestSaved)
+	}
+	if res.Schedule.BasePayment != "1339.37" {
+		t.Errorf("schedule.base_payment = %q, want \"1339.37\" (recomputed biweekly)", res.Schedule.BasePayment)
+	}
+	// The biweekly grid (start + k*14d) does not land on the 15th:
+	// 2026-01-15 + 649*14d = 2050-12-01.
+	if res.PayoffDate != "2050-12-01" {
+		t.Errorf("payoff_date = %q, want \"2050-12-01\" (2026-01-15 + 649 biweekly periods)", res.PayoffDate)
+	}
+}
+
 // TestMortgageWhatIfPrepaymentAfterPayoff covers the one engine runtime
 // error with a 400 meaning: a valid future date that lands after the
 // payoff is rejected with the engine's EXACT text.
@@ -370,8 +556,9 @@ func TestMortgageWhatIfPrepaymentAfterPayoff(t *testing.T) {
 
 // TestMortgageWhatIfValidation covers each present-field message EXACTLY
 // as pinned (absent fields raise nothing), plus the "; "-join when
-// several fields fail at once (wire order: annual_rate first, then
-// one_time_prepayment).
+// several fields fail at once (wire order: annual_rate,
+// extra_payment_amount, extra_payment_frequency, one_time_prepayment,
+// payment_frequency, then the renewal sub-object).
 func TestMortgageWhatIfValidation(t *testing.T) {
 	cases := []struct {
 		name string
@@ -387,8 +574,19 @@ func TestMortgageWhatIfValidation(t *testing.T) {
 		{"prepayment_missing_date", `{"one_time_prepayment":{"amount":"500.00"}}`, "one_time_prepayment.date is required"},
 		{"prepayment_amount_zero", `{"one_time_prepayment":{"amount":"0.00","date":"2026-12-15"}}`, "one_time_prepayment.amount must be greater than zero"},
 		{"prepayment_bad_date", `{"one_time_prepayment":{"amount":"500.00","date":"2026-13-01"}}`, "one_time_prepayment.date must be a date in YYYY-MM-DD form"},
+		{"payment_frequency_bad", `{"payment_frequency":"weekly"}`, "payment_frequency must be monthly, semi_monthly, or biweekly"},
+		{"renewal_date_missing", `{"renewal":{"annual_rate":"5.50"}}`, "renewal.date is required"},
+		{"renewal_date_bad_form", `{"renewal":{"date":"2031/01/15","annual_rate":"5.50"}}`, "renewal.date must be a date in YYYY-MM-DD form"},
+		{"renewal_date_not_after_start", `{"renewal":{"date":"2026-01-15","annual_rate":"5.50"}}`, "renewal.date must be after the start date"},
+		{"renewal_rate_missing", `{"renewal":{"date":"2031-01-15"}}`, "renewal.annual_rate is required"},
+		{"renewal_rate_bad", `{"renewal":{"date":"2031-01-15","annual_rate":"abc"}}`, "renewal.annual_rate must be a number"},
+		{"renewal_rate_zero", `{"renewal":{"date":"2031-01-15","annual_rate":"0"}}`, "renewal.annual_rate must be greater than 0 and at most 100"},
+		{"renewal_rate_above_100", `{"renewal":{"date":"2031-01-15","annual_rate":"100.01"}}`, "renewal.annual_rate must be greater than 0 and at most 100"},
+		{"renewal_rate_type_bad", `{"renewal":{"date":"2031-01-15","annual_rate":"5.50","rate_type":"arm"}}`, "renewal.rate_type must be fixed or variable"},
 		{"combined_rate_and_date", `{"annual_rate":"abc","one_time_prepayment":{"amount":"500.00","date":"nope"}}`,
 			"annual_rate must be a number; one_time_prepayment.date must be a date in YYYY-MM-DD form"},
+		{"combined_freq_and_renewal", `{"payment_frequency":"weekly","renewal":{"date":"2031-01-15"}}`,
+			"payment_frequency must be monthly, semi_monthly, or biweekly; renewal.annual_rate is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
