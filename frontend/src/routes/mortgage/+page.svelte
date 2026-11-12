@@ -595,8 +595,8 @@
 		const todayX = Number(px(tNow).toFixed(2));
 		// "Where am I at right now": the most recent payment on or
 		// before today supplies the real post-payment balance/equity
-		// for the y-axis labels; the interpolated y-crossings anchor
-		// where those labels sit.
+		// for the in-plot labels; the interpolated y-crossings anchor
+		// the labels and their dashed y-axis guides.
 		let iNow = 0;
 		for (let i = 0; i < n; i++) {
 			if (s.payments[i].date <= todayStr) iNow = i;
@@ -606,18 +606,30 @@
 		const fr = (todayX - pts[i0].x) / (pts[i0 + 1].x - pts[i0].x || 1);
 		const byNow = pts[i0].by + fr * (pts[i0 + 1].by - pts[i0].by);
 		const eyNow = pts[i0].ey + fr * (pts[i0 + 1].ey - pts[i0].ey);
-		// y-axis label baselines at the crossings: the hover's
-		// close-curve offsets, plus a nudge off the quarter-step tick
-		// labels so a static label never parks over an axis index.
+		// In-plot value labels just right of the today line (flipped
+		// left near the right edge so they can't leave the plot),
+		// with the hover's close-curve offset when the crossings
+		// sit within 16px of each other.
+		const tpNow = pts[iNow];
 		const closeNow = Math.abs(byNow - eyNow) < 16;
 		const balTopNow = byNow <= eyNow;
-		let balLy = closeNow ? (balTopNow ? byNow - 11 : byNow + 5) : byNow + 4;
-		let eqLy = closeNow ? (balTopNow ? eyNow + 5 : eyNow - 11) : eyNow + 4;
-		for (const yt of yTicks) {
-			const tly = yt.y + 4;
-			if (Math.abs(balLy - tly) < 13) balLy = balLy < tly ? tly - 13 : tly + 13;
-			if (Math.abs(eqLy - tly) < 13) eqLy = eqLy < tly ? tly - 13 : tly + 13;
-		}
+		const nowLabel = (lbl: string, y: number, onTop: boolean) => {
+			const w = lbl.length * 6.8 + 8;
+			const ly = closeNow ? (onTop ? y - 11 : y + 5) : y + 4;
+			const right = todayX + 8 + w > PLOT.x1;
+			const lx = right ? todayX - 8 : todayX + 8;
+			return {
+				lbl,
+				y: Number(y.toFixed(2)),
+				ly: Number(ly.toFixed(2)),
+				lx: Number(lx.toFixed(2)),
+				w: Number(w.toFixed(2)),
+				anchor: right ? 'end' : 'start',
+				rx: Number((right ? lx - w + 4 : lx - 4).toFixed(2))
+			};
+		};
+		const balNow = nowLabel(money(tpNow.balance, selectedCurrency), byNow, balTopNow);
+		const eqNow = nowLabel(moneyNum(tpNow.equityC / 100, selectedCurrency), eyNow, !balTopNow);
 		// Date label below the axis, pushed a tick-width clear of any
 		// year tick (the ticks re-render over the mask, but the text
 		// must not sit on a tick label).
@@ -640,8 +652,8 @@
 				lx: todayLxFinal,
 				label: todayStr,
 				iNow,
-				balLy: Number(balLy.toFixed(2)),
-				eqLy: Number(eqLy.toFixed(2))
+				balNow,
+				eqNow
 			}
 		};
 	});
@@ -1024,14 +1036,6 @@
 				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
 					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.chart_title')}</p>
 					{#if chart}
-						<!-- "Where am I at right now": the most recent
-						 payment's post-payment balance/equity, labelled
-						 at the y-axis crossings of the today line. -->
-						{@const tp = chart.pts[chart.today.iNow]}
-						{@const balNowLbl = money(tp.balance, selectedCurrency)}
-						{@const eqNowLbl = moneyNum(tp.equityC / 100, selectedCurrency)}
-						{@const balNowW = balNowLbl.length * 6.8 + 8}
-						{@const eqNowW = eqNowLbl.length * 6.8 + 8}
 						<svg
 							bind:this={chartSvg}
 							viewBox="0 0 800 260"
@@ -1124,10 +1128,10 @@
 								class="text-zinc-300 dark:text-zinc-700"
 							/>
 							<!-- Static "today" line (current date, clamped
-							 into the schedule window) + y-axis
-							 balance/equity labels at its crossings.
-							 The date label sits below the axis, in
-							 the tick band. -->
+							 into the schedule window) + dashed amber
+							 guides from its balance/equity crossings
+							 to the y-axis. The date label sits below
+							 the axis, in the tick band. -->
 							<line
 								x1={chart.today.x}
 								y1={PLOT.y0}
@@ -1137,42 +1141,26 @@
 								stroke-width="1.5"
 								class="text-amber-500"
 							/>
-							<rect
-								x={PLOT.x0 - 8 - balNowW}
-								y={chart.today.balLy - 11}
-								width={balNowW}
-								height="14"
-								rx="2"
-								class="fill-white dark:fill-zinc-900"
+							<line
+								x1={PLOT.x0}
+								y1={chart.today.balNow.y}
+								x2={chart.today.x}
+								y2={chart.today.balNow.y}
+								stroke="currentColor"
+								stroke-width="1"
+								stroke-dasharray="4 3"
+								class="text-amber-500"
 							/>
-							<text
-								x={PLOT.x0 - 8}
-								y={chart.today.balLy}
-								text-anchor="end"
-								font-size="12"
-								font-weight="600"
-								fill="currentColor"
-								class="text-zinc-700 dark:text-zinc-200"
-							>{balNowLbl}</text
-							>
-							<rect
-								x={PLOT.x0 - 8 - eqNowW}
-								y={chart.today.eqLy - 11}
-								width={eqNowW}
-								height="14"
-								rx="2"
-								class="fill-white dark:fill-zinc-900"
+							<line
+								x1={PLOT.x0}
+								y1={chart.today.eqNow.y}
+								x2={chart.today.x}
+								y2={chart.today.eqNow.y}
+								stroke="currentColor"
+								stroke-width="1"
+								stroke-dasharray="4 3"
+								class="text-amber-500"
 							/>
-							<text
-								x={PLOT.x0 - 8}
-								y={chart.today.eqLy}
-								text-anchor="end"
-								font-size="12"
-								font-weight="600"
-								fill="currentColor"
-								class="text-zinc-700 dark:text-zinc-200"
-							>{eqNowLbl}</text
-							>
 							<polyline
 								points={chart.balance}
 								fill="none"
@@ -1189,6 +1177,46 @@
 								vector-effect="non-scaling-stroke"
 								class="text-green-600 dark:text-green-400"
 							/>
+							<!-- In-plot "now" labels: the real
+							 post-payment balance/equity just right
+							 of the today line, masked so the curves
+							 render under the text. -->
+							<rect
+								x={chart.today.balNow.rx}
+								y={chart.today.balNow.ly - 11}
+								width={chart.today.balNow.w}
+								height="14"
+								rx="2"
+								class="fill-white dark:fill-zinc-900"
+							/>
+							<text
+								x={chart.today.balNow.lx}
+								y={chart.today.balNow.ly}
+								text-anchor={chart.today.balNow.anchor}
+								font-size="12"
+								font-weight="600"
+								fill="currentColor"
+								class="text-zinc-700 dark:text-zinc-200"
+							>{chart.today.balNow.lbl}</text
+							>
+							<rect
+								x={chart.today.eqNow.rx}
+								y={chart.today.eqNow.ly - 11}
+								width={chart.today.eqNow.w}
+								height="14"
+								rx="2"
+								class="fill-white dark:fill-zinc-900"
+							/>
+							<text
+								x={chart.today.eqNow.lx}
+								y={chart.today.eqNow.ly}
+								text-anchor={chart.today.eqNow.anchor}
+								font-size="12"
+								font-weight="600"
+								fill="currentColor"
+								class="text-zinc-700 dark:text-zinc-200"
+							>{chart.today.eqNow.lbl}</text
+							>
 							<!-- Hover crosshair: dotted guides from the two
 							 points (on each line at the cursor's x) to
 							 both axes, the points themselves, value
