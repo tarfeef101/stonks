@@ -202,6 +202,15 @@ step 0.3 is the production serving path and is not used in dev.
   the port, or rebind in `docker-compose.dev.yml`.
 - **`make dev` fails mid-`npm ci` with `ETIMEDOUT` (errno -110)** — transient
   npm registry drop; just re-run `make dev`.
+- **A tab renders SvelteKit's "500 / Internal Error" page in dev** — if the
+  browser network tab shows a **504** on `/node_modules/.vite/deps/*.js`
+  ("Outdated Optimize Dep"), the long-running vite dev server's dep-optimizer
+  state has gone stale (a re-optimization left transforms referencing an old
+  dep hash; SvelteKit's lazy route-node import then fails → client-side 500).
+  The backend is fine — every API call returns 200. A hard refresh does NOT
+  help (the state is server-side); restart the frontend container:
+  `docker restart personal_finance_tracker-frontend-1` (boot re-runs
+  `npm ci`, which wipes the bind-mounted `node_modules/.vite` cache).
 - **Root-owned build artifacts** — container builds write `frontend/build`,
   `frontend/.svelte-kit`, `frontend/node_modules` (bind mount) and
   `backend/bin/` as root. They are git-ignored. Don't `rm -rf` them from the
