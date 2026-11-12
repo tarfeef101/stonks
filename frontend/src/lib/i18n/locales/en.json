@@ -234,7 +234,7 @@
 		"list_title": "Mortgages",
 		"label_base_payment": "Base payment",
 		"label_payoff_date": "Payoff date",
-		"label_payments": "Payments",
+		"label_payment_count": "Payment count",
 		"label_total_interest": "Total interest",
 		"chart_title": "Balance & equity",
 		"chart_aria": "Line chart of the remaining balance and the growing equity across the amortization schedule",

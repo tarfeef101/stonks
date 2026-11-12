@@ -821,8 +821,11 @@
 						</p>
 					</div>
 					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+						<!-- A COUNT, not an amount: the number of payments to
+							 payoff (25 y semi-monthly = 600) — no currency
+							 symbol applies to it. -->
 						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
-							{$_('mortgage.label_payments')}
+							{$_('mortgage.label_payment_count')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
 							{amortization.payoff_index}
