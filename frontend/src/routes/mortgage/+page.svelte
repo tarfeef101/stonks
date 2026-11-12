@@ -1,3 +1,58 @@
+<script module lang="ts">
+	// Amount parsing + the money-formatter cache, at module scope: the
+	// cache is memoisation, not component state. money() is called from
+	// template expressions, so the cache must not be reactive state
+	// (mutating it during render is a state_unsafe_mutation); a plain
+	// module-level object is render-safe.
+	//
+	// Amounts arrive as canonical 2-decimal strings in the account's
+	// currency (3-letter uppercase ISO-4217, backend-validated). The
+	// formatter localises them in the browser's own locale with that
+	// currency — Intl supplies the symbol (en-CA + CAD → "CA$"), which
+	// is never assumed; a missing/unknown currency renders a plain
+	// grouped number with two decimals and no symbol.
+
+	const CENTS_RE = /^(-?)(\d+)(?:\.(\d{1,2}))?$/;
+
+	/** A canonical 2-decimal amount string as integer cents. Used for
+	 * geometry (chart coordinates, year-row totals, slider seeds) and
+	 * as the exact parse behind money()'s display formatting. */
+	function toCents(s: string): number {
+		const m = CENTS_RE.exec(s);
+		if (!m) return 0;
+		const cents = (m[3] ?? '').padEnd(2, '0');
+		const v = parseInt(m[2], 10) * 100 + parseInt(cents, 10);
+		return m[1] === '-' ? -v : v;
+	}
+
+	const nfCache: Record<string, Intl.NumberFormat> = {};
+
+	/** The display formatter for a currency code (cached per code):
+	 * the browser locale + that currency, or a plain grouped 2-decimal
+	 * number when the code is missing or Intl does not know it. */
+	function numberFormat(currency: string | null): Intl.NumberFormat {
+		const key = currency ?? '';
+		let nf = nfCache[key];
+		if (nf === undefined) {
+			if (currency !== null && /^[A-Z]{3}$/.test(currency)) {
+				try {
+					nf = new Intl.NumberFormat(undefined, { style: 'currency', currency });
+				} catch {
+					// not a code Intl knows — fall through to plain
+				}
+			}
+			if (nf === undefined) {
+				nf = new Intl.NumberFormat(undefined, {
+					minimumFractionDigits: 2,
+					maximumFractionDigits: 2
+				});
+			}
+			nfCache[key] = nf;
+		}
+		return nf;
+	}
+</script>
+
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
@@ -31,10 +86,14 @@
 	// (round 23) — plus the what-if comparison panel over the 7.2 engine
 	// (rate, extra payments, payment frequency, renewals).
 	//
-	// Rendered-numbers contract: every displayed amount is the raw API
-	// string (canonical 2-decimal) bound straight into the DOM. Numeric
-	// parsing on this page is limited to chart coordinates, year-row
-	// totals and slider values (geometry) — never for displayed text.
+	// Rendered-numbers contract: the backend serves every amount as a
+	// canonical 2-decimal string. Display goes through money(), which
+	// localises the value in the browser's own locale with the
+	// mortgage account's currency — the symbol is localised, never
+	// assumed (a missing/unknown currency renders a plain grouped
+	// number). The parse is exact integer-cent arithmetic; an
+	// unparseable value renders verbatim. All other numeric parsing is
+	// geometry: chart coordinates, year-row totals and slider seeds.
 
 	// --- Data: the mortgage accounts + the mortgage list ----------------
 	let mortgageAccounts = $state<Account[]>([]);
@@ -417,7 +476,7 @@
 
 	/** The balance/equity polylines scaled into the fixed viewBox, or
 	 * null when the schedule is too short or the stored principal is
-	 * not a positive amount (pure coordinate math). */
+	 * not a positive amount (pure float coordinate math). */
 	const equitySeries = $derived.by(() => {
 		const m = selectedMortgage();
 		const s = amortization;
@@ -427,11 +486,13 @@
 		if (n < 2 || pc <= 0) return null;
 		const balance: string[] = [];
 		const equity: string[] = [];
+		// Full float coordinates: snapping to integers stair-steps
+		// both lines at this viewBox's display size.
 		for (let i = 0; i < n; i++) {
 			const bc = toCents(s.payments[i].balance);
-			const x = Math.round((i / (n - 1)) * EQUITY_W);
-			const balanceY = Math.round(EQUITY_H * (1 - bc / pc));
-			const equityY = Math.round((EQUITY_H * bc) / pc);
+			const x = ((i / (n - 1)) * EQUITY_W).toFixed(2);
+			const balanceY = (EQUITY_H * (1 - bc / pc)).toFixed(2);
+			const equityY = ((EQUITY_H * bc) / pc).toFixed(2);
 			balance.push(`${x},${balanceY}`);
 			equity.push(`${x},${equityY}`);
 		}
@@ -497,16 +558,41 @@
 		return e instanceof Error ? e.message : String(e);
 	}
 
-	/** A canonical 2-decimal amount string as integer cents. GEOMETRY
-	 * ONLY (chart coordinates, year-row totals, slider seeds) — never
-	 * for displayed text, which always renders the raw API string. */
-	function toCents(s: string): number {
-		const m = /^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(s);
-		if (!m) return 0;
-		const cents = (m[3] ?? '').padEnd(2, '0');
-		const v = parseInt(m[2], 10) * 100 + parseInt(cents, 10);
-		return m[1] === '-' ? -v : v;
+	// --- Localised money display -----------------------------------------
+	// CENTS_RE, toCents() and numberFormat() live in the module-scope
+	// script above (render-safe memoisation, not component state);
+	// money()/moneyNum() format with that formatter, localised to the
+	// account currency (see module comment for the symbol contract).
+
+	/** A raw API amount for display, localised to the account currency.
+	 * Null/empty pass through as '' so the call site's sentinel stands;
+	 * an unparseable value renders verbatim (never mangled). */
+	function money(amount: string | null | undefined, currency: string | null): string {
+		if (amount === null || amount === undefined || amount === '') return '';
+		if (!CENTS_RE.test(amount)) return amount;
+		return numberFormat(currency).format(toCents(amount) / 100);
 	}
+
+	/** A numeric amount (slider values, row totals) for display, with
+	 * the same localisation as money(). */
+	function moneyNum(value: number, currency: string | null): string {
+		if (!Number.isFinite(value)) return '';
+		return numberFormat(currency).format(value);
+	}
+
+	/** The currency of an account row, or null when the account list
+	 * has not loaded it (the display then omits any symbol). */
+	function accountCurrency(accountId: string): string | null {
+		const acct = mortgageAccounts.find((a) => a.id === accountId);
+		return acct === undefined ? null : acct.currency;
+	}
+
+	/** The selected mortgage's account currency, or null (the list
+	 * row uses the same lookup on its own account_id). */
+	const selectedCurrency = $derived.by(() => {
+		const m = selectedMortgage();
+		return m === null ? null : accountCurrency(m.account_id);
+	});
 </script>
 
 <section class="space-y-4">
@@ -693,7 +779,9 @@
 									selectedId = m.id;
 								}}
 							>
-								<span class="block text-sm font-medium">{m.principal}</span>
+								<span class="block text-sm font-medium">
+								{money(m.principal, accountCurrency(m.account_id))}
+							</span>
 								<span class="block text-xs text-zinc-600 dark:text-zinc-400">
 									{m.annual_rate}{$_('mortgage.percent')} {rateTypeLabel(m.rate_type)} / {m.start_date}
 								</span>
@@ -709,7 +797,7 @@
 			{:else if amortError}
 				<p class="text-sm text-red-600 dark:text-red-400">{$_('mortgage.error_label')}: {amortError}</p>
 			{:else if amortization}
-				<!-- KPI line: the raw API strings, verbatim. A fifth
+				<!-- KPI line: amounts localised to the account currency. A fifth
 					 "next renewal" card when the spec has a term. -->
 				<div
 					class={amortization.next_renewal !== undefined
@@ -721,7 +809,7 @@
 							{$_('mortgage.label_base_payment')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-							{amortization.base_payment}
+							{money(amortization.base_payment, selectedCurrency)}
 						</p>
 					</div>
 					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
@@ -745,7 +833,7 @@
 							{$_('mortgage.label_total_interest')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
-							{amortization.total_interest}
+							{money(amortization.total_interest, selectedCurrency)}
 						</p>
 					</div>
 					{#if amortization.next_renewal !== undefined}
@@ -840,20 +928,20 @@
 										</button>
 									</td>
 									<td class="py-1.5 pr-3 text-right"></td>
-									<td class="py-1.5 pr-3 text-right">{(row.interest / 100).toFixed(2)}</td>
-									<td class="py-1.5 pr-3 text-right">{(row.principal / 100).toFixed(2)}</td>
+									<td class="py-1.5 pr-3 text-right">{moneyNum(row.interest / 100, selectedCurrency)}</td>
+									<td class="py-1.5 pr-3 text-right">{moneyNum(row.principal / 100, selectedCurrency)}</td>
 									<td class="py-1.5 pr-3 text-right"></td>
-									<td class="py-1.5 text-right">{row.endBalance}</td>
+									<td class="py-1.5 text-right">{money(row.endBalance, selectedCurrency)}</td>
 								</tr>
 								{#if expandedYears.has(row.year)}
 									{#each row.months as p (p.date)}
 										<tr class="bg-zinc-50 dark:bg-zinc-950 text-xs">
 											<td class="py-1 pr-3 pl-5 text-zinc-600 dark:text-zinc-400">{p.date}</td>
-											<td class="py-1 pr-3 text-right">{p.payment}</td>
-											<td class="py-1 pr-3 text-right">{p.interest}</td>
-											<td class="py-1 pr-3 text-right">{p.principal}</td>
-											<td class="py-1 pr-3 text-right">{p.extra}</td>
-											<td class="py-1 text-right">{p.balance}</td>
+											<td class="py-1 pr-3 text-right">{money(p.payment, selectedCurrency)}</td>
+											<td class="py-1 pr-3 text-right">{money(p.interest, selectedCurrency)}</td>
+											<td class="py-1 pr-3 text-right">{money(p.principal, selectedCurrency)}</td>
+											<td class="py-1 pr-3 text-right">{money(p.extra, selectedCurrency)}</td>
+											<td class="py-1 text-right">{money(p.balance, selectedCurrency)}</td>
 										</tr>
 									{/each}
 								{/if}
@@ -988,11 +1076,11 @@
 								</div>
 								<div>
 									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_actual_balance')}</dt>
-									<dd class="mt-0.5 font-medium tabular-nums">{matching.actual_balance}</dd>
+									<dd class="mt-0.5 font-medium tabular-nums">{money(matching.actual_balance, selectedCurrency)}</dd>
 								</div>
 								<div>
 									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_planned_balance')}</dt>
-									<dd class="mt-0.5 font-medium tabular-nums">{matching.planned_balance}</dd>
+									<dd class="mt-0.5 font-medium tabular-nums">{money(matching.planned_balance, selectedCurrency)}</dd>
 								</div>
 							</dl>
 							{#if matching.flags.length > 0}
@@ -1014,7 +1102,7 @@
 												{s.implied_annual_rate}{$_('mortgage.percent')}
 											</span>
 											<span class="text-zinc-500 dark:text-zinc-400 tabular-nums">
-												{$_('mortgage.match_suggestion_observed')} {s.observed_payment} · {s.observed_periods}
+												{$_('mortgage.match_suggestion_observed')} {money(s.observed_payment, selectedCurrency)} · {s.observed_periods}
 												{$_('mortgage.match_suggestion_periods')}
 											</span>
 											<button
@@ -1039,7 +1127,7 @@
 											{#each matching.extras as a, i (i)}
 												<li class="flex justify-between py-1.5 text-sm tabular-nums">
 													<span>{a.date}</span>
-													<span class="font-medium text-emerald-600 dark:text-emerald-400">+{a.amount}</span>
+													<span class="font-medium text-emerald-600 dark:text-emerald-400">+{money(a.amount, selectedCurrency)}</span>
 												</li>
 											{/each}
 										</ul>
@@ -1054,7 +1142,7 @@
 											{#each matching.shorts as a, i (i)}
 												<li class="flex justify-between py-1.5 text-sm tabular-nums">
 													<span>{a.date}</span>
-													<span class="font-medium text-red-600 dark:text-red-400">−{a.amount}</span>
+													<span class="font-medium text-red-600 dark:text-red-400">−{money(a.amount, selectedCurrency)}</span>
 												</li>
 											{/each}
 										</ul>
@@ -1077,11 +1165,11 @@
 										{#each matching.periods as p (p.date)}
 											<tr class="border-b border-zinc-100 dark:border-zinc-800">
 												<td class="py-1.5 pr-3">{p.date}</td>
-												<td class="py-1.5 pr-3 text-right">{p.payment ?? '—'}</td>
-												<td class="py-1.5 pr-3 text-right">{p.extra ?? ''}</td>
-												<td class="py-1.5 pr-3 text-right">{p.short ?? ''}</td>
-												<td class="py-1.5 pr-3 text-right">{p.balance}</td>
-												<td class="py-1.5 text-right">{p.planned_balance}</td>
+												<td class="py-1.5 pr-3 text-right">{money(p.payment, selectedCurrency) || '—'}</td>
+												<td class="py-1.5 pr-3 text-right">{money(p.extra, selectedCurrency)}</td>
+												<td class="py-1.5 pr-3 text-right">{money(p.short, selectedCurrency)}</td>
+												<td class="py-1.5 pr-3 text-right">{money(p.balance, selectedCurrency)}</td>
+												<td class="py-1.5 text-right">{money(p.planned_balance, selectedCurrency)}</td>
 											</tr>
 										{/each}
 									</tbody>
@@ -1110,7 +1198,7 @@
 						</label>
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">
-								{$_('mortgage.whatif_extra')} · {wiExtra.toFixed(2)}
+								{$_('mortgage.whatif_extra')} · {moneyNum(wiExtra, selectedCurrency)}
 							</span>
 							<input
 								type="range"
@@ -1134,7 +1222,7 @@
 						</label>
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">
-								{$_('mortgage.whatif_one_time')} · {wiOneTime.toFixed(2)}
+								{$_('mortgage.whatif_one_time')} · {moneyNum(wiOneTime, selectedCurrency)}
 							</span>
 							<input
 								type="range"
@@ -1237,8 +1325,8 @@
 								</tr>
 								<tr class="border-b border-zinc-100 dark:border-zinc-800">
 									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">{$_('mortgage.cmp_interest')}</td>
-									<td class="py-1.5 pr-3 text-right">{amortization.total_interest}</td>
-									<td class="py-1.5 text-right">{whatIf.total_interest}</td>
+									<td class="py-1.5 pr-3 text-right">{money(amortization.total_interest, selectedCurrency)}</td>
+									<td class="py-1.5 text-right">{money(whatIf.total_interest, selectedCurrency)}</td>
 								</tr>
 								<tr class="border-b border-zinc-100 dark:border-zinc-800">
 									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">
@@ -1258,9 +1346,9 @@
 									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">
 										{$_('mortgage.cmp_interest_saved')}
 									</td>
-									<td class="py-1.5 pr-3 text-right">0.00</td>
+									<td class="py-1.5 pr-3 text-right">{moneyNum(0, selectedCurrency)}</td>
 									<td class="py-1.5 text-right {savedClass(whatIf.interest_saved)}">
-										{whatIf.interest_saved}
+										{money(whatIf.interest_saved, selectedCurrency)}
 									</td>
 								</tr>
 							</tbody>
