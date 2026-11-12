@@ -108,6 +108,59 @@ export interface WhatIfResult {
 	schedule: AmortizationSchedule;
 }
 
+/** One amount reported outside the matching period table (round 25):
+ * an isolated over/under payment, a debit off the plan grid, or a debit
+ * after the actual payoff. The amount is a positive canonical
+ * 2-decimal string. */
+export interface MatchingAmount {
+	date: string;
+	amount: string;
+}
+
+/** A rate-change candidate derived from a sustained deviation run
+ * (round 25). A suggestion only — confirming it inserts a rate event
+ * via the round-23 PATCH path; nothing is auto-mutated. */
+export interface MatchingSuggestion {
+	effective_date: string;
+	implied_annual_rate: string;
+	observed_payment: string;
+	observed_periods: number;
+}
+
+/** One row of the matching period table (round 25): one plan date
+ * from the first plan date to the last matched plan date. payment is
+ * null when no debit matched; extra/short are the positive deviation
+ * magnitudes (null when the payment was normal). */
+export interface MatchingPeriod {
+	date: string;
+	payment: string | null;
+	extra: string | null;
+	short: string | null;
+	balance: string;
+	planned_balance: string;
+}
+
+/** The divergence report (GET /v1/mortgages/{id}/matching, round 25):
+ * the linked account's debits replayed against the stored spec's
+ * schedule. Read-only; the actual balance mirrors the engine
+ * arithmetic, the planned balance follows the schedule. */
+export interface MatchingReport {
+	scheduled_payment: string;
+	planned_payoff_date: string;
+	planned_payoff_index: number;
+	actual_payoff_date: string | null;
+	last_matched_date: string | null;
+	actual_balance: string;
+	planned_balance: string;
+	periods_matched: number;
+	periods_missing: number;
+	extras: MatchingAmount[];
+	shorts: MatchingAmount[];
+	suggestions: MatchingSuggestion[];
+	flags: string[];
+	periods: MatchingPeriod[];
+}
+
 /** The mortgage list (7.1 endpoint). */
 export function listMortgages(): Promise<Mortgage[]> {
 	return api<Mortgage[]>('/v1/mortgages');
@@ -148,4 +201,10 @@ export function getMortgageAmortization(id: string): Promise<AmortizationSchedul
 /** Compare the stored spec against a what-if scenario (7.3 endpoint). */
 export function whatIfMortgageAmortization(id: string, body: WhatIfRequest): Promise<WhatIfResult> {
 	return api<WhatIfResult>(`/v1/mortgages/${id}/amortization/what-if`, { method: 'POST', body });
+}
+
+/** The linked account's debits replayed against the schedule
+ * (round 25 endpoint; read-only). */
+export function getMortgageMatching(id: string): Promise<MatchingReport> {
+	return api<MatchingReport>(`/v1/mortgages/${id}/matching`);
 }

@@ -13,8 +13,11 @@
 		patchMortgage,
 		getMortgageAmortization,
 		whatIfMortgageAmortization,
+		getMortgageMatching,
 		type AmortizationPayment,
 		type AmortizationSchedule,
+		type MatchingReport,
+		type MatchingSuggestion,
 		type Mortgage,
 		type MortgageCreate,
 		type MortgageRateEvent,
@@ -112,12 +115,17 @@
 		const id = selectedId;
 		if (sub === null || id === '') {
 			++amortSeq; // discard any in-flight fetch
+			++matchSeq;
 			amortization = null;
 			amortError = null;
 			amortizing = false;
+			matching = null;
+			matchingError = null;
+			matchingLoading = false;
 			return;
 		}
 		void loadAmortization();
+		void loadMatching();
 	});
 
 	// --- What-if state ----------------------------------------------------
@@ -285,11 +293,12 @@
 
 	/** PATCH the full event array (server contract: a non-null
 	 * rate_events REPLACES the whole array), swap the row in the list,
-	 * and refetch the schedule (a renewal moves next_renewal). */
+	 * and refetch the schedule (a renewal moves next_renewal) and the
+	 * matching report (the stored events re-price the actual balance). */
 	async function applyRateEvents(id: string, events: MortgageRateEvent[]): Promise<void> {
 		const updated = await patchMortgage(id, { rate_events: events });
 		mortgages = mortgages.map((x) => (x.id === updated.id ? updated : x));
-		await loadAmortization();
+		await Promise.all([loadAmortization(), loadMatching()]);
 	}
 
 	/** Add a rate change; the array is re-sorted ascending before it is
@@ -323,6 +332,77 @@
 		evError = null;
 		try {
 			const next = m.rate_events.filter((_, j) => j !== i);
+			await applyRateEvents(m.id, next);
+		} catch (e) {
+			evError = envelopeMessage(e);
+		} finally {
+			evBusy = false;
+		}
+	}
+
+	// --- Transaction matching (round 25) -----------------------------------
+	let matching = $state<MatchingReport | null>(null);
+	let matchingLoading = $state(false);
+	let matchingError = $state<string | null>(null);
+	let matchSeq = 0;
+
+	/** Fetch the selected mortgage's matching report (seq-guarded
+	 * against stale responses). Read-only: the backend replays the
+	 * linked account's debits against the stored spec's schedule. */
+	function loadMatching(): Promise<void> {
+		const id = selectedId;
+		const seq = ++matchSeq;
+		matchingLoading = true;
+		matching = null;
+		matchingError = null;
+		return getMortgageMatching(id)
+			.then((r) => {
+				if (seq === matchSeq) matching = r;
+			})
+			.catch((e) => {
+				if (seq === matchSeq) matchingError = envelopeMessage(e);
+			})
+			.finally(() => {
+				if (seq === matchSeq) matchingLoading = false;
+			});
+	}
+
+	/** Localized text for a backend matching flag; a flag we do not
+	 * know (the backend added a new one) falls back to the raw token. */
+	function matchingFlagLabel(f: string): string {
+		switch (f) {
+			case 'no_transactions':
+				return $_('mortgage.match_flag_no_transactions');
+			case 'payment_below_minimum_payoff':
+				return $_('mortgage.match_flag_payment_below_minimum_payoff');
+			case 'payment_above_maximum_rate':
+				return $_('mortgage.match_flag_payment_above_maximum_rate');
+			default:
+				return f;
+		}
+	}
+
+	/** Confirm a rate-change suggestion through the round-23 PATCH path:
+	 * insert the implied rate as a re-amortizing event (sorted
+	 * ascending, the mortgage's rate type kept), then refetch the
+	 * schedule and the report. A duplicate date 400s server-side and
+	 * surfaces verbatim. */
+	async function applySuggestion(s: MatchingSuggestion): Promise<void> {
+		const m = selectedMortgage();
+		if (m === null || evBusy) return;
+		evBusy = true;
+		evError = null;
+		try {
+			const next = [
+				...m.rate_events,
+				{
+					effective_date: s.effective_date,
+					annual_rate: s.implied_annual_rate,
+					rate_type: m.rate_type === 'variable' ? 'variable' : 'fixed',
+					action: 're_amortize'
+				}
+			];
+			next.sort((a, b) => a.effective_date.localeCompare(b.effective_date));
 			await applyRateEvents(m.id, next);
 		} catch (e) {
 			evError = envelopeMessage(e);
@@ -871,6 +951,142 @@
 							<p class="mt-3 text-sm text-red-600 dark:text-red-400">
 								{$_('mortgage.error_label')}: {evError}
 							</p>
+						{/if}
+					</div>
+				{/if}
+
+				<!-- Transaction matching: the linked account's debits
+				 replayed against the stored schedule (round 25,
+				 read-only). -->
+				{#if detailMortgage}
+					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_title')}</p>
+						<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_hint')}</p>
+						{#if matchingLoading}
+							<p class="mt-3 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.loading')}</p>
+						{:else if matchingError !== null}
+							<p class="mt-3 text-sm text-red-600 dark:text-red-400">
+								{$_('mortgage.error_label')}: {matchingError}
+							</p>
+						{:else if matching !== null}
+							<dl class="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
+								<div>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_matched')}</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">{matching.periods_matched}</dd>
+								</div>
+								<div>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_missing')}</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">{matching.periods_missing}</dd>
+								</div>
+								<div>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_last')}</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">{matching.last_matched_date ?? '—'}</dd>
+								</div>
+								<div>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.label_payoff_date')}</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">{matching.actual_payoff_date ?? '—'}</dd>
+								</div>
+								<div>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_actual_balance')}</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">{matching.actual_balance}</dd>
+								</div>
+								<div>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_planned_balance')}</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">{matching.planned_balance}</dd>
+								</div>
+							</dl>
+							{#if matching.flags.length > 0}
+								<ul class="mt-3 space-y-1">
+									{#each matching.flags as f (f)}
+										<li class="text-sm text-amber-600 dark:text-amber-400">{matchingFlagLabel(f)}</li>
+									{/each}
+								</ul>
+							{/if}
+							<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_suggestions')}</p>
+							{#if matching.suggestions.length === 0}
+								<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_suggestions_empty')}</p>
+							{:else}
+								<ul class="mt-1 divide-y divide-zinc-100 dark:divide-zinc-800">
+									{#each matching.suggestions as s (s.effective_date + s.implied_annual_rate)}
+										<li class="flex flex-wrap items-center gap-3 py-2 text-sm">
+											<span class="w-24 font-medium tabular-nums">{s.effective_date}</span>
+											<span class="font-semibold tabular-nums">
+												{s.implied_annual_rate}{$_('mortgage.percent')}
+											</span>
+											<span class="text-zinc-500 dark:text-zinc-400 tabular-nums">
+												{$_('mortgage.match_suggestion_observed')} {s.observed_payment} · {s.observed_periods}
+												{$_('mortgage.match_suggestion_periods')}
+											</span>
+											<button
+												type="button"
+												class="ml-auto text-xs font-medium text-zinc-600 dark:text-zinc-400 underline decoration-zinc-300 underline-offset-2 hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+												disabled={evBusy}
+												onclick={() => void applySuggestion(s)}
+											>
+												{evBusy ? $_('mortgage.match_suggestion_applying') : $_('mortgage.match_suggestion_apply')}
+											</button>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+							<div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+								<div>
+									<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_extras')}</p>
+									{#if matching.extras.length === 0}
+										<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_none')}</p>
+									{:else}
+										<ul class="mt-1 divide-y divide-zinc-100 dark:divide-zinc-800">
+											{#each matching.extras as a, i (i)}
+												<li class="flex justify-between py-1.5 text-sm tabular-nums">
+													<span>{a.date}</span>
+													<span class="font-medium text-emerald-600 dark:text-emerald-400">+{a.amount}</span>
+												</li>
+											{/each}
+										</ul>
+									{/if}
+								</div>
+								<div>
+									<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_shorts')}</p>
+									{#if matching.shorts.length === 0}
+										<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_none')}</p>
+									{:else}
+										<ul class="mt-1 divide-y divide-zinc-100 dark:divide-zinc-800">
+											{#each matching.shorts as a, i (i)}
+												<li class="flex justify-between py-1.5 text-sm tabular-nums">
+													<span>{a.date}</span>
+													<span class="font-medium text-red-600 dark:text-red-400">−{a.amount}</span>
+												</li>
+											{/each}
+										</ul>
+									{/if}
+								</div>
+							</div>
+							{#if matching.periods.length > 0}
+								<table class="mt-4 w-full text-sm tabular-nums">
+									<thead>
+										<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
+											<th class="py-1.5 pr-3 font-medium">{$_('mortgage.match_col_date')}</th>
+											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.col_payment')}</th>
+											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.col_extra')}</th>
+											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.match_col_short')}</th>
+											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.col_balance')}</th>
+											<th class="py-1.5 text-right font-medium">{$_('mortgage.match_col_planned_balance')}</th>
+										</tr>
+									</thead>
+									<tbody>
+										{#each matching.periods as p (p.date)}
+											<tr class="border-b border-zinc-100 dark:border-zinc-800">
+												<td class="py-1.5 pr-3">{p.date}</td>
+												<td class="py-1.5 pr-3 text-right">{p.payment ?? '—'}</td>
+												<td class="py-1.5 pr-3 text-right">{p.extra ?? ''}</td>
+												<td class="py-1.5 pr-3 text-right">{p.short ?? ''}</td>
+												<td class="py-1.5 pr-3 text-right">{p.balance}</td>
+												<td class="py-1.5 text-right">{p.planned_balance}</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							{/if}
 						{/if}
 					</div>
 				{/if}

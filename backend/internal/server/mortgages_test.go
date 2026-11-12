@@ -186,16 +186,22 @@ func (m *memMortgageStore) Delete(_ context.Context, userID, id string) error {
 
 // newMortgageServer builds a full router with a live token verifier, an
 // in-memory bootstrap, the given account store, and the given mortgage
-// store (nil allowed — that is the 503 path). The key is returned so
-// tests can mint tokens for several users under the same verifier.
-func newMortgageServer(t *testing.T, accounts AccountStore, store MortgageStore) (http.Handler, jwk.Key) {
+// store (nil allowed — that is the 503 path). The optional transaction
+// store (round 25 matching) is nil when omitted — that is its 503 path.
+// The key is returned so tests can mint tokens for several users under
+// the same verifier.
+func newMortgageServer(t *testing.T, accounts AccountStore, store MortgageStore, txs ...*memTxStore) (http.Handler, jwk.Key) {
 	t.Helper()
 	key := mintKey(t)
 	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil, false, nil, nil, nil), key
+	var txStore TransactionStore
+	if len(txs) > 0 {
+		txStore = txs[0]
+	}
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, txStore, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, nil, false, nil, nil, nil), key
 }
 
 // baseMortgageBody is the full 9-field create body with every value

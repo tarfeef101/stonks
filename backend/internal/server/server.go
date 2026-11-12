@@ -306,6 +306,11 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// stateless what-if (no second row is written).
 		r.Get("/v1/mortgages/{id}/amortization", h.mortgageAmortizationGet)
 		r.Post("/v1/mortgages/{id}/amortization/what-if", h.mortgageWhatIfPost)
+		// Mortgage matching (round 25): replay the linked account's
+		// debits against the stored schedule. Read-only; confirmed
+		// rate-change suggestions apply through the PATCH rate_events
+		// path.
+		r.Get("/v1/mortgages/{id}/matching", h.mortgageMatchingGet)
 		// FI institutions + credentials (plan 9.1, migration 0010):
 		// the GLOBAL institution registry (auth required, no user
 		// scoping) and the per-user tokens (the secrets are
