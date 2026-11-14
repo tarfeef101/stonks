@@ -38,13 +38,32 @@ type RateEvent struct {
 	Action        string `json:"action"`
 }
 
+// PaymentClassification is the user's manual classification of one
+// aberrant payment the matcher reports (round 32): an extra or
+// shortfall debit (Kind "extra" | "short", Date the debit date) or a
+// sustained-deviation suggestion (Kind "suggestion", Date the run's
+// effective date). Classification is "one_off" (a one-time payment
+// against principal) or "rate_change"; the three rate fields are set
+// only for rate_change (AnnualRate the canonical 2-decimal string,
+// RateType "fixed" | "variable", Action "re_amortize" | "keep_payment").
+// It lives inside the spec blob, so it inherits its encryption.
+type PaymentClassification struct {
+	Date           string  `json:"date"`
+	Kind           string  `json:"kind"`
+	Classification string  `json:"classification"`
+	AnnualRate     *string `json:"annual_rate"`
+	RateType       *string `json:"rate_type"`
+	Action         *string `json:"action"`
+}
+
 // MortgageSpec is the entire mortgage spec as one struct: marshalled to
 // JSON and sealed as ONE pack (plan §5). Amounts are canonical 2-decimal
 // strings; AmortizationYears and TermYears are JSON integers (TermYears
 // 0 = none, metadata only); RateType is "fixed" | "variable" (""
-// tolerated as fixed); RateEvents is nil when there are none. The three
-// term/renewal fields are appended LAST so pre-existing sealed blobs
-// unmarshal to their zero values.
+// tolerated as fixed); RateEvents is nil when there are none;
+// PaymentClassifications is nil when there are none. The term/renewal
+// fields and PaymentClassifications are appended LAST so pre-existing
+// sealed blobs unmarshal to their zero values.
 type MortgageSpec struct {
 	Principal             string      `json:"principal"`
 	AnnualRate            string      `json:"annual_rate"`
@@ -57,6 +76,8 @@ type MortgageSpec struct {
 	TermYears             int         `json:"term_years"`
 	RateType              string      `json:"rate_type"`
 	RateEvents            []RateEvent `json:"rate_events"`
+
+	PaymentClassifications []PaymentClassification `json:"payment_classifications"`
 }
 
 // Mortgage is one mortgages row with its spec opened. The wire DTOs
@@ -86,9 +107,10 @@ type MortgageIn struct {
 }
 
 // MortgagePatch is the Update input; nil = untouched (absent in the
-// PATCH body). AccountID is immutable and NOT patchable. RateEvents is
-// a FULL-ARRAY replacement: nil = untouched, non-nil (including empty)
-// = the stored events become exactly this slice.
+// PATCH body). AccountID is immutable and NOT patchable. RateEvents and
+// PaymentClassifications are FULL-ARRAY replacements: nil = untouched,
+// non-nil (including empty) = the stored value becomes exactly this
+// slice.
 type MortgagePatch struct {
 	Principal             *string
 	AnnualRate            *string
@@ -101,6 +123,8 @@ type MortgagePatch struct {
 	TermYears             *int
 	RateType              *string
 	RateEvents            []RateEvent
+
+	PaymentClassifications []PaymentClassification
 }
 
 // MortgageStore persists mortgages. One store serves every user; each
@@ -242,7 +266,8 @@ func (s *MortgageStore) Create(ctx context.Context, userID string, in MortgageIn
 // Update applies the non-nil fields of p to the user's mortgage and
 // returns the updated row. The whole spec re-seals as ONE pack. An
 // unchanged patch (all nil, or every present field equal to the
-// current spec; RateEvents compared by reflect.DeepEqual) is a no-op:
+// current spec; RateEvents and PaymentClassifications compared by
+// reflect.DeepEqual) is a no-op:
 // the row comes back without an UPDATE, so updated_at stays put (the
 // budgets/cards no-op rule). AccountID is immutable.
 func (s *MortgageStore) Update(ctx context.Context, userID, id string, p MortgagePatch, dek []byte) (Mortgage, error) {
@@ -310,6 +335,10 @@ func (s *MortgageStore) Update(ctx context.Context, userID, id string, p Mortgag
 	}
 	if p.RateEvents != nil && !reflect.DeepEqual(p.RateEvents, cur.RateEvents) {
 		next.RateEvents = p.RateEvents
+		changed = true
+	}
+	if p.PaymentClassifications != nil && !reflect.DeepEqual(p.PaymentClassifications, cur.PaymentClassifications) {
+		next.PaymentClassifications = p.PaymentClassifications
 		changed = true
 	}
 

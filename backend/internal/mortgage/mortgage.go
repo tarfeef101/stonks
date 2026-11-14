@@ -42,8 +42,9 @@ type Spec struct {
 // to AnnualRate for that payment and every payment after it.
 //
 //	Action "re_amortize" (a standard renewal): the regular payment is
-//	recomputed over the remaining original amortization, so the payoff
-//	date is preserved.
+//	recomputed over the remaining original amortization INCLUDING the
+//	event's own period, so the event payment is already the new
+//	re-amortized amount and the payoff date is preserved.
 //
 //	Action "keep_payment": the regular payment is unchanged and the payoff
 //	date floats — earlier for a rate cut, later for a rate hike (the
@@ -260,12 +261,27 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 		// Rate events take effect on the first payment dated >= the event
 		// date: the period rate switches BEFORE this period's interest is
 		// accrued, so the event's own payment is already at the new rate.
-		// At most one event can fire per period (dates are strictly
-		// ascending and no two payments share a date).
+		// A re_amortize renewal goes further: the pre-payment balance is
+		// re-amortized over the remaining periods INCLUDING this one, so
+		// the event's own payment is the new re-amortized amount (the
+		// matching solver solves exactly this model). keep_payment is
+		// applied after the payment, on the new balance. At most one event
+		// can fire per period (dates are strictly ascending and no two
+		// payments share a date).
 		if evIdx < len(spec.RateEvents) && !d.Before(spec.RateEvents[evIdx].Date) {
 			ev := spec.RateEvents[evIdx]
 			r = PeriodicRate(ev.AnnualRate, ppy)
-			pendingAction = ev.Action
+			if ev.Action == "re_amortize" {
+				if m := n - k + 1; m > 0 {
+					pay = amortize(bal, r, m) // the renewal preserves the original payoff date
+					cap = n
+				}
+				// m <= 0 (an event past the original end, only reachable
+				// after a keep_payment extension): keep the current
+				// payment/horizon; the rate switch still stands.
+			} else {
+				pendingAction = ev.Action
+			}
 			evIdx++
 		}
 		interest := bal * r
@@ -322,18 +338,11 @@ func runSim(spec Spec, one *Prepayment) (Schedule, error) {
 		if spec.ExtraPrepaymentType == "principal" && extraDue > 0 {
 			pay = amortize(bal, r, cap-k) // re-amortize the remainder over the remaining term
 		}
-		// The fired event's action lands AFTER this payment, on the new
-		// balance (same idiom as the principal-mode re-amortization).
-		switch pendingAction {
-		case "re_amortize":
-			if n-k > 0 {
-				pay = amortize(bal, r, n-k) // the renewal preserves the original payoff date
-				cap = n
-			}
-			// n-k <= 0 (an event past the original end, only reachable after
-			// a keep_payment extension): keep the current payment/horizon,
-			// the rate switch still stands.
-		case "keep_payment":
+		// A keep_payment event's action lands AFTER this payment, on the
+		// new balance (same idiom as the principal-mode re-amortization).
+		// re_amortize was already applied at the firing point above,
+		// before this payment.
+		if pendingAction == "keep_payment" {
 			var m int
 			if r == 0 {
 				m = int(math.Ceil(bal / pay))

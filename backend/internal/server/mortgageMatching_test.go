@@ -312,14 +312,14 @@ func TestMortgageMatchingExtrasAndShorts(t *testing.T) {
 	if len(body.Extras) != 1 {
 		t.Fatalf("extras = %v, want exactly 1", body.Extras)
 	}
-	wantExtra := `{"date":"2026-01-22","amount":"100.00"}`
+	wantExtra := `{"date":"2026-01-22","amount":"100.00","classification":null}`
 	if got := firstObjectInArray(t, rawJSONValueAt(t, out, "extras")); got != wantExtra {
 		t.Errorf("extras[0] = %s, want verbatim %s", got, wantExtra)
 	}
 	if len(body.Shorts) != 1 {
 		t.Fatalf("shorts = %v, want exactly 1", body.Shorts)
 	}
-	wantShort := `{"date":"2026-03-01","amount":"26.18"}`
+	wantShort := `{"date":"2026-03-01","amount":"26.18","classification":null}`
 	if got := firstObjectInArray(t, rawJSONValueAt(t, out, "shorts")); got != wantShort {
 		t.Errorf("shorts[0] = %s, want verbatim %s", got, wantShort)
 	}

@@ -22,12 +22,16 @@ import (
 )
 
 // NotificationStore is the persistence surface the notification handlers
-// need. *repo.NotificationStore satisfies it (its extra Create/Delete
-// are unused here); route tests use an in-memory implementation.
+// need. *repo.NotificationStore satisfies it (its extra Delete is unused
+// here); Create and FindByKindRef serve the lazy notification creation
+// on the mortgage matching report (round 32). Route tests use an
+// in-memory implementation.
 type NotificationStore interface {
 	List(ctx context.Context, userID string, f repo.NotificationFilter) ([]repo.Notification, error)
 	MarkRead(ctx context.Context, userID, id string) (repo.Notification, error)
 	CountUnread(ctx context.Context, userID string) (int, error)
+	Create(ctx context.Context, userID string, in repo.NotificationIn) (repo.Notification, error)
+	FindByKindRef(ctx context.Context, userID, kind string, ref []byte) (repo.Notification, error)
 }
 
 // notificationOut is the wire row. ReadAt is null while the

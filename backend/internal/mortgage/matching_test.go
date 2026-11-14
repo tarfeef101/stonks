@@ -441,8 +441,9 @@ func TestMatchEarlyPayoff(t *testing.T) {
 }
 
 // T12: a sustained run whose implied shift is below matchMinShift (a +4
-// overpayment implies ~4.5bp, far under 0.25) -> no suggestion, the run
-// falls through to extras.
+// overpayment implies ~4.5bp, far under 0.25) is the plan's own drift ->
+// no suggestion and no extras: the run is absorbed and its periods
+// report as normal (no row badges).
 func TestMatchSustainedTinyShift(t *testing.T) {
 	spec := matchSpecA()
 	s, err := Generate(spec)
@@ -462,16 +463,13 @@ func TestMatchSustainedTinyShift(t *testing.T) {
 	if len(res.Suggestions) != 0 {
 		t.Fatalf("suggestions = %v", res.Suggestions)
 	}
-	if len(res.Extras) != 10 {
-		t.Fatalf("extras = %v", res.Extras)
+	if len(res.Extras) != 0 || len(res.Shorts) != 0 || len(res.Flags) != 0 {
+		t.Fatalf("extras = %v shorts = %v flags = %v", res.Extras, res.Shorts, res.Flags)
 	}
-	for i, e := range res.Extras {
-		if e.Amount != 4.00 || !e.Date.Equal(s.Payments[10+i].Date) {
-			t.Fatalf("extra %d = %+v", i, e)
+	for i := 10; i <= 19; i++ {
+		if res.Periods[i].Extra != nil || res.Periods[i].Short != nil {
+			t.Fatalf("row %d should be absorbed, got %+v", i+1, res.Periods[i])
 		}
-	}
-	if len(res.Flags) != 0 || len(res.Shorts) != 0 {
-		t.Fatalf("flags = %v shorts = %v", res.Flags, res.Shorts)
 	}
 }
 

@@ -122,14 +122,14 @@ type TransactionPatch struct {
 type TransactionFilter struct {
 	AccountIDs  []string
 	CategoryIDs []string
-	DateFrom   *time.Time
-	DateTo     *time.Time
-	MinAmount  *string
-	MaxAmount  *string
-	Sign       string
-	Search     string
-	Limit      int
-	Offset     int
+	DateFrom    *time.Time
+	DateTo      *time.Time
+	MinAmount   *string
+	MaxAmount   *string
+	Sign        string
+	Search      string
+	Limit       int
+	Offset      int
 }
 
 // TransactionStore is the transactions repository.

@@ -311,6 +311,10 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// rate-change suggestions apply through the PATCH rate_events
 		// path.
 		r.Get("/v1/mortgages/{id}/matching", h.mortgageMatchingGet)
+		// Mortgage classification (round 32): the user's manual
+		// one-off-vs-rate-change answer for one aberrant payment the
+		// matching report flagged; stored inside the spec blob.
+		r.Post("/v1/mortgages/{id}/classifications", h.mortgageClassifyPost)
 		// FI institutions + credentials (plan 9.1, migration 0010):
 		// the GLOBAL institution registry (auth required, no user
 		// scoping) and the per-user tokens (the secrets are

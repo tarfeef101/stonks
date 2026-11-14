@@ -41,9 +41,11 @@ type memNotificationRow struct {
 type memNotificationStore struct {
 	rows []memNotificationRow
 
-	listErr  error
-	readErr  error
-	countErr error
+	listErr   error
+	readErr   error
+	countErr  error
+	createErr error
+	findErr   error
 }
 
 // addNotif seeds one row directly and returns the minted id; read rows
@@ -129,6 +131,69 @@ func (m *memNotificationStore) CountUnread(_ context.Context, userID string) (in
 		}
 	}
 	return n, nil
+}
+
+// Create appends the row (minting an id) and returns it, mirroring the
+// repo's Create returning the stored row.
+func (m *memNotificationStore) Create(_ context.Context, userID string, in repo.NotificationIn) (repo.Notification, error) {
+	if m.createErr != nil {
+		return repo.Notification{}, m.createErr
+	}
+	n := repo.Notification{
+		ID:        nextTestID(),
+		Kind:      in.Kind,
+		Title:     in.Title,
+		Body:      in.Body,
+		Ref:       in.Ref,
+		CreatedAt: time.Now().UTC(),
+	}
+	m.rows = append(m.rows, memNotificationRow{userID: userID, n: n})
+	return n, nil
+}
+
+// FindByKindRef returns the user's newest (kind, jsonb-equal ref) row,
+// any read state; ErrNotificationNotFound when there is none.
+func (m *memNotificationStore) FindByKindRef(_ context.Context, userID, kind string, ref []byte) (repo.Notification, error) {
+	if m.findErr != nil {
+		return repo.Notification{}, m.findErr
+	}
+	best := -1
+	for i := range m.rows {
+		r := &m.rows[i]
+		if r.userID != userID || r.n.Kind != kind || !jsonbEqual(r.n.Ref, ref) {
+			continue
+		}
+		if best < 0 || r.n.CreatedAt.After(m.rows[best].n.CreatedAt) ||
+			(r.n.CreatedAt.Equal(m.rows[best].n.CreatedAt) && r.n.ID > m.rows[best].n.ID) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return repo.Notification{}, repo.ErrNotificationNotFound
+	}
+	return m.rows[best].n, nil
+}
+
+// jsonbEqual mirrors jsonb equality: the documents are equal when they
+// unmarshal to the same value (key order irrelevant); a nil/empty
+// document matches only a nil/empty document.
+func jsonbEqual(a, b []byte) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	var va, vb any
+	if err := json.Unmarshal(a, &va); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &vb); err != nil {
+		return false
+	}
+	ca, _ := json.Marshal(va) // map keys marshal in sorted order
+	cb, _ := json.Marshal(vb)
+	return string(ca) == string(cb)
 }
 
 // newNotificationsServer builds a full router with a live token

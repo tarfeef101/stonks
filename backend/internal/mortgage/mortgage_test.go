@@ -447,9 +447,9 @@ func TestEquityCurve(t *testing.T) {
 }
 
 // TestRateEventReAmortize pins a renewal that re-amortizes: the event
-// payment accrues at the new rate, the following payments are re-amortized
-// over the remaining original amortization, and the payoff date is
-// preserved.
+// payment accrues at the new rate AND is already the re-amortized amount
+// (the renewal re-amortizes over the remaining original amortization
+// INCLUDING the event period), and the payoff date is preserved.
 func TestRateEventReAmortize(t *testing.T) {
 	baseSpec := refSpec()
 	spec := baseSpec
@@ -482,20 +482,21 @@ func TestRateEventReAmortize(t *testing.T) {
 	r0 := PeriodicRate(4.99, 12)
 	r1 := PeriodicRate(6.5, 12)
 	pay0 := amortize(500000, r0, 300)
-	// The event payment (the 61st) already accrues at the new rate.
-	if want := round2(closedBalance(500000, r0, pay0, 60) * r1); sch.Payments[60].Interest != want {
+	// The pre-event balance is still on the old-rate closed-form path
+	// (payments 1..60 are all the base payment).
+	bal60 := closedBalance(500000, r0, pay0, 60)
+	// The event payment (the 61st) accrues at the new rate.
+	if want := round2(bal60 * r1); sch.Payments[60].Interest != want {
 		t.Fatalf("payment 61 Interest = %v, want %v (new rate on the event payment)",
 			sch.Payments[60].Interest, want)
 	}
-	// From the 62nd on, the regular payment is re-amortized over the
-	// remaining 239 periods at the new rate, from the post-event balance.
-	// That balance is off the old-rate closed-form path (the event payment
-	// itself accrues at the new rate), so it comes from the schedule; the
-	// interest pin above already cross-checked it against the closed form.
-	pay1 := amortize(sch.Payments[60].Balance, r1, 239)
-	for k := 61; k < 299; k++ {
+	// The renewal re-amortizes the pre-event balance over the remaining
+	// 240 periods INCLUDING the event period, so the event payment itself
+	// is the new re-amortized amount.
+	pay1 := amortize(bal60, r1, 240)
+	for k := 60; k < 299; k++ {
 		if want := round2(pay1); sch.Payments[k].Payment != want {
-			t.Fatalf("payment %d Payment = %v, want %v (re-amortized over 239)",
+			t.Fatalf("payment %d Payment = %v, want %v (re-amortized over 240)",
 				k+1, sch.Payments[k].Payment, want)
 		}
 	}
@@ -655,8 +656,9 @@ func TestRateEventEffectiveDates(t *testing.T) {
 }
 
 // TestRateEventMultipleReAmortize pins a chain of two renewals: each
-// re-amortizes over the remaining ORIGINAL amortization at its own rate,
-// and the payoff date is preserved.
+// re-amortizes the pre-event balance over the remaining ORIGINAL
+// amortization (including the event period) at its own rate, and the
+// payoff date is preserved.
 func TestRateEventMultipleReAmortize(t *testing.T) {
 	spec := refSpec()
 	spec.RateEvents = []RateEvent{
@@ -674,31 +676,32 @@ func TestRateEventMultipleReAmortize(t *testing.T) {
 	r1 := PeriodicRate(5.5, 12)
 	r2 := PeriodicRate(6.0, 12)
 	pay0 := amortize(500000, r0, 300)
-	// Each renewal re-amortizes from the simulation's own post-event
-	// balance (the event payment accrues at the new rate, so the balance
-	// is off the old-rate closed-form path).
-	pay1 := amortize(sch.Payments[60].Balance, r1, 239)
-	pay2 := amortize(sch.Payments[120].Balance, r2, 179)
-	// First renewal: event payment at r1, then re-amortized over 239.
+	// Each renewal re-amortizes the pre-event balance over the remaining
+	// original amortization INCLUDING the event period, so the event
+	// payment is already the new re-amortized amount.
+	pay1 := amortize(closedBalance(500000, r0, pay0, 60), r1, 240)
+	pay2 := amortize(sch.Payments[119].Balance, r2, 180)
+	// First renewal: the event payment accrues at r1 AND is the
+	// re-amortized amount over 240.
 	if want := round2(closedBalance(500000, r0, pay0, 60) * r1); sch.Payments[60].Interest != want {
 		t.Fatalf("payment 61 Interest = %v, want %v (first renewal rate on the event payment)",
 			sch.Payments[60].Interest, want)
 	}
-	for k := 61; k < 120; k++ {
+	for k := 60; k < 120; k++ {
 		if want := round2(pay1); sch.Payments[k].Payment != want {
-			t.Fatalf("payment %d Payment = %v, want %v (re-amortized over 239 at 5.5%%)",
+			t.Fatalf("payment %d Payment = %v, want %v (re-amortized over 240 at 5.5%%)",
 				k+1, sch.Payments[k].Payment, want)
 		}
 	}
-	// Second renewal: event payment at r2 (from balance 120), then
-	// re-amortized over 179.
+	// Second renewal: the event payment accrues at r2 (from the 120th
+	// payment's balance) and is the re-amortized amount over 180.
 	if want := round2(sch.Payments[119].Balance * r2); sch.Payments[120].Interest != want {
 		t.Fatalf("payment 121 Interest = %v, want %v (second renewal rate on the event payment)",
 			sch.Payments[120].Interest, want)
 	}
-	for k := 121; k < 299; k++ {
+	for k := 120; k < 299; k++ {
 		if want := round2(pay2); sch.Payments[k].Payment != want {
-			t.Fatalf("payment %d Payment = %v, want %v (re-amortized over 179 at 6.0%%)",
+			t.Fatalf("payment %d Payment = %v, want %v (re-amortized over 180 at 6.0%%)",
 				k+1, sch.Payments[k].Payment, want)
 		}
 	}

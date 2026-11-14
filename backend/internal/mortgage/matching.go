@@ -26,8 +26,12 @@
 // remaining periods from the run start, and Pbar_reg the mean of the
 // observed regular payments (P minus the planned recurring extra) over
 // the run. A candidate becomes a suggestion only when the implied rate is
-// at least matchMinShift away from the rate in effect at the run start;
-// otherwise the periods fall through to extras/shorts.
+// at least matchMinShift away from the rate in effect at the run start.
+// A sustained run below that threshold is the plan's own
+// re-amortization drift, not an anomaly, and is absorbed: its periods
+// report as normal. A run whose payment is infeasible (below the
+// zero-rate or above the 100%-rate amortization) is attributed to no
+// rate and falls through to extras/shorts instead.
 //
 // Flags: no_transactions (no debits at all), payment_below_minimum_payoff
 // (a sustained run whose payment is below the zero-rate amortization),
@@ -80,7 +84,7 @@ type MatchPeriod struct {
 
 // MatchResult is the full read-only matching report.
 type MatchResult struct {
-	ScheduledPayment   float64  // stored plan base payment, round2
+	ScheduledPayment   float64 // stored plan base payment, round2
 	PlannedPayoffDate  time.Time
 	PlannedPayoffIndex int
 	ActualPayoffDate   *time.Time
@@ -261,36 +265,6 @@ func Match(spec Spec, txns []Txn) (MatchResult, error) {
 
 	res.PlannedBalance = round2(sched.Payments[lastRow].Balance)
 
-	// Period table: plan dates 0..lastRow.
-	periods := make([]MatchPeriod, 0, lastRow+1)
-	for k := 0; k <= lastRow; k++ {
-		mp := MatchPeriod{
-			Date:           sched.Payments[k].Date,
-			Balance:        round2(rows[k].balAfter),
-			PlannedBalance: round2(sched.Payments[k].Balance),
-		}
-		if rows[k].matched {
-			res.PeriodsMatched++
-			d := sched.Payments[k].Date
-			res.LastMatchedDate = &d
-			p := round2(rows[k].p)
-			mp.Payment = &p
-		} else {
-			res.PeriodsMissing++
-		}
-		if rows[k].delta != nil {
-			if *rows[k].delta > matchTol {
-				e := round2(*rows[k].delta)
-				mp.Extra = &e
-			} else if *rows[k].delta < -matchTol {
-				s := round2(-*rows[k].delta)
-				mp.Short = &s
-			}
-		}
-		periods = append(periods, mp)
-	}
-	res.Periods = periods
-
 	// Deviation runs.
 	addFlag := func(f string) {
 		for _, g := range res.Flags {
@@ -378,7 +352,12 @@ func Match(spec Spec, txns []Txn) (MatchResult, error) {
 					addFlag(flag)
 					fallThrough(i, j)
 				case math.Abs(a-rows[i].ratePct) < matchMinShift:
-					fallThrough(i, j)
+					// Sub-threshold: the run tracks the plan's own
+					// re-amortization drift; absorb it so the periods
+					// report as normal (no badges, no amounts).
+					for k := i; k <= j; k++ {
+						rows[k].delta = nil
+					}
 				default:
 					res.Suggestions = append(res.Suggestions, MatchSuggestion{
 						EffectiveDate:     sched.Payments[i].Date,
@@ -395,6 +374,38 @@ func Match(spec Spec, txns []Txn) (MatchResult, error) {
 		}
 		i = j + 1
 	}
+
+	// Period table: plan dates 0..lastRow. Built after the run loop so
+	// that rows of an absorbed sub-threshold run (deltas nilled there)
+	// surface no Extra/Short badges.
+	periods := make([]MatchPeriod, 0, lastRow+1)
+	for k := 0; k <= lastRow; k++ {
+		mp := MatchPeriod{
+			Date:           sched.Payments[k].Date,
+			Balance:        round2(rows[k].balAfter),
+			PlannedBalance: round2(sched.Payments[k].Balance),
+		}
+		if rows[k].matched {
+			res.PeriodsMatched++
+			d := sched.Payments[k].Date
+			res.LastMatchedDate = &d
+			p := round2(rows[k].p)
+			mp.Payment = &p
+		} else {
+			res.PeriodsMissing++
+		}
+		if rows[k].delta != nil {
+			if *rows[k].delta > matchTol {
+				e := round2(*rows[k].delta)
+				mp.Extra = &e
+			} else if *rows[k].delta < -matchTol {
+				s := round2(-*rows[k].delta)
+				mp.Short = &s
+			}
+		}
+		periods = append(periods, mp)
+	}
+	res.Periods = periods
 	return res, nil
 }
 

@@ -164,6 +164,9 @@ func (m *memMortgageStore) Update(_ context.Context, userID, id string, p repo.M
 		if p.RateEvents != nil {
 			r.m.Spec.RateEvents = p.RateEvents
 		}
+		if p.PaymentClassifications != nil {
+			r.m.Spec.PaymentClassifications = p.PaymentClassifications
+		}
 		m.rows[i].m = r.m
 		return r.m, nil
 	}

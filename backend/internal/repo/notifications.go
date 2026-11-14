@@ -184,6 +184,35 @@ func (s *NotificationStore) Get(ctx context.Context, userID, id string) (Notific
 	return notificationFrom(id, kind, title, body, ref, readAt, createdAt), nil
 }
 
+// FindByKindRef returns one of the user's notifications of kind whose
+// ref is jsonb-equal to ref (any read state), or
+// ErrNotificationNotFound when there is none. The ref comparison is
+// jsonb equality (key order irrelevant), which is what round 32 needs
+// to dedup its lazily-created mortgage-aberrant notifications on the
+// (kind, ref) pair.
+func (s *NotificationStore) FindByKindRef(ctx context.Context, userID, kind string, ref []byte) (Notification, error) {
+	var (
+		id, title, body string
+		refCol          []byte
+		readAt          sql.NullTime
+		createdAt       time.Time
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, title, body, ref, read_at, created_at
+		FROM notifications
+		WHERE user_id = $1 AND kind = $2 AND ref = $3::jsonb
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, userID, kind, string(ref)).
+		Scan(&id, &title, &body, &refCol, &readAt, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Notification{}, ErrNotificationNotFound
+	}
+	if err != nil {
+		return Notification{}, fmt.Errorf("repo: find notification by kind/ref: %w", err)
+	}
+	return notificationFrom(id, kind, title, body, refCol, readAt, createdAt), nil
+}
+
 // List returns a page of the user's notifications (see
 // NotificationFilter).
 func (s *NotificationStore) List(ctx context.Context, userID string, f NotificationFilter) ([]Notification, error) {

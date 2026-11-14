@@ -113,16 +113,17 @@
 		listMortgages,
 		createMortgage,
 		patchMortgage,
+		classifyPayment,
 		getMortgageAmortization,
 		whatIfMortgageAmortization,
 		getMortgageMatching,
 		type AmortizationPayment,
 		type AmortizationSchedule,
 		type MatchingReport,
-		type MatchingSuggestion,
 		type Mortgage,
 		type MortgageCreate,
 		type MortgageRateEvent,
+		type PaymentClassificationRequest,
 		type WhatIfRequest,
 		type WhatIfResult
 	} from '#lib/api/mortgages';
@@ -454,12 +455,14 @@
 
 	/** Fetch the selected mortgage's matching report (seq-guarded
 	 * against stale responses). Read-only: the backend replays the
-	 * linked account's debits against the stored spec's schedule. */
+	 * linked account's debits against the stored spec's schedule.
+	 * The previous report is KEPT while the refetch is in flight
+	 * (round 32): the card shows its loading state, and the
+	 * classification modal must not flicker shut over a re-fetch. */
 	function loadMatching(): Promise<void> {
 		const id = selectedId;
 		const seq = ++matchSeq;
 		matchingLoading = true;
-		matching = null;
 		matchingError = null;
 		return getMortgageMatching(id)
 			.then((r) => {
@@ -488,32 +491,166 @@
 		}
 	}
 
-	/** Confirm a rate-change suggestion through the round-23 PATCH path:
-	 * insert the implied rate as a re-amortizing event (sorted
-	 * ascending, the mortgage's rate type kept), then refetch the
-	 * schedule and the report. A duplicate date 400s server-side and
-	 * surfaces verbatim. */
-	async function applySuggestion(s: MatchingSuggestion): Promise<void> {
+	// --- Aberrant payment classification (round 32) ----------------------
+	// The matching report's UNANSWERED items: every extra, short and
+	// suggestion whose stored classification is still null. Each is
+	// answered as either a one-off payment against principal or a rate
+	// change; the full-screen modal below is open exactly while this
+	// list is non-empty and cannot be dismissed — the page waits for
+	// the answers so the stored spec stays accurate.
+	interface PendingItem {
+		kind: 'extra' | 'short' | 'suggestion';
+		date: string;
+		/** The deviation magnitude (extras/shorts only). */
+		amount: string | null;
+		/** The implied annual rate (suggestions only). */
+		impliedRate: string | null;
+		/** The observed payment of the run (suggestions only). */
+		observed: string | null;
+		/** The run length (suggestions only). */
+		periods: number | null;
+	}
+
+	interface ClassifyForm {
+		classification: 'one_off' | 'rate_change';
+		annual_rate: string;
+		rate_type: 'fixed' | 'variable';
+		action: 're_amortize' | 'keep_payment';
+	}
+
+	/** The unclassified items of the loaded report, sorted by date. */
+	const pendingItems = $derived.by((): PendingItem[] => {
+		const m = matching;
+		if (m === null) return [];
+		const out: PendingItem[] = [];
+		for (const a of m.extras) {
+			if (a.classification === null)
+				out.push({
+					kind: 'extra',
+					date: a.date,
+					amount: a.amount,
+					impliedRate: null,
+					observed: null,
+					periods: null
+				});
+		}
+		for (const a of m.shorts) {
+			if (a.classification === null)
+				out.push({
+					kind: 'short',
+					date: a.date,
+					amount: a.amount,
+					impliedRate: null,
+					observed: null,
+					periods: null
+				});
+		}
+		for (const s of m.suggestions) {
+			if (s.classification === null)
+				out.push({
+					kind: 'suggestion',
+					date: s.effective_date,
+					amount: null,
+					impliedRate: s.implied_annual_rate,
+					observed: s.observed_payment,
+					periods: s.observed_periods
+				});
+		}
+		out.sort((a, b) => a.date.localeCompare(b.date));
+		return out;
+	});
+
+	/** The per-item answer forms, keyed by kind|date. A missing entry
+	 * means the item is untouched: its effective form is the default
+	 * (a one-off for a deviation; a rate change seeded from the
+	 * implied rate, the mortgage's rate type and a re-amortize, for a
+	 * suggestion). */
+	let classifyForms = $state<Record<string, ClassifyForm>>({});
+	let classifyingKey = $state<string | null>(null);
+	let classifyError = $state<string | null>(null);
+
+	function itemKey(it: PendingItem): string {
+		return it.kind + '|' + it.date;
+	}
+
+	function effectiveForm(it: PendingItem): ClassifyForm {
+		const saved = classifyForms[itemKey(it)];
+		if (saved !== undefined) return saved;
 		const m = selectedMortgage();
-		if (m === null || evBusy) return;
-		evBusy = true;
-		evError = null;
+		return {
+			classification: it.kind === 'suggestion' ? 'rate_change' : 'one_off',
+			annual_rate: it.impliedRate ?? '',
+			rate_type: m !== null && m.rate_type === 'variable' ? 'variable' : 'fixed',
+			action: 're_amortize'
+		};
+	}
+
+	function updateForm(it: PendingItem, patch: Partial<ClassifyForm>): void {
+		classifyForms[itemKey(it)] = { ...effectiveForm(it), ...patch };
+	}
+
+	/** The badge on an answered matching row. */
+	function classifyBadgeLabel(cls: string): string {
+		switch (cls) {
+			case 'one_off':
+				return $_('mortgage.classified_one_off');
+			case 'rate_change':
+				return $_('mortgage.classified_rate_change');
+			default:
+				return cls;
+		}
+	}
+
+	/** The label of one pending item's kind (a kind the backend might
+	 * add later falls back to the raw token). */
+	function classifyKindLabel(kind: string): string {
+		switch (kind) {
+			case 'extra':
+				return $_('mortgage.classify_kind_extra');
+			case 'short':
+				return $_('mortgage.classify_kind_short');
+			case 'suggestion':
+				return $_('mortgage.classify_kind_suggestion');
+			default:
+				return kind;
+		}
+	}
+
+	/** Record one answer (POST /classifications): swap the updated
+	 * row into the list, refetch the report — which stamps the
+	 * classification onto the item and so drops it out of the pending
+	 * list — and, for a rate change, the schedule too (the new event
+	 * re-amortizes it; the schedule refetch resets the what-if, as
+	 * every other rate-event change does). */
+	async function applyClassification(it: PendingItem): Promise<void> {
+		const m = selectedMortgage();
+		if (m === null || classifyingKey !== null) return;
+		const form = effectiveForm(it);
+		const body: PaymentClassificationRequest = {
+			date: it.date,
+			kind: it.kind,
+			classification: form.classification
+		};
+		if (form.classification === 'rate_change') {
+			body.annual_rate = form.annual_rate;
+			body.rate_type = form.rate_type;
+			body.action = form.action;
+		}
+		const key = itemKey(it);
+		classifyingKey = key;
+		classifyError = null;
 		try {
-			const next = [
-				...m.rate_events,
-				{
-					effective_date: s.effective_date,
-					annual_rate: s.implied_annual_rate,
-					rate_type: m.rate_type === 'variable' ? 'variable' : 'fixed',
-					action: 're_amortize'
-				}
-			];
-			next.sort((a, b) => a.effective_date.localeCompare(b.effective_date));
-			await applyRateEvents(m.id, next);
+			const updated = await classifyPayment(m.id, body);
+			mortgages = mortgages.map((x) => (x.id === updated.id ? updated : x));
+			if (form.classification === 'rate_change') await loadAmortization();
+			await loadMatching();
+			const rest = { ...classifyForms };
+			delete rest[key];
+			classifyForms = rest;
 		} catch (e) {
-			evError = envelopeMessage(e);
+			classifyError = envelopeMessage(e);
 		} finally {
-			evBusy = false;
+			classifyingKey = null;
 		}
 	}
 
@@ -1657,14 +1794,11 @@
 												{$_('mortgage.match_suggestion_observed')} {money(s.observed_payment, selectedCurrency)} · {s.observed_periods}
 												{$_('mortgage.match_suggestion_periods')}
 											</span>
-											<button
-												type="button"
-												class="ml-auto text-xs font-medium text-zinc-600 dark:text-zinc-400 underline decoration-zinc-300 underline-offset-2 hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
-												disabled={evBusy}
-												onclick={() => void applySuggestion(s)}
-											>
-												{evBusy ? $_('mortgage.match_suggestion_applying') : $_('mortgage.match_suggestion_apply')}
-											</button>
+											{#if s.classification !== null}
+												<span class="ml-auto rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+													{classifyBadgeLabel(s.classification)}
+												</span>
+											{/if}
 										</li>
 									{/each}
 								</ul>
@@ -1679,7 +1813,14 @@
 											{#each matching.extras as a, i (i)}
 												<li class="flex justify-between py-1.5 text-sm tabular-nums">
 													<span>{a.date}</span>
-													<span class="font-medium text-emerald-600 dark:text-emerald-400">+{money(a.amount, selectedCurrency)}</span>
+													<span class="flex items-center gap-2">
+														<span class="font-medium text-emerald-600 dark:text-emerald-400">+{money(a.amount, selectedCurrency)}</span>
+														{#if a.classification !== null}
+															<span class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+																{classifyBadgeLabel(a.classification)}
+															</span>
+														{/if}
+													</span>
 												</li>
 											{/each}
 										</ul>
@@ -1694,7 +1835,14 @@
 											{#each matching.shorts as a, i (i)}
 												<li class="flex justify-between py-1.5 text-sm tabular-nums">
 													<span>{a.date}</span>
-													<span class="font-medium text-red-600 dark:text-red-400">−{money(a.amount, selectedCurrency)}</span>
+													<span class="flex items-center gap-2">
+														<span class="font-medium text-red-600 dark:text-red-400">−{money(a.amount, selectedCurrency)}</span>
+														{#if a.classification !== null}
+															<span class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+																{classifyBadgeLabel(a.classification)}
+															</span>
+														{/if}
+													</span>
 												</li>
 											{/each}
 										</ul>
@@ -1909,5 +2057,121 @@
 				{/if}
 			{/if}
 		{/if}
+	{/if}
+
+	<!-- Round 32: the blocking classification modal — open exactly
+		 while the loaded report still has unanswered aberrant items.
+		 No close button, no Escape, no outside click: the page waits
+		 for the answers so the stored spec stays accurate. It closes
+		 by itself once the last item is classified. -->
+	{#if detailMortgage !== null && matching !== null && pendingItems.length > 0}
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-zinc-900/60 p-4">
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="classify-modal-title"
+				class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-lg"
+			>
+				<h2 id="classify-modal-title" class="text-base font-semibold">{$_('mortgage.classify_title')}</h2>
+				<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">{$_('mortgage.classify_intro')}</p>
+				{#each pendingItems as it (itemKey(it))}
+					{@const form = effectiveForm(it)}
+					<div class="mt-4 rounded-md border border-zinc-200 dark:border-zinc-800 p-3">
+						<div class="flex flex-wrap items-center gap-2 text-sm">
+							<span class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+								{classifyKindLabel(it.kind)}
+							</span>
+							<span class="font-medium tabular-nums">{it.date}</span>
+							{#if it.amount !== null}
+								<span class="ml-auto font-semibold tabular-nums {it.kind === 'extra' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}">
+									{it.kind === 'extra' ? '+' : '−'}{money(it.amount, selectedCurrency)}
+								</span>
+							{:else}
+								<span class="ml-auto font-medium tabular-nums">
+									{it.impliedRate}{$_('mortgage.percent')}
+									<span class="ml-2 text-xs font-normal text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.match_suggestion_observed')} {money(it.observed, selectedCurrency)} · {it.periods}
+										{$_('mortgage.match_suggestion_periods')}
+									</span>
+								</span>
+							{/if}
+						</div>
+						<div class="mt-3 space-y-2">
+							<label class="flex items-center gap-2 text-sm">
+								<input
+									type="radio"
+									name={itemKey(it) + '-classification'}
+									value="one_off"
+									checked={form.classification === 'one_off'}
+									onchange={() => updateForm(it, { classification: 'one_off' })}
+								/>
+								{$_('mortgage.classify_one_off')}
+							</label>
+							{#if form.classification === 'one_off'}
+								<p class="pl-6 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.classify_one_off_hint')}</p>
+							{/if}
+							<label class="flex items-center gap-2 text-sm">
+								<input
+									type="radio"
+									name={itemKey(it) + '-classification'}
+									value="rate_change"
+									checked={form.classification === 'rate_change'}
+									onchange={() => updateForm(it, { classification: 'rate_change' })}
+								/>
+								{$_('mortgage.classify_rate_change')}
+							</label>
+							{#if form.classification === 'rate_change'}
+								<p class="pl-6 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.classify_rate_hint')}</p>
+								<div class="grid grid-cols-1 gap-2 pl-6 sm:grid-cols-3">
+									<label class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.classify_rate_label')}
+										<input
+											type="text"
+											inputmode="decimal"
+											class="mt-1 w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm text-zinc-900 dark:text-zinc-100"
+											value={form.annual_rate}
+											oninput={(e) => updateForm(it, { annual_rate: e.currentTarget.value })}
+										/>
+									</label>
+									<label class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.classify_rate_type')}
+										<select
+											class="mt-1 w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm text-zinc-900 dark:text-zinc-100"
+											value={form.rate_type}
+											onchange={(e) => updateForm(it, { rate_type: e.currentTarget.value === 'variable' ? 'variable' : 'fixed' })}
+										>
+											<option value="fixed">{$_('mortgage.classify_rate_type_fixed')}</option>
+											<option value="variable">{$_('mortgage.classify_rate_type_variable')}</option>
+										</select>
+									</label>
+									<label class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.classify_action')}
+										<select
+											class="mt-1 w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm text-zinc-900 dark:text-zinc-100"
+											value={form.action}
+											onchange={(e) => updateForm(it, { action: e.currentTarget.value === 'keep_payment' ? 'keep_payment' : 're_amortize' })}
+										>
+											<option value="re_amortize">{$_('mortgage.classify_action_re_amortize')}</option>
+											<option value="keep_payment">{$_('mortgage.classify_action_keep_payment')}</option>
+										</select>
+									</label>
+								</div>
+							{/if}
+						</div>
+						<button
+							type="button"
+							class="mt-3 rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-50"
+							disabled={classifyingKey !== null}
+							onclick={() => void applyClassification(it)}
+						>
+							{classifyingKey === itemKey(it) ? $_('mortgage.classify_applying') : $_('mortgage.classify_apply')}
+						</button>
+					</div>
+				{/each}
+				{#if classifyError !== null}
+					<p class="mt-3 text-sm text-red-600 dark:text-red-400">{classifyError}</p>
+				{/if}
+			</div>
+		</div>
 	{/if}
 </section>

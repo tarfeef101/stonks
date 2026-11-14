@@ -490,8 +490,8 @@ func TestMortgageWhatIfRenewal(t *testing.T) {
 	if res2.MonthsSaved != 0 || res2.PayoffDate != refPayoffDate || res2.Schedule.PayoffIndex != refPayoffIndex {
 		t.Errorf("payoff = %q/%d, months_saved = %d, want unchanged %q/%d and 0", res2.PayoffDate, res2.Schedule.PayoffIndex, res2.MonthsSaved, refPayoffDate, refPayoffIndex)
 	}
-	if res2.InterestSaved != "-59219.99" {
-		t.Errorf("interest_saved = %q, want \"-59219.99\" (a rate increase costs interest)", res2.InterestSaved)
+	if res2.InterestSaved != "-59046.33" {
+		t.Errorf("interest_saved = %q, want \"-59046.33\" (a rate increase costs interest)", res2.InterestSaved)
 	}
 	if res2.Schedule.NextRenewal != "2036-01-15" {
 		t.Errorf("schedule.next_renewal = %q, want \"2036-01-15\"", res2.Schedule.NextRenewal)

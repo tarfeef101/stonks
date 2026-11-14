@@ -115,6 +115,9 @@ export interface WhatIfResult {
 export interface MatchingAmount {
 	date: string;
 	amount: string;
+	/** Round 32: the user's manual classification ("one_off" |
+	 * "rate_change"), null until the aberrant payment is answered. */
+	classification: string | null;
 }
 
 /** A rate-change candidate derived from a sustained deviation run
@@ -125,6 +128,9 @@ export interface MatchingSuggestion {
 	implied_annual_rate: string;
 	observed_payment: string;
 	observed_periods: number;
+	/** Round 32: the user's manual classification ("one_off" |
+	 * "rate_change"), null until the suggestion is answered. */
+	classification: string | null;
 }
 
 /** One row of the matching period table (round 25): one plan date
@@ -171,6 +177,12 @@ export function createMortgage(body: MortgageCreate): Promise<Mortgage> {
 	return api<Mortgage>('/v1/mortgages', { method: 'POST', body });
 }
 
+/** One mortgage's detail (7.1 endpoint): the same row shape as the
+ * list, served single. */
+export function getMortgage(id: string): Promise<Mortgage> {
+	return api<Mortgage>(`/v1/mortgages/${id}`);
+}
+
 /** The patch body (round 23): every field optional; absent = untouched,
  * present = full replacement. A non-null rate_events replaces the WHOLE
  * array ([] clears it); at least one field is required. */
@@ -207,4 +219,30 @@ export function whatIfMortgageAmortization(id: string, body: WhatIfRequest): Pro
  * (round 25 endpoint; read-only). */
 export function getMortgageMatching(id: string): Promise<MatchingReport> {
 	return api<MatchingReport>(`/v1/mortgages/${id}/matching`);
+}
+
+/** The manual-classification body (round 32): which aberrant item
+ * (identified by kind + date) and how it is classified. The three rate
+ * fields are required only for a rate_change; a one_off and a rejected
+ * ignore them. */
+export interface PaymentClassificationRequest {
+	date: string;
+	kind: 'extra' | 'short' | 'suggestion';
+	classification: 'one_off' | 'rate_change' | 'rejected';
+	/** Positive canonical rate, required for a rate_change. */
+	annual_rate?: string;
+	/** Required for a rate_change. */
+	rate_type?: 'fixed' | 'variable';
+	/** Required for a rate_change. */
+	action?: 're_amortize' | 'keep_payment';
+}
+
+/** Manually classify one aberrant payment the matching report flags
+ * (round 32 endpoint). Returns the updated mortgage (200, the PATCH
+ * convention) so the new rate events are picked up in place. */
+export function classifyPayment(
+	id: string,
+	body: PaymentClassificationRequest,
+): Promise<Mortgage> {
+	return api<Mortgage>(`/v1/mortgages/${id}/classifications`, { method: 'POST', body });
 }
