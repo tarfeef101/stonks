@@ -13,7 +13,6 @@ package categorize
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -260,12 +259,10 @@ func (r *Runner) notifyReviewNeeded(ctx context.Context, jobID, userID string, c
 	if r.Nots == nil {
 		return
 	}
-	body := fmt.Sprintf("%d transactions need review", count)
-	// encoding/json sorts map keys, so the ref is always
-	// {"count":N,"job_id":"..."}.
-	ref, _ := json.Marshal(map[string]any{"count": count, "job_id": jobID})
+	body := ReviewNotificationTitle(count)
+	ref := ReviewNotificationRef(count, jobID)
 	n, err := r.Nots.Create(ctx, userID, repo.NotificationIn{
-		Kind:  "review",
+		Kind:  KindReview,
 		Title: body,
 		Body:  body,
 		Ref:   ref,

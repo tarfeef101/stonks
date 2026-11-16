@@ -63,12 +63,25 @@
 				refreshUnread();
 			}
 		}, 60_000);
-		return () => clearInterval(t);
+		// Round 33: in-place actions on the notifications page fire
+		// this, so the badge tracks them without waiting for the poll.
+		const onUnreadChanged = (): void => {
+			if ($user?.profile.sub) {
+				refreshUnread();
+			}
+		};
+		window.addEventListener('ftrk:unread-changed', onUnreadChanged);
+		return () => {
+			clearInterval(t);
+			window.removeEventListener('ftrk:unread-changed', onUnreadChanged);
+		};
 	});
 </script>
 
-<div class="flex min-h-screen flex-col bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100">
-	<header class="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+<div
+	class="flex min-h-screen flex-col bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100"
+>
+	<header class="border-b border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
 		<!-- flex-wrap: 9 nav items + title + UserChip cannot share one
 		     line at ~375 px, so the header row and the nav wrap. -->
 		<div
@@ -85,7 +98,7 @@
 					{#each navItems as item (item.href)}
 						<a
 							href={resolve(item.href)}
-							class="inline-flex items-center gap-1 text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+							class="inline-flex items-center gap-1 text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
 						>
 							{$_(item.key)}
 							{#if item.href === '/notifications' && unread > 0}

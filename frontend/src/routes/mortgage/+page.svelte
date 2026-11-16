@@ -103,7 +103,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 	import { _ } from 'svelte-i18n';
 	import { login, user } from '#lib/auth/client';
@@ -150,9 +150,22 @@
 	let listError = $state<string | null>(null);
 	let listLoaded = $state(false);
 
-	onMount(() => {
-		// Like the root page's account picker: a signed-out load simply
-		// 401s and the page stays on the sign-in prompt.
+	// Initial load is reactive on the identity, not onMount (round 33).
+	// The layout's fire-and-forget initSession() may still be in flight
+	// when onMount runs; a fetch issued before the access token exists
+	// 401s, and loadMortgages is one-shot — nothing refetches once $user
+	// arrives, so a signed-in ?m= deep link rendered "No mortgage on file
+	// yet." with a spurious "Session expired" dialog. Keyed on the sub
+	// claim with a last-seen guard, same as the notifications page:
+	// oidc-client-ts re-emits $user on every silent token renewal (same
+	// sub). A signed-out load simply 401s and the page stays on the
+	// sign-in prompt.
+	let lastSub: string | null = null;
+	$effect(() => {
+		const sub = $user?.profile.sub ?? null;
+		if (sub === lastSub) return;
+		lastSub = sub;
+		if (!sub) return;
 		listAccounts()
 			.then((a) => {
 				mortgageAccounts = a.filter((x) => x.type === 'mortgage');
@@ -164,13 +177,19 @@
 	});
 
 	/** The mortgage list; the first row is auto-selected when nothing
-	 * is selected yet. */
+	 * is selected yet (round 33: the URL's `?m=` parameter wins over
+	 * the first row when it names a known mortgage). */
 	function loadMortgages(): void {
 		listMortgages()
 			.then((m) => {
 				mortgages = m;
 				listError = null;
-				if (selectedId === '' && m.length > 0) selectedId = m[0].id;
+				const param = page.url.searchParams.get('m');
+				if (selectedId === '' && param !== null && m.some((x) => x.id === param)) {
+					selectedId = param;
+				} else if (selectedId === '' && m.length > 0) {
+					selectedId = m[0].id;
+				}
 				listLoaded = true;
 			})
 			.catch((e) => {
@@ -233,6 +252,24 @@
 		}
 		void loadAmortization();
 		void loadMatching();
+	});
+
+	// Round 33: the URL's `?m=` parameter names the selected mortgage
+	// (the notifications' "go to mortgage" deep link lands here with it).
+	// loadMortgages picks it up on the initial load; the write effect
+	// below keeps the URL in step with the selector afterwards. There is
+	// deliberately no read-back effect: right after a selector click the
+	// param still names the previous mortgage, and a read effect would
+	// fire in the same flush and silently revert the click. (Back/forward
+	// needs none either — the write uses replaceState, so the app never
+	// pushes ?m= history entries of its own.)
+
+	$effect(() => {
+		const id = selectedId;
+		const param = page.url.searchParams.get('m');
+		if (id !== '' && param !== id) {
+			void goto(resolve(`/mortgage?m=${encodeURIComponent(id)}`), { replaceState: true });
+		}
 	});
 
 	// --- What-if state ----------------------------------------------------
@@ -987,8 +1024,12 @@
 
 		{#if mortgages.length === 0}
 			<!-- No mortgage on file: the 9-field create form. -->
-			<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-				<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.add_title')}</p>
+			<div
+				class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+			>
+				<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+					{$_('mortgage.add_title')}
+				</p>
 				<p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">{$_('mortgage.add_note')}</p>
 				<form
 					class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2"
@@ -1001,7 +1042,7 @@
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('mortgage.form_account')}</span>
 							<select
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								bind:value={form.account_id}
 							>
 								<option value="" disabled>{$_('mortgage.form_account_placeholder')}</option>
@@ -1010,7 +1051,10 @@
 								{/each}
 							</select>
 						</label>
-						<a class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400 underline" href={resolve('/settings#accounts')}>
+						<a
+							class="mt-1 block text-xs text-zinc-500 underline dark:text-zinc-400"
+							href={resolve('/settings#accounts')}
+						>
 							{$_('common.manage_accounts')}
 						</a>
 					</div>
@@ -1018,7 +1062,7 @@
 						<span class="mb-1 block font-medium">{$_('mortgage.form_start')}</span>
 						<input
 							type="date"
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							bind:value={form.start_date}
 						/>
 					</label>
@@ -1027,7 +1071,7 @@
 						<input
 							type="text"
 							inputmode="decimal"
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							placeholder={$_('mortgage.form_principal_placeholder')}
 							bind:value={form.principal}
 						/>
@@ -1037,7 +1081,7 @@
 						<input
 							type="text"
 							inputmode="decimal"
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							placeholder={$_('mortgage.form_rate_placeholder')}
 							bind:value={form.annual_rate}
 						/>
@@ -1047,7 +1091,7 @@
 						<input
 							type="number"
 							min={1}
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							placeholder={$_('mortgage.form_years_placeholder')}
 							bind:value={form.amortization_years}
 						/>
@@ -1059,7 +1103,7 @@
 							min={0}
 							max={40}
 							step={1}
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							placeholder={$_('mortgage.form_term_placeholder')}
 							bind:value={form.term_years}
 						/>
@@ -1067,7 +1111,7 @@
 					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('mortgage.form_rate_type')}</span>
 						<select
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							bind:value={form.rate_type}
 						>
 							<option value="fixed">{$_('mortgage.rate_fixed')}</option>
@@ -1077,7 +1121,7 @@
 					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('mortgage.form_payment_freq')}</span>
 						<select
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							bind:value={form.payment_frequency}
 						>
 							<option value="monthly">{$_('mortgage.freq_monthly')}</option>
@@ -1090,14 +1134,14 @@
 						<input
 							type="text"
 							inputmode="decimal"
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							bind:value={form.extra_payment_amount}
 						/>
 					</label>
 					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('mortgage.form_extra_freq')}</span>
 						<select
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							bind:value={form.extra_payment_frequency}
 						>
 							<option value="monthly">{$_('mortgage.freq_monthly')}</option>
@@ -1108,7 +1152,7 @@
 					<label class="block text-sm">
 						<span class="mb-1 block font-medium">{$_('mortgage.form_extra_type')}</span>
 						<select
-							class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+							class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 							bind:value={form.extra_prepayment_type}
 						>
 							<option value="term">{$_('mortgage.type_term')}</option>
@@ -1118,7 +1162,7 @@
 					<div class="sm:col-span-2">
 						<button
 							type="submit"
-							class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+							class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900 disabled:text-zinc-300 disabled:no-underline dark:text-zinc-400 dark:hover:text-zinc-100 dark:disabled:text-zinc-600"
 							disabled={creating}
 						>
 							{creating ? $_('mortgage.creating') : $_('mortgage.submit')}
@@ -1133,8 +1177,12 @@
 			</div>
 		{:else}
 			<!-- The mortgage list: compact selectable rows. -->
-			<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-				<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.list_title')}</p>
+			<div
+				class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+			>
+				<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+					{$_('mortgage.list_title')}
+				</p>
 				<ul class="mt-3 space-y-1">
 					{#each mortgages as m (m.id)}
 						<li>
@@ -1148,10 +1196,11 @@
 								}}
 							>
 								<span class="block text-sm font-medium">
-								{money(m.principal, accountCurrency(m.account_id))}
-							</span>
+									{money(m.principal, accountCurrency(m.account_id))}
+								</span>
 								<span class="block text-xs text-zinc-600 dark:text-zinc-400">
-									{m.annual_rate}{$_('mortgage.percent')} {rateTypeLabel(m.rate_type)} / {m.start_date}
+									{m.annual_rate}{$_('mortgage.percent')}
+									{rateTypeLabel(m.rate_type)} / {m.start_date}
 								</span>
 							</button>
 						</li>
@@ -1163,7 +1212,9 @@
 			{#if amortizing}
 				<p class="text-sm text-zinc-600 dark:text-zinc-400">{$_('mortgage.loading')}</p>
 			{:else if amortError}
-				<p class="text-sm text-red-600 dark:text-red-400">{$_('mortgage.error_label')}: {amortError}</p>
+				<p class="text-sm text-red-600 dark:text-red-400">
+					{$_('mortgage.error_label')}: {amortError}
+				</p>
 			{:else if amortization}
 				<!-- KPI line: amounts localised to the account currency. A fifth
 					 "next renewal" card when the spec has a term. -->
@@ -1172,35 +1223,43 @@
 						? 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5'
 						: 'grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4'}
 				>
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
 							{$_('mortgage.label_base_payment')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
 							{money(amortization.base_payment, selectedCurrency)}
 						</p>
 					</div>
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
 							{$_('mortgage.label_payoff_date')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
 							{amortization.payoff_date}
 						</p>
 					</div>
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
 						<!-- A COUNT, not an amount: the number of payments to
 							 payoff (25 y semi-monthly = 600) — no currency
 							 symbol applies to it. -->
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
 							{$_('mortgage.label_payment_count')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
 							{amortization.payoff_index}
 						</p>
 					</div>
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
 							{$_('mortgage.label_total_interest')}
 						</p>
 						<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
@@ -1208,8 +1267,10 @@
 						</p>
 					</div>
 					{#if amortization.next_renewal !== undefined}
-						<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-							<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+						<div
+							class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+						>
+							<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
 								{$_('mortgage.label_next_renewal')}
 							</p>
 							<p class="mt-1 text-2xl font-semibold text-zinc-900 dark:text-zinc-100">
@@ -1220,8 +1281,12 @@
 				</div>
 
 				<!-- Balance vs equity over the schedule (svg-polyline idiom). -->
-				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.chart_title')}</p>
+				<div
+					class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+				>
+					<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+						{$_('mortgage.chart_title')}
+					</p>
 					{#if chart}
 						<svg
 							bind:this={chartSvg}
@@ -1248,8 +1313,7 @@
 									text-anchor="end"
 									font-size="12"
 									fill="currentColor"
-									class="text-zinc-500 dark:text-zinc-400"
-								>{yt.label}</text
+									class="text-zinc-500 dark:text-zinc-400">{yt.label}</text
 								>
 							{/each}
 							<!-- Static "today" date label below the
@@ -1273,8 +1337,7 @@
 								font-size="12"
 								font-weight="600"
 								fill="currentColor"
-								class="text-amber-600 dark:text-amber-400"
-							>{chart.today.label}</text
+								class="text-amber-600 dark:text-amber-400">{chart.today.label}</text
 							>
 							{#each chart.xTicks as xt (xt.label + xt.x)}
 								<line
@@ -1292,8 +1355,7 @@
 									text-anchor="middle"
 									font-size="12"
 									fill="currentColor"
-									class="text-zinc-500 dark:text-zinc-400"
-								>{xt.label}</text
+									class="text-zinc-500 dark:text-zinc-400">{xt.label}</text
 								>
 							{/each}
 							<line
@@ -1420,8 +1482,7 @@
 								font-size="12"
 								font-weight="600"
 								fill="currentColor"
-								class="text-zinc-700 dark:text-zinc-200"
-							>{chart.today.balNow.lbl}</text
+								class="text-zinc-700 dark:text-zinc-200">{chart.today.balNow.lbl}</text
 							>
 							<rect
 								x={chart.today.eqNow.rx}
@@ -1438,8 +1499,7 @@
 								font-size="12"
 								font-weight="600"
 								fill="currentColor"
-								class="text-zinc-700 dark:text-zinc-200"
-							>{chart.today.eqNow.lbl}</text
+								class="text-zinc-700 dark:text-zinc-200">{chart.today.eqNow.lbl}</text
 							>
 							<!-- Hover crosshair: dotted guides from the two
 							 points (on each line at the cursor's x) to
@@ -1516,8 +1576,7 @@
 									font-size="12"
 									font-weight="600"
 									fill="currentColor"
-									class="text-zinc-700 dark:text-zinc-200"
-								>{balLbl}</text
+									class="text-zinc-700 dark:text-zinc-200">{balLbl}</text
 								>
 								<rect
 									x={PLOT.x0 - 8 - eqW}
@@ -1534,8 +1593,7 @@
 									font-size="12"
 									font-weight="600"
 									fill="currentColor"
-									class="text-zinc-700 dark:text-zinc-200"
-								>{eqLbl}</text
+									class="text-zinc-700 dark:text-zinc-200">{eqLbl}</text
 								>
 								<rect
 									x={dateLx - 40}
@@ -1552,8 +1610,7 @@
 									font-size="12"
 									font-weight="600"
 									fill="currentColor"
-									class="text-zinc-700 dark:text-zinc-200"
-								>{hp.date}</text
+									class="text-zinc-700 dark:text-zinc-200">{hp.date}</text
 								>
 							{/if}
 						</svg>
@@ -1583,12 +1640,18 @@
 				</div>
 
 				<!-- Yearly-collapsed schedule table. -->
-				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.table_title')}</p>
+				<div
+					class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+				>
+					<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+						{$_('mortgage.table_title')}
+					</p>
 					<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.table_hint')}</p>
 					<table class="mt-3 w-full text-sm tabular-nums">
 						<thead>
-							<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
+							<tr
+								class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase dark:border-zinc-800 dark:text-zinc-400"
+							>
 								<th class="py-1.5 pr-3 font-medium">{$_('mortgage.col_year')}</th>
 								<th class="py-1.5 pr-3 text-right font-medium">
 									{$_('mortgage.col_payment')}
@@ -1617,14 +1680,18 @@
 										</button>
 									</td>
 									<td class="py-1.5 pr-3 text-right"></td>
-									<td class="py-1.5 pr-3 text-right">{moneyNum(row.interest / 100, selectedCurrency)}</td>
-									<td class="py-1.5 pr-3 text-right">{moneyNum(row.principal / 100, selectedCurrency)}</td>
+									<td class="py-1.5 pr-3 text-right"
+										>{moneyNum(row.interest / 100, selectedCurrency)}</td
+									>
+									<td class="py-1.5 pr-3 text-right"
+										>{moneyNum(row.principal / 100, selectedCurrency)}</td
+									>
 									<td class="py-1.5 pr-3 text-right"></td>
 									<td class="py-1.5 text-right">{money(row.endBalance, selectedCurrency)}</td>
 								</tr>
 								{#if expandedYears.has(row.year)}
 									{#each row.months as p (p.date)}
-										<tr class="bg-zinc-50 dark:bg-zinc-950 text-xs">
+										<tr class="bg-zinc-50 text-xs dark:bg-zinc-950">
 											<td class="py-1 pr-3 pl-5 text-zinc-600 dark:text-zinc-400">{p.date}</td>
 											<td class="py-1 pr-3 text-right">{money(p.payment, selectedCurrency)}</td>
 											<td class="py-1 pr-3 text-right">{money(p.interest, selectedCurrency)}</td>
@@ -1641,17 +1708,27 @@
 
 				<!-- Rate changes: stored events, edited as a full array. -->
 				{#if detailMortgage}
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.events_title')}</p>
-						<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.events_hint')}</p>
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+							{$_('mortgage.events_title')}
+						</p>
+						<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+							{$_('mortgage.events_hint')}
+						</p>
 						{#if detailMortgage.rate_events.length === 0}
-							<p class="mt-3 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.events_empty')}</p>
+							<p class="mt-3 text-sm text-zinc-500 dark:text-zinc-400">
+								{$_('mortgage.events_empty')}
+							</p>
 						{:else}
 							<ul class="mt-3 divide-y divide-zinc-100 dark:divide-zinc-800">
 								{#each detailMortgage.rate_events as ev, i (ev.effective_date)}
 									<li class="flex flex-wrap items-center gap-3 py-2 text-sm">
 										<span class="w-24 font-medium">{ev.effective_date}</span>
-										<span>{ev.annual_rate}{$_('mortgage.percent')} {rateTypeLabel(ev.rate_type)}</span>
+										<span
+											>{ev.annual_rate}{$_('mortgage.percent')} {rateTypeLabel(ev.rate_type)}</span
+										>
 										<span class="text-zinc-500 dark:text-zinc-400">
 											{ev.action === 're_amortize'
 												? $_('mortgage.event_action_re_amortize')
@@ -1659,7 +1736,7 @@
 										</span>
 										<button
 											type="button"
-											class="ml-auto text-xs font-medium text-zinc-600 dark:text-zinc-400 underline decoration-zinc-300 underline-offset-2 hover:text-red-600 dark:hover:text-red-400 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+											class="ml-auto text-xs font-medium text-zinc-600 underline decoration-zinc-300 underline-offset-2 hover:text-red-600 disabled:text-zinc-300 disabled:no-underline dark:text-zinc-400 dark:hover:text-red-400 dark:disabled:text-zinc-600"
 											disabled={evBusy}
 											onclick={() => removeRateEvent(i)}
 										>
@@ -1680,7 +1757,7 @@
 								<span class="mb-1 block font-medium">{$_('mortgage.event_date')}</span>
 								<input
 									type="date"
-									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 									bind:value={evDate}
 								/>
 							</label>
@@ -1689,7 +1766,7 @@
 								<input
 									type="text"
 									inputmode="decimal"
-									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 									placeholder={$_('mortgage.form_rate_placeholder')}
 									bind:value={evRate}
 								/>
@@ -1697,7 +1774,7 @@
 							<label class="block text-sm">
 								<span class="mb-1 block font-medium">{$_('mortgage.event_rate_type')}</span>
 								<select
-									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 									bind:value={evRateType}
 								>
 									<option value="fixed">{$_('mortgage.rate_fixed')}</option>
@@ -1707,7 +1784,7 @@
 							<label class="block text-sm">
 								<span class="mb-1 block font-medium">{$_('mortgage.event_action')}</span>
 								<select
-									class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 									bind:value={evAction}
 								>
 									<option value="re_amortize">{$_('mortgage.event_action_re_amortize')}</option>
@@ -1717,7 +1794,7 @@
 							<div class="flex items-end">
 								<button
 									type="submit"
-									class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+									class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900 disabled:text-zinc-300 disabled:no-underline dark:text-zinc-400 dark:hover:text-zinc-100 dark:disabled:text-zinc-600"
 									disabled={evBusy || evDate === ''}
 								>
 									{evBusy ? $_('mortgage.event_adding') : $_('mortgage.event_add')}
@@ -1736,8 +1813,12 @@
 				 replayed against the stored schedule (round 25,
 				 read-only). -->
 				{#if detailMortgage}
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_title')}</p>
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+							{$_('mortgage.match_title')}
+						</p>
 						<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_hint')}</p>
 						{#if matchingLoading}
 							<p class="mt-3 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.loading')}</p>
@@ -1748,40 +1829,66 @@
 						{:else if matching !== null}
 							<dl class="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
 								<div>
-									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_matched')}</dt>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.match_matched')}
+									</dt>
 									<dd class="mt-0.5 font-medium tabular-nums">{matching.periods_matched}</dd>
 								</div>
 								<div>
-									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_missing')}</dt>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.match_missing')}
+									</dt>
 									<dd class="mt-0.5 font-medium tabular-nums">{matching.periods_missing}</dd>
 								</div>
 								<div>
-									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_last')}</dt>
-									<dd class="mt-0.5 font-medium tabular-nums">{matching.last_matched_date ?? '—'}</dd>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.match_last')}
+									</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">
+										{matching.last_matched_date ?? '—'}
+									</dd>
 								</div>
 								<div>
-									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.label_payoff_date')}</dt>
-									<dd class="mt-0.5 font-medium tabular-nums">{matching.actual_payoff_date ?? '—'}</dd>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.label_payoff_date')}
+									</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">
+										{matching.actual_payoff_date ?? '—'}
+									</dd>
 								</div>
 								<div>
-									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_actual_balance')}</dt>
-									<dd class="mt-0.5 font-medium tabular-nums">{money(matching.actual_balance, selectedCurrency)}</dd>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.match_actual_balance')}
+									</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">
+										{money(matching.actual_balance, selectedCurrency)}
+									</dd>
 								</div>
 								<div>
-									<dt class="text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_planned_balance')}</dt>
-									<dd class="mt-0.5 font-medium tabular-nums">{money(matching.planned_balance, selectedCurrency)}</dd>
+									<dt class="text-xs text-zinc-500 dark:text-zinc-400">
+										{$_('mortgage.match_planned_balance')}
+									</dt>
+									<dd class="mt-0.5 font-medium tabular-nums">
+										{money(matching.planned_balance, selectedCurrency)}
+									</dd>
 								</div>
 							</dl>
 							{#if matching.flags.length > 0}
 								<ul class="mt-3 space-y-1">
 									{#each matching.flags as f (f)}
-										<li class="text-sm text-amber-600 dark:text-amber-400">{matchingFlagLabel(f)}</li>
+										<li class="text-sm text-amber-600 dark:text-amber-400">
+											{matchingFlagLabel(f)}
+										</li>
 									{/each}
 								</ul>
 							{/if}
-							<p class="mt-4 text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_suggestions')}</p>
+							<p class="mt-4 text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+								{$_('mortgage.match_suggestions')}
+							</p>
 							{#if matching.suggestions.length === 0}
-								<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_suggestions_empty')}</p>
+								<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+									{$_('mortgage.match_suggestions_empty')}
+								</p>
 							{:else}
 								<ul class="mt-1 divide-y divide-zinc-100 dark:divide-zinc-800">
 									{#each matching.suggestions as s (s.effective_date + s.implied_annual_rate)}
@@ -1790,12 +1897,15 @@
 											<span class="font-semibold tabular-nums">
 												{s.implied_annual_rate}{$_('mortgage.percent')}
 											</span>
-											<span class="text-zinc-500 dark:text-zinc-400 tabular-nums">
-												{$_('mortgage.match_suggestion_observed')} {money(s.observed_payment, selectedCurrency)} · {s.observed_periods}
+											<span class="text-zinc-500 tabular-nums dark:text-zinc-400">
+												{$_('mortgage.match_suggestion_observed')}
+												{money(s.observed_payment, selectedCurrency)} · {s.observed_periods}
 												{$_('mortgage.match_suggestion_periods')}
 											</span>
 											{#if s.classification !== null}
-												<span class="ml-auto rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+												<span
+													class="ml-auto rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+												>
 													{classifyBadgeLabel(s.classification)}
 												</span>
 											{/if}
@@ -1805,18 +1915,26 @@
 							{/if}
 							<div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
 								<div>
-									<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_extras')}</p>
+									<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+										{$_('mortgage.match_extras')}
+									</p>
 									{#if matching.extras.length === 0}
-										<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_none')}</p>
+										<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+											{$_('mortgage.match_none')}
+										</p>
 									{:else}
 										<ul class="mt-1 divide-y divide-zinc-100 dark:divide-zinc-800">
 											{#each matching.extras as a, i (i)}
 												<li class="flex justify-between py-1.5 text-sm tabular-nums">
 													<span>{a.date}</span>
 													<span class="flex items-center gap-2">
-														<span class="font-medium text-emerald-600 dark:text-emerald-400">+{money(a.amount, selectedCurrency)}</span>
+														<span class="font-medium text-emerald-600 dark:text-emerald-400"
+															>+{money(a.amount, selectedCurrency)}</span
+														>
 														{#if a.classification !== null}
-															<span class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+															<span
+																class="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+															>
 																{classifyBadgeLabel(a.classification)}
 															</span>
 														{/if}
@@ -1827,18 +1945,26 @@
 									{/if}
 								</div>
 								<div>
-									<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.match_shorts')}</p>
+									<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+										{$_('mortgage.match_shorts')}
+									</p>
 									{#if matching.shorts.length === 0}
-										<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">{$_('mortgage.match_none')}</p>
+										<p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+											{$_('mortgage.match_none')}
+										</p>
 									{:else}
 										<ul class="mt-1 divide-y divide-zinc-100 dark:divide-zinc-800">
 											{#each matching.shorts as a, i (i)}
 												<li class="flex justify-between py-1.5 text-sm tabular-nums">
 													<span>{a.date}</span>
 													<span class="flex items-center gap-2">
-														<span class="font-medium text-red-600 dark:text-red-400">−{money(a.amount, selectedCurrency)}</span>
+														<span class="font-medium text-red-600 dark:text-red-400"
+															>−{money(a.amount, selectedCurrency)}</span
+														>
 														{#if a.classification !== null}
-															<span class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+															<span
+																class="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+															>
 																{classifyBadgeLabel(a.classification)}
 															</span>
 														{/if}
@@ -1852,24 +1978,38 @@
 							{#if matching.periods.length > 0}
 								<table class="mt-4 w-full text-sm tabular-nums">
 									<thead>
-										<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
+										<tr
+											class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase dark:border-zinc-800 dark:text-zinc-400"
+										>
 											<th class="py-1.5 pr-3 font-medium">{$_('mortgage.match_col_date')}</th>
-											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.col_payment')}</th>
+											<th class="py-1.5 pr-3 text-right font-medium"
+												>{$_('mortgage.col_payment')}</th
+											>
 											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.col_extra')}</th>
-											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.match_col_short')}</th>
-											<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.col_balance')}</th>
-											<th class="py-1.5 text-right font-medium">{$_('mortgage.match_col_planned_balance')}</th>
+											<th class="py-1.5 pr-3 text-right font-medium"
+												>{$_('mortgage.match_col_short')}</th
+											>
+											<th class="py-1.5 pr-3 text-right font-medium"
+												>{$_('mortgage.col_balance')}</th
+											>
+											<th class="py-1.5 text-right font-medium"
+												>{$_('mortgage.match_col_planned_balance')}</th
+											>
 										</tr>
 									</thead>
 									<tbody>
 										{#each matching.periods as p (p.date)}
 											<tr class="border-b border-zinc-100 dark:border-zinc-800">
 												<td class="py-1.5 pr-3">{p.date}</td>
-												<td class="py-1.5 pr-3 text-right">{money(p.payment, selectedCurrency) || '—'}</td>
+												<td class="py-1.5 pr-3 text-right"
+													>{money(p.payment, selectedCurrency) || '—'}</td
+												>
 												<td class="py-1.5 pr-3 text-right">{money(p.extra, selectedCurrency)}</td>
 												<td class="py-1.5 pr-3 text-right">{money(p.short, selectedCurrency)}</td>
 												<td class="py-1.5 pr-3 text-right">{money(p.balance, selectedCurrency)}</td>
-												<td class="py-1.5 text-right">{money(p.planned_balance, selectedCurrency)}</td>
+												<td class="py-1.5 text-right"
+													>{money(p.planned_balance, selectedCurrency)}</td
+												>
 											</tr>
 										{/each}
 									</tbody>
@@ -1880,8 +2020,12 @@
 				{/if}
 
 				<!-- What-if panel: sliders over the stored spec. -->
-				<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-					<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">{$_('mortgage.whatif_title')}</p>
+				<div
+					class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+				>
+					<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
+						{$_('mortgage.whatif_title')}
+					</p>
 					<div class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">
@@ -1912,7 +2056,7 @@
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('mortgage.whatif_freq')}</span>
 							<select
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								bind:value={wiFreq}
 							>
 								<option value="monthly">{$_('mortgage.freq_monthly')}</option>
@@ -1937,14 +2081,14 @@
 							<span class="mb-1 block font-medium">{$_('mortgage.whatif_date')}</span>
 							<input
 								type="date"
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								bind:value={wiDate}
 							/>
 						</label>
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('mortgage.whatif_pay_freq')}</span>
 							<select
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								bind:value={wiPayFreq}
 							>
 								<option value="monthly">{$_('mortgage.freq_monthly')}</option>
@@ -1956,7 +2100,7 @@
 							<span class="mb-1 block font-medium">{$_('mortgage.whatif_renewal_date')}</span>
 							<input
 								type="date"
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								bind:value={wiRenewDate}
 							/>
 						</label>
@@ -1965,7 +2109,7 @@
 							<input
 								type="text"
 								inputmode="decimal"
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								placeholder={$_('mortgage.form_rate_placeholder')}
 								bind:value={wiRenewRate}
 							/>
@@ -1973,7 +2117,7 @@
 						<label class="block text-sm">
 							<span class="mb-1 block font-medium">{$_('mortgage.whatif_renewal_type')}</span>
 							<select
-								class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+								class="w-full rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
 								bind:value={wiRenewType}
 							>
 								<option value="fixed">{$_('mortgage.rate_fixed')}</option>
@@ -1984,7 +2128,7 @@
 					<div class="mt-4 flex items-center gap-4">
 						<button
 							type="button"
-							class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:no-underline"
+							class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900 disabled:text-zinc-300 disabled:no-underline dark:text-zinc-400 dark:hover:text-zinc-100 dark:disabled:text-zinc-600"
 							disabled={comparing}
 							onclick={() => void compare()}
 						>
@@ -1992,26 +2136,32 @@
 						</button>
 						<button
 							type="button"
-							class="text-sm font-medium text-zinc-600 dark:text-zinc-400 underline hover:text-zinc-900 dark:hover:text-zinc-100"
+							class="text-sm font-medium text-zinc-600 underline hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
 							onclick={() => resetWhatIf()}
 						>
 							{$_('mortgage.reset')}
 						</button>
 					</div>
 					{#if compareError}
-						<p class="mt-3 text-sm text-red-600 dark:text-red-400">{$_('mortgage.error_label')}: {compareError}</p>
+						<p class="mt-3 text-sm text-red-600 dark:text-red-400">
+							{$_('mortgage.error_label')}: {compareError}
+						</p>
 					{/if}
 				</div>
 
 				<!-- Base-vs-scenario cards after a compare. -->
 				{#if whatIf}
-					<div class="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5">
-						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+					<div
+						class="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900"
+					>
+						<p class="text-xs font-medium text-zinc-500 uppercase dark:text-zinc-400">
 							{$_('mortgage.compare_title')}
 						</p>
 						<table class="mt-3 w-full text-sm tabular-nums">
 							<thead>
-								<tr class="border-b border-zinc-200 dark:border-zinc-800 text-left text-xs text-zinc-500 dark:text-zinc-400 uppercase">
+								<tr
+									class="border-b border-zinc-200 text-left text-xs text-zinc-500 uppercase dark:border-zinc-800 dark:text-zinc-400"
+								>
 									<th class="py-1.5 pr-3 font-medium"></th>
 									<th class="py-1.5 pr-3 text-right font-medium">{$_('mortgage.base')}</th>
 									<th class="py-1.5 text-right font-medium">{$_('mortgage.scenario')}</th>
@@ -2019,14 +2169,21 @@
 							</thead>
 							<tbody>
 								<tr class="border-b border-zinc-100 dark:border-zinc-800">
-									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">{$_('mortgage.cmp_payoff')}</td>
+									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400"
+										>{$_('mortgage.cmp_payoff')}</td
+									>
 									<td class="py-1.5 pr-3 text-right">{amortization.payoff_date}</td>
 									<td class="py-1.5 text-right">{whatIf.payoff_date}</td>
 								</tr>
 								<tr class="border-b border-zinc-100 dark:border-zinc-800">
-									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">{$_('mortgage.cmp_interest')}</td>
-									<td class="py-1.5 pr-3 text-right">{money(amortization.total_interest, selectedCurrency)}</td>
-									<td class="py-1.5 text-right">{money(whatIf.total_interest, selectedCurrency)}</td>
+									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400"
+										>{$_('mortgage.cmp_interest')}</td
+									>
+									<td class="py-1.5 pr-3 text-right"
+										>{money(amortization.total_interest, selectedCurrency)}</td
+									>
+									<td class="py-1.5 text-right">{money(whatIf.total_interest, selectedCurrency)}</td
+									>
 								</tr>
 								<tr class="border-b border-zinc-100 dark:border-zinc-800">
 									<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">
@@ -2037,7 +2194,9 @@
 								</tr>
 								{#if amortization.next_renewal !== undefined || whatIf.schedule.next_renewal !== undefined}
 									<tr class="border-b border-zinc-100 dark:border-zinc-800">
-										<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400">{$_('mortgage.cmp_renewal')}</td>
+										<td class="py-1.5 pr-3 text-zinc-600 dark:text-zinc-400"
+											>{$_('mortgage.cmp_renewal')}</td
+										>
 										<td class="py-1.5 pr-3 text-right">{amortization.next_renewal ?? '—'}</td>
 										<td class="py-1.5 text-right">{whatIf.schedule.next_renewal ?? '—'}</td>
 									</tr>
@@ -2070,27 +2229,36 @@
 				role="dialog"
 				aria-modal="true"
 				aria-labelledby="classify-modal-title"
-				class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-5 shadow-lg"
+				class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-lg border border-zinc-200 bg-white p-5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
 			>
-				<h2 id="classify-modal-title" class="text-base font-semibold">{$_('mortgage.classify_title')}</h2>
+				<h2 id="classify-modal-title" class="text-base font-semibold">
+					{$_('mortgage.classify_title')}
+				</h2>
 				<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">{$_('mortgage.classify_intro')}</p>
 				{#each pendingItems as it (itemKey(it))}
 					{@const form = effectiveForm(it)}
-					<div class="mt-4 rounded-md border border-zinc-200 dark:border-zinc-800 p-3">
+					<div class="mt-4 rounded-md border border-zinc-200 p-3 dark:border-zinc-800">
 						<div class="flex flex-wrap items-center gap-2 text-sm">
-							<span class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+							<span
+								class="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+							>
 								{classifyKindLabel(it.kind)}
 							</span>
 							<span class="font-medium tabular-nums">{it.date}</span>
 							{#if it.amount !== null}
-								<span class="ml-auto font-semibold tabular-nums {it.kind === 'extra' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}">
+								<span
+									class="ml-auto font-semibold tabular-nums {it.kind === 'extra'
+										? 'text-emerald-600 dark:text-emerald-400'
+										: 'text-red-600 dark:text-red-400'}"
+								>
 									{it.kind === 'extra' ? '+' : '−'}{money(it.amount, selectedCurrency)}
 								</span>
 							{:else}
 								<span class="ml-auto font-medium tabular-nums">
 									{it.impliedRate}{$_('mortgage.percent')}
 									<span class="ml-2 text-xs font-normal text-zinc-500 dark:text-zinc-400">
-										{$_('mortgage.match_suggestion_observed')} {money(it.observed, selectedCurrency)} · {it.periods}
+										{$_('mortgage.match_suggestion_observed')}
+										{money(it.observed, selectedCurrency)} · {it.periods}
 										{$_('mortgage.match_suggestion_periods')}
 									</span>
 								</span>
@@ -2108,7 +2276,9 @@
 								{$_('mortgage.classify_one_off')}
 							</label>
 							{#if form.classification === 'one_off'}
-								<p class="pl-6 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.classify_one_off_hint')}</p>
+								<p class="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
+									{$_('mortgage.classify_one_off_hint')}
+								</p>
 							{/if}
 							<label class="flex items-center gap-2 text-sm">
 								<input
@@ -2121,14 +2291,16 @@
 								{$_('mortgage.classify_rate_change')}
 							</label>
 							{#if form.classification === 'rate_change'}
-								<p class="pl-6 text-xs text-zinc-500 dark:text-zinc-400">{$_('mortgage.classify_rate_hint')}</p>
+								<p class="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
+									{$_('mortgage.classify_rate_hint')}
+								</p>
 								<div class="grid grid-cols-1 gap-2 pl-6 sm:grid-cols-3">
 									<label class="text-xs text-zinc-500 dark:text-zinc-400">
 										{$_('mortgage.classify_rate_label')}
 										<input
 											type="text"
 											inputmode="decimal"
-											class="mt-1 w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm text-zinc-900 dark:text-zinc-100"
+											class="mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
 											value={form.annual_rate}
 											oninput={(e) => updateForm(it, { annual_rate: e.currentTarget.value })}
 										/>
@@ -2136,9 +2308,12 @@
 									<label class="text-xs text-zinc-500 dark:text-zinc-400">
 										{$_('mortgage.classify_rate_type')}
 										<select
-											class="mt-1 w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm text-zinc-900 dark:text-zinc-100"
+											class="mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
 											value={form.rate_type}
-											onchange={(e) => updateForm(it, { rate_type: e.currentTarget.value === 'variable' ? 'variable' : 'fixed' })}
+											onchange={(e) =>
+												updateForm(it, {
+													rate_type: e.currentTarget.value === 'variable' ? 'variable' : 'fixed'
+												})}
 										>
 											<option value="fixed">{$_('mortgage.classify_rate_type_fixed')}</option>
 											<option value="variable">{$_('mortgage.classify_rate_type_variable')}</option>
@@ -2147,12 +2322,22 @@
 									<label class="text-xs text-zinc-500 dark:text-zinc-400">
 										{$_('mortgage.classify_action')}
 										<select
-											class="mt-1 w-full rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5 text-sm text-zinc-900 dark:text-zinc-100"
+											class="mt-1 w-full rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
 											value={form.action}
-											onchange={(e) => updateForm(it, { action: e.currentTarget.value === 'keep_payment' ? 'keep_payment' : 're_amortize' })}
+											onchange={(e) =>
+												updateForm(it, {
+													action:
+														e.currentTarget.value === 'keep_payment'
+															? 'keep_payment'
+															: 're_amortize'
+												})}
 										>
-											<option value="re_amortize">{$_('mortgage.classify_action_re_amortize')}</option>
-											<option value="keep_payment">{$_('mortgage.classify_action_keep_payment')}</option>
+											<option value="re_amortize"
+												>{$_('mortgage.classify_action_re_amortize')}</option
+											>
+											<option value="keep_payment"
+												>{$_('mortgage.classify_action_keep_payment')}</option
+											>
 										</select>
 									</label>
 								</div>
@@ -2160,11 +2345,13 @@
 						</div>
 						<button
 							type="button"
-							class="mt-3 rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300 disabled:opacity-50"
+							class="mt-3 rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
 							disabled={classifyingKey !== null}
 							onclick={() => void applyClassification(it)}
 						>
-							{classifyingKey === itemKey(it) ? $_('mortgage.classify_applying') : $_('mortgage.classify_apply')}
+							{classifyingKey === itemKey(it)
+								? $_('mortgage.classify_applying')
+								: $_('mortgage.classify_apply')}
 						</button>
 					</div>
 				{/each}

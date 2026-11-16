@@ -4,6 +4,11 @@
 // GET /api/v1/notifications/unread-count over the repo.NotificationStore.
 // Notifications are app-written (budget alerts, step 8.x) and user-owned;
 // every store call is scoped to the caller's users.id.
+//
+// Round 33 adds the self-heals: the list endpoint first reconciles the
+// lazy rows to the live state (the review queue count, and the live
+// aberrant items per mortgage) so only still-relevant notifications are
+// served; the review mutations reconcile on the way out (review.go).
 package server
 
 import (
@@ -16,21 +21,26 @@ import (
 	"strconv"
 	"time"
 
+	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/repo"
 
 	"github.com/go-chi/chi/v5"
 )
 
 // NotificationStore is the persistence surface the notification handlers
-// need. *repo.NotificationStore satisfies it (its extra Delete is unused
-// here); Create and FindByKindRef serve the lazy notification creation
-// on the mortgage matching report (round 32). Route tests use an
+// need. *repo.NotificationStore satisfies it; Create and FindByKindRef
+// serve the lazy notification creation on the mortgage matching report
+// (round 32), and ListByKind / Update / Delete serve the round-33
+// self-heals that refresh or purge stale rows. Route tests use an
 // in-memory implementation.
 type NotificationStore interface {
 	List(ctx context.Context, userID string, f repo.NotificationFilter) ([]repo.Notification, error)
+	ListByKind(ctx context.Context, userID, kind string) ([]repo.Notification, error)
 	MarkRead(ctx context.Context, userID, id string) (repo.Notification, error)
 	CountUnread(ctx context.Context, userID string) (int, error)
 	Create(ctx context.Context, userID string, in repo.NotificationIn) (repo.Notification, error)
+	Update(ctx context.Context, userID, id string, in repo.NotificationUpdate) (repo.Notification, error)
+	Delete(ctx context.Context, userID, id string) error
 	FindByKindRef(ctx context.Context, userID, kind string, ref []byte) (repo.Notification, error)
 }
 
@@ -106,8 +116,88 @@ func (h *handler) notificationError(w http.ResponseWriter, op string, err error)
 	}
 }
 
+// reviewNotificationJobID recovers the job_id from a review notification
+// ref (round 33); "" when the ref is unset or does not carry one.
+func reviewNotificationJobID(ref json.RawMessage) string {
+	if len(ref) == 0 {
+		return ""
+	}
+	var r struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(ref, &r); err != nil {
+		return ""
+	}
+	return r.JobID
+}
+
+// syncReviewNotification reconciles the "N transactions need review"
+// notification to the live review queue (round 33, best-effort): the
+// queue count is authoritative — zero pending rows purge EVERY "review"
+// row, a positive count keeps exactly one row (the newest, refreshed to
+// the live count and ref) and purges the duplicates, and a positive
+// count with no row creates one. Failures are logged only: a
+// notification write must never change the response of the mutation
+// that triggered the sync.
+func (h *handler) syncReviewNotification(ctx context.Context, c caller) {
+	if h.review == nil || h.notifications == nil {
+		return
+	}
+	log := func(op string, err error) {
+		slog.Error("review notification reconcile failed", "op", op, "error", err)
+	}
+	q, err := h.review.CountReviewPending(ctx, c.row.ID)
+	if err != nil {
+		log("count", err)
+		return
+	}
+	rows, err := h.notifications.ListByKind(ctx, c.row.ID, categorize.KindReview)
+	if err != nil {
+		log("list", err)
+		return
+	}
+	delete := func(id string) {
+		if derr := h.notifications.Delete(ctx, c.row.ID, id); derr != nil && !errors.Is(derr, repo.ErrNotificationNotFound) {
+			slog.Error("review notification reconcile failed", "op", "delete", "notification", id, "error", derr)
+		}
+	}
+	if q == 0 {
+		for _, n := range rows {
+			delete(n.ID)
+		}
+		return
+	}
+	title := categorize.ReviewNotificationTitle(q)
+	if len(rows) == 0 {
+		if _, cerr := h.notifications.Create(ctx, c.row.ID, repo.NotificationIn{
+			Kind:  categorize.KindReview,
+			Title: title,
+			Body:  title,
+			Ref:   categorize.ReviewNotificationRef(q, ""),
+		}); cerr != nil {
+			log("create", cerr)
+		}
+		return
+	}
+	// Keep the newest row (ListByKind is newest-first), refresh it to
+	// the live count, and purge the duplicates.
+	keep := rows[0]
+	for _, n := range rows[1:] {
+		delete(n.ID)
+	}
+	if _, uerr := h.notifications.Update(ctx, c.row.ID, keep.ID, repo.NotificationUpdate{
+		Title: title,
+		Body:  title,
+		Ref:   categorize.ReviewNotificationRef(q, reviewNotificationJobID(keep.Ref)),
+	}); uerr != nil {
+		log("update", uerr)
+	}
+}
+
 // notificationsList serves GET /api/v1/notifications: a page of the
-// caller's notifications, newest first (repo contract).
+// caller's notifications, newest first (repo contract). The round-33
+// self-heals run BEFORE the list so the response never serves a stale
+// row.
 func (h *handler) notificationsList(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
 		notConfigured(w)
@@ -117,6 +207,8 @@ func (h *handler) notificationsList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.syncReviewNotification(r.Context(), c)
+	h.syncAberrantNotifications(r.Context(), c)
 	f, err := notificationFilterFromQuery(r.URL.Query())
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())

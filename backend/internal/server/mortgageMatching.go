@@ -14,6 +14,12 @@
 // notification (deduped on the (kind, ref) pair) so the bell keeps
 // nudging the user until the item is classified through
 // POST /classifications.
+//
+// Round 33 closes the loop: classifying an item DELETES its
+// notification (mortgageClassify.go), and the notifications list
+// endpoint purges rows whose item is no longer unclassified (or whose
+// mortgage no longer exists) — only still-relevant notifications
+// survive.
 package server
 
 import (
@@ -227,10 +233,18 @@ func (h *handler) loadMatching(ctx context.Context, c caller, m repo.Mortgage) (
 	return mortgage.Match(spec, txns)
 }
 
-// aberrantRef builds the jsonb ref of an aberrant-payment notification:
-// the (kind, date) pair scoped to the mortgage. encoding/json sorts map
-// keys, so the bytes are deterministic and the (kind, ref) dedup is
-// stable.
+// aberrantRefDoc is the jsonb ref of an aberrant-payment notification:
+// the (mortgage, kind, date) pointer the (kind, ref) dedup keys on
+// (round 32) and the self-heal parses back (round 33).
+type aberrantRefDoc struct {
+	MortgageID string `json:"mortgage_id"`
+	Kind       string `json:"kind"`
+	Date       string `json:"date"`
+}
+
+// aberrantRef builds the ref bytes. encoding/json sorts map keys, so
+// the bytes are deterministic and the (kind, ref) dedup is stable —
+// keep the map form: the rows created in round 32 are byte-identical.
 func aberrantRef(mortgageID, kind, date string) []byte {
 	ref, _ := json.Marshal(map[string]any{
 		"mortgage_id": mortgageID,
@@ -238,6 +252,42 @@ func aberrantRef(mortgageID, kind, date string) []byte {
 		"date":        date,
 	})
 	return ref
+}
+
+// aberrantPrompt is one unclassified aberrant item rendered as its
+// notification prompt (round 33): the (kind, date) pair that keys the
+// ref plus the title both writers share.
+type aberrantPrompt struct {
+	kind string
+	date string
+	body string
+}
+
+// aberrantPrompts renders every still-unclassified item of the report
+// (round 33). The creation pass (ensureAberrantNotifications) and the
+// self-heal (syncAberrantNotifications) both key on these, so the
+// titles can never drift between the two writers.
+func aberrantPrompts(out matchingOut) []aberrantPrompt {
+	var prompts []aberrantPrompt
+	for _, e := range out.Extras {
+		if e.Classification == nil {
+			prompts = append(prompts, aberrantPrompt{"extra", e.Date,
+				fmt.Sprintf("Mortgage extra of %s on %s needs classification", e.Amount, e.Date)})
+		}
+	}
+	for _, s := range out.Shorts {
+		if s.Classification == nil {
+			prompts = append(prompts, aberrantPrompt{"short", s.Date,
+				fmt.Sprintf("Mortgage shortfall of %s on %s needs classification", s.Amount, s.Date)})
+		}
+	}
+	for _, s := range out.Suggestions {
+		if s.Classification == nil {
+			prompts = append(prompts, aberrantPrompt{"suggestion", s.EffectiveDate,
+				fmt.Sprintf("A sustained payment change since %s needs classification", s.EffectiveDate)})
+		}
+	}
+	return prompts
 }
 
 // ensureAberrantNotifications lazily creates ONE notification per
@@ -251,31 +301,7 @@ func (h *handler) ensureAberrantNotifications(ctx context.Context, c caller, m r
 	if h.notifications == nil {
 		return
 	}
-	type prompt struct {
-		kind string
-		date string
-		body string
-	}
-	var prompts []prompt
-	for _, e := range out.Extras {
-		if e.Classification == nil {
-			prompts = append(prompts, prompt{"extra", e.Date,
-				fmt.Sprintf("Mortgage extra of %s on %s needs classification", e.Amount, e.Date)})
-		}
-	}
-	for _, s := range out.Shorts {
-		if s.Classification == nil {
-			prompts = append(prompts, prompt{"short", s.Date,
-				fmt.Sprintf("Mortgage shortfall of %s on %s needs classification", s.Amount, s.Date)})
-		}
-	}
-	for _, s := range out.Suggestions {
-		if s.Classification == nil {
-			prompts = append(prompts, prompt{"suggestion", s.EffectiveDate,
-				fmt.Sprintf("A sustained payment change since %s needs classification", s.EffectiveDate)})
-		}
-	}
-	for _, p := range prompts {
+	for _, p := range aberrantPrompts(out) {
 		ref := aberrantRef(m.ID, p.kind, p.date)
 		_, err := h.notifications.FindByKindRef(ctx, c.row.ID, aberrantNotifKind, ref)
 		if err == nil {
@@ -292,6 +318,91 @@ func (h *handler) ensureAberrantNotifications(ctx context.Context, c caller, m r
 			Ref:   ref,
 		}); cerr != nil {
 			slog.Error("aberrant notification not recorded", "mortgage", m.ID, "kind", p.kind, "date", p.date, "error", cerr)
+		}
+	}
+}
+
+// aberrantLiveSet computes the "kind\x00date" keys of the items the
+// report for one (already fetched) mortgage still lists as
+// unclassified (round 33). ok=false when the report could not be
+// computed — the caller must leave that mortgage's rows untouched;
+// ErrMortgageNotFound is NOT an error here: the mortgage is verified
+// gone, so its live set is empty and its rows are all stale.
+func (h *handler) aberrantLiveSet(ctx context.Context, c caller, m repo.Mortgage) (map[string]bool, bool) {
+	res, err := h.loadMatching(ctx, c, m)
+	if err != nil {
+		return nil, false
+	}
+	keys := make(map[string]bool)
+	for _, p := range aberrantPrompts(annotateMatchingOut(toMatchingOut(res), m.Spec.PaymentClassifications)) {
+		keys[p.kind+"\x00"+p.date] = true
+	}
+	return keys, true
+}
+
+// syncAberrantNotifications purges aberrant-payment notifications whose
+// item no longer needs one (round 33, best-effort): a row is stale when
+// its (mortgage, kind, date) item is no longer unclassified — the user
+// answered it (the classify endpoint deletes the row directly), the
+// report no longer reports it, or the mortgage no longer exists. Rows
+// whose ref does not parse are stale by construction (no report can
+// ever own them). Delete-only: creation stays on GET /matching. Every
+// failure is logged only — a notification write must never affect the
+// list response.
+func (h *handler) syncAberrantNotifications(ctx context.Context, c caller) {
+	if h.notifications == nil || h.mortgages == nil || h.transactions == nil {
+		return
+	}
+	rows, err := h.notifications.ListByKind(ctx, c.row.ID, aberrantNotifKind)
+	if err != nil {
+		slog.Error("aberrant notification reconcile failed", "op", "list", "error", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	delete := func(id string) {
+		if derr := h.notifications.Delete(ctx, c.row.ID, id); derr != nil && !errors.Is(derr, repo.ErrNotificationNotFound) {
+			slog.Error("aberrant notification reconcile failed", "op", "delete", "notification", id, "error", derr)
+		}
+	}
+	// Group the parseable rows by mortgage; a row with an unparseable
+	// ref is deleted outright.
+	type parsedRow struct {
+		n   repo.Notification
+		ref aberrantRefDoc
+	}
+	byMortgage := make(map[string][]parsedRow)
+	for _, n := range rows {
+		var ref aberrantRefDoc
+		if err := json.Unmarshal(n.Ref, &ref); err != nil || ref.MortgageID == "" || ref.Kind == "" || ref.Date == "" {
+			delete(n.ID)
+			continue
+		}
+		byMortgage[ref.MortgageID] = append(byMortgage[ref.MortgageID], parsedRow{n: n, ref: ref})
+	}
+	for mid, group := range byMortgage {
+		m, err := h.mortgages.Get(ctx, c.row.ID, mid, c.dek)
+		switch {
+		case err == nil:
+			// computed below
+		case errors.Is(err, repo.ErrMortgageNotFound):
+			for _, pr := range group {
+				delete(pr.n.ID) // verified: the mortgage is gone
+			}
+			continue
+		default:
+			slog.Error("aberrant notification reconcile failed", "op", "get-mortgage", "mortgage", mid, "error", err)
+			continue // unknown: leave this mortgage's rows
+		}
+		live, ok := h.aberrantLiveSet(ctx, c, m)
+		if !ok {
+			continue // unknown: leave this mortgage's rows
+		}
+		for _, pr := range group {
+			if !live[pr.ref.Kind+"\x00"+pr.ref.Date] {
+				delete(pr.n.ID)
+			}
 		}
 	}
 }

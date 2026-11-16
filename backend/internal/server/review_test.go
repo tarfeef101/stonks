@@ -57,6 +57,8 @@ type memReviewStore struct {
 	getErr       error
 	acceptErr    error
 	acceptAllErr error
+	countErr     error
+	rejectErr    error
 }
 
 func (s *memReviewStore) addCat(userID, catID string) {
@@ -147,6 +149,41 @@ func (s *memReviewStore) AcceptAll(_ context.Context, userID, categoryID string)
 	return n, nil
 }
 
+// CountReviewPending counts the user's queue rows (the queue predicate,
+// no decryption — the round-33 notification reconciliation only needs
+// the count).
+func (s *memReviewStore) CountReviewPending(_ context.Context, userID string) (int, error) {
+	if s.countErr != nil {
+		return 0, s.countErr
+	}
+	n := 0
+	for i := range s.rows {
+		r := &s.rows[i]
+		if r.userID == userID && r.tx.ReviewPending && r.tx.CategoryID == "" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// RejectReview clears one row's review_pending without setting a
+// category (round 33): the queue predicate is the same as AcceptReview
+// minus the category, so a resolved or foreign row is
+// ErrTransactionNotFound.
+func (s *memReviewStore) RejectReview(_ context.Context, userID, txnID string) error {
+	if s.rejectErr != nil {
+		return s.rejectErr
+	}
+	for i := range s.rows {
+		r := &s.rows[i]
+		if r.userID == userID && r.tx.ID == txnID && r.tx.ReviewPending && r.tx.CategoryID == "" {
+			r.tx.ReviewPending = false
+			return nil
+		}
+	}
+	return repo.ErrTransactionNotFound
+}
+
 // stubCategorizer is an llm.Categorizer that returns a canned JSON
 // payload and records every request it is sent. Pointer receiver: the
 // Reprompter's LLM factory hands out the same instance the test
@@ -222,6 +259,20 @@ func newReviewServer(t *testing.T, store ReviewStore, rep *Reprompter) (http.Han
 		t.Fatalf("bootstrap: %v", err)
 	}
 	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil, nil, nil, nil, nil, nil, false, nil, nil, nil), key
+}
+
+// newReviewServerNotifs is newReviewServer with the notification store
+// wired as well (round 33): the queue mutations and GET
+// /notifications then run the review-notification reconciliation,
+// which these tests pin.
+func newReviewServerNotifs(t *testing.T, store ReviewStore, notifs NotificationStore) (http.Handler, jwk.Key) {
+	t.Helper()
+	key := mintKey(t)
+	b, err := NewBootstrap(newMemStore(), testKEK(t), nil)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, notifs, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil), key
 }
 
 // reviewHdr is the Authorization header for a fresh identity token on
@@ -467,6 +518,307 @@ func TestReviewAccept(t *testing.T) {
 		}
 		if c, m := apiErr(t, body); c != "internal" || m != "database not configured" {
 			t.Fatalf("err = %s/%s", c, m)
+		}
+	})
+}
+
+// TestReviewReject pins the reject route (round 33): no body, the house
+// order as accept (503 before auth, 404 on a malformed id before the
+// store, the sentinel mapping after), and the 200 answer is the full
+// updated row with review_pending cleared but category_id left null
+// (non-destructive: the transaction stays uncategorized).
+func TestReviewReject(t *testing.T) {
+	const sub = "alice"
+	userID := "id-" + sub
+	acct := nextTestID()
+
+	newCase := func(t *testing.T) (*memReviewStore, http.Handler, jwk.Key) {
+		t.Helper()
+		store := &memReviewStore{}
+		h, key := newReviewServer(t, store, nil)
+		return store, h, key
+	}
+
+	t.Run("reject one row", func(t *testing.T) {
+		store, h, key := newCase(t)
+		tx := pendingTx(userID, nextTestID(), acct, "2026-11-10", "42.50", "ZKX 9911 REF")
+		store.rows = append(store.rows, tx)
+
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/review/"+tx.tx.ID+"/reject", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK {
+			t.Fatalf("reject status = %d, want 200 (body %s)", code, body)
+		}
+		var out map[string]any
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("decode row: %v (body %s)", err, body)
+		}
+		// The full updated row (the PATCH house pattern): the same
+		// columns as the accept echo, but the category stays null.
+		if out["id"] != tx.tx.ID || out["account_id"] != acct || out["date_posted"] != "2026-11-10" ||
+			out["amount"] != "42.50" || out["description"] != "ZKX 9911 REF" ||
+			out["category_id"] != nil || out["review_pending"] != false {
+			t.Fatalf("row = %v", out)
+		}
+		if out["date_executed"] != nil || out["notes"] != nil || out["raw"] != nil {
+			t.Fatalf("unset columns must be null: %v", out)
+		}
+		if store.rows[0].tx.CategoryID != "" || store.rows[0].tx.ReviewPending {
+			t.Fatalf("store row = %+v", store.rows[0].tx)
+		}
+
+		// The row left the queue.
+		code, body = doReq(t, h, http.MethodGet, "/api/v1/review", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK || strings.TrimSpace(body) != "[]" {
+			t.Fatalf("queue after reject = %q (status %d)", body, code)
+		}
+		// Re-rejecting the resolved row is a 404 (it is no longer
+		// review pending).
+		code, body = doReq(t, h, http.MethodPost, "/api/v1/review/"+tx.tx.ID+"/reject", "", reviewHdr(t, key, sub))
+		if code != http.StatusNotFound {
+			t.Fatalf("re-reject status = %d, want 404 (body %s)", code, body)
+		}
+		if c, m := apiErr(t, body); c != "not_found" || m != "transaction not found" {
+			t.Fatalf("err = %s/%s", c, m)
+		}
+	})
+
+	t.Run("not mine is 404", func(t *testing.T) {
+		store, h, key := newCase(t)
+		tx := pendingTx(userID, nextTestID(), acct, "2026-11-11", "7.00", "not yours")
+		store.rows = append(store.rows, tx)
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/review/"+tx.tx.ID+"/reject", "", reviewHdr(t, key, "bob"))
+		if code != http.StatusNotFound {
+			t.Fatalf("foreign reject status = %d, want 404 (body %s)", code, body)
+		}
+		if c, m := apiErr(t, body); c != "not_found" || m != "transaction not found" {
+			t.Fatalf("err = %s/%s", c, m)
+		}
+		// The row stays pending for its owner.
+		code, body = doReq(t, h, http.MethodGet, "/api/v1/review", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK || !strings.Contains(body, "not yours") {
+			t.Fatalf("row must stay pending (status %d body %s)", code, body)
+		}
+	})
+
+	t.Run("reject syncs the review notification", func(t *testing.T) {
+		store := &memReviewStore{}
+		notifs := &memNotificationStore{}
+		h, key := newReviewServerNotifs(t, store, notifs)
+		tx := pendingTx(userID, nextTestID(), acct, "2026-11-10", "42.50", "last one")
+		store.rows = append(store.rows, tx)
+		// A stale "review" row (a leftover of an older count).
+		addNotif(notifs, userID, categorize.KindReview,
+			"9 transactions need review", "9 transactions need review",
+			categorize.ReviewNotificationRef(9, ""), time.Now().UTC().Add(-time.Hour), false)
+
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/review/"+tx.tx.ID+"/reject", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK {
+			t.Fatalf("reject status = %d, want 200 (body %s)", code, body)
+		}
+		// The queue is empty now: every "review" row is purged.
+		if len(notifs.rows) != 0 {
+			t.Fatalf("rows = %+v, want none (queue empty)", notifs.rows)
+		}
+	})
+
+	t.Run("malformed id is 404", func(t *testing.T) {
+		_, h, key := newCase(t)
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/review/not-a-uuid/reject", "", reviewHdr(t, key, sub))
+		if code != http.StatusNotFound {
+			t.Fatalf("malformed id status = %d, want 404 (body %s)", code, body)
+		}
+		if c, m := apiErr(t, body); c != "not_found" || m != "transaction not found" {
+			t.Fatalf("err = %s/%s", c, m)
+		}
+	})
+
+	t.Run("store error", func(t *testing.T) {
+		store, h, key := newCase(t)
+		tx := pendingTx(userID, nextTestID(), acct, "2026-11-12", "3.00", "boom")
+		store.rows = append(store.rows, tx)
+		store.rejectErr = errors.New("boom")
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/review/"+tx.tx.ID+"/reject", "", reviewHdr(t, key, sub))
+		if code != http.StatusInternalServerError {
+			t.Fatalf("store error status = %d, want 500 (body %s)", code, body)
+		}
+		if c, m := apiErr(t, body); c != "internal" || m != "review operation failed" {
+			t.Fatalf("err = %s/%s", c, m)
+		}
+	})
+
+	t.Run("nil store", func(t *testing.T) {
+		h, key := newReviewServer(t, nil, nil)
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/review/"+nextTestID()+"/reject", "", reviewHdr(t, key, sub))
+		if code != http.StatusServiceUnavailable {
+			t.Fatalf("nil store status = %d, want 503 (body %s)", code, body)
+		}
+		if c, m := apiErr(t, body); c != "internal" || m != "database not configured" {
+			t.Fatalf("err = %s/%s", c, m)
+		}
+	})
+}
+
+// TestReviewNotificationSelfHeal pins the "N transactions need review"
+// reconciliation (round 33): the live queue count is authoritative —
+// zero pending purges EVERY "review" row, a positive count with no row
+// creates one (job_id unset), and a positive count with rows keeps the
+// newest one (refreshed to the live count, job_id carried over) and
+// purges the duplicates. It runs after every queue mutation and on
+// GET /notifications before the list is served; every failure is
+// best-effort (logged, the response never changes).
+func TestReviewNotificationSelfHeal(t *testing.T) {
+	const sub = "alice"
+	userID := "id-" + sub
+	acct := nextTestID()
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+	newCase := func(t *testing.T) (*memReviewStore, *memNotificationStore, http.Handler, jwk.Key) {
+		t.Helper()
+		store := &memReviewStore{}
+		notifs := &memNotificationStore{}
+		h, key := newReviewServerNotifs(t, store, notifs)
+		return store, notifs, h, key
+	}
+
+	addPending := func(store *memReviewStore, n int) {
+		for i := 0; i < n; i++ {
+			store.rows = append(store.rows,
+				pendingTx(userID, nextTestID(), acct, "2026-11-02", "10.00", fmt.Sprintf("tx %d", i)))
+		}
+	}
+
+	// reviewRow seeds a "review" notification exactly as the sync
+	// creates one (title == body, the count ref).
+	reviewRow := func(notifs *memNotificationStore, count int, jobID string, at time.Time) string {
+		title := categorize.ReviewNotificationTitle(count)
+		return addNotif(notifs, userID, categorize.KindReview, title, title,
+			categorize.ReviewNotificationRef(count, jobID), at, false)
+	}
+
+	t.Run("zero pending purges every review row", func(t *testing.T) {
+		_, notifs, h, key := newCase(t)
+		errID := addNotif(notifs, userID, "error", "FI sync failed", "FI sync failed", nil, base, false)
+		reviewRow(notifs, 9, "", base.Add(time.Minute))
+		reviewRow(notifs, 5, "job-9", base.Add(2*time.Minute))
+
+		code, body := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK {
+			t.Fatalf("GET /notifications status = %d, want 200 (body %s)", code, body)
+		}
+		// Both review rows are stale (the queue is empty): purged. The
+		// other kind is untouched.
+		ids := listIDs(t, body)
+		if len(ids) != 1 || ids[0] != errID {
+			t.Fatalf("ids = %v, want only the error row %s", ids, errID)
+		}
+	})
+
+	t.Run("positive count with no row creates one", func(t *testing.T) {
+		store, notifs, h, key := newCase(t)
+		addPending(store, 1)
+
+		code, body := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK {
+			t.Fatalf("GET /notifications status = %d, want 200 (body %s)", code, body)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(body), &rows); err != nil {
+			t.Fatalf("body is not JSON: %v (%s)", err, body)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows = %v, want exactly one (the created review row)", rows)
+		}
+		r := rows[0]
+		if r["kind"] != "review" || r["title"] != "1 transactions need review" || r["body"] != "1 transactions need review" {
+			t.Fatalf("row = %v", r)
+		}
+		ref, _ := r["ref"].(map[string]any)
+		if ref == nil || ref["count"] != float64(1) || ref["job_id"] != "" {
+			t.Fatalf("ref = %v, want {\"count\":1,\"job_id\":\"\"}", r["ref"])
+		}
+		if r["read_at"] != nil {
+			t.Fatalf("created row must be unread: %v", r)
+		}
+		if len(notifs.rows) != 1 || notifs.rows[0].n.Kind != categorize.KindReview {
+			t.Fatalf("store rows = %+v, want one review row", notifs.rows)
+		}
+	})
+
+	t.Run("keeps the newest row, refreshes it, purges duplicates", func(t *testing.T) {
+		store, notifs, h, key := newCase(t)
+		addPending(store, 3)
+		reviewRow(notifs, 7, "job-1", base.Add(time.Minute))
+		reviewRow(notifs, 4, "job-2", base.Add(2*time.Minute))
+		newest := reviewRow(notifs, 2, "job-3", base.Add(3*time.Minute))
+
+		code, body := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", reviewHdr(t, key, sub))
+		if code != http.StatusOK {
+			t.Fatalf("GET /notifications status = %d, want 200 (body %s)", code, body)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(body), &rows); err != nil {
+			t.Fatalf("body is not JSON: %v (%s)", err, body)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("rows = %v, want exactly one (the kept review row)", rows)
+		}
+		r := rows[0]
+		if r["id"] != newest {
+			t.Fatalf("kept id = %v, want the newest row %s", r["id"], newest)
+		}
+		if r["title"] != "3 transactions need review" || r["body"] != "3 transactions need review" {
+			t.Fatalf("kept row = %v", r)
+		}
+		ref, _ := r["ref"].(map[string]any)
+		if ref == nil || ref["count"] != float64(3) || ref["job_id"] != "job-3" {
+			t.Fatalf("kept ref = %v, want {\"count\":3,\"job_id\":\"job-3\"}", r["ref"])
+		}
+		if r["read_at"] != nil {
+			t.Fatalf("kept row must stay unread: %v", r)
+		}
+		if len(notifs.rows) != 1 || notifs.rows[0].n.ID != newest {
+			t.Fatalf("store rows = %+v, want only the kept row", notifs.rows)
+		}
+	})
+
+	t.Run("sync failures never change the response", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			pending  int
+			row      bool // seed the review row the sync would touch
+			inject   func(*memReviewStore, *memNotificationStore)
+			want     string // substring of the body
+			wantList string // exact body, when the list must be empty
+		}{
+			{"count fails", 2, true, func(s *memReviewStore, n *memNotificationStore) { s.countErr = errors.New("boom") }, "9 transactions need review", ""},
+			{"list by kind fails", 2, true, func(s *memReviewStore, n *memNotificationStore) { n.listByKindErr = errors.New("boom") }, "9 transactions need review", ""},
+			{"create fails", 2, false, func(s *memReviewStore, n *memNotificationStore) { n.createErr = errors.New("boom") }, "", "[]"},
+			{"update fails", 2, true, func(s *memReviewStore, n *memNotificationStore) { n.updateErr = errors.New("boom") }, "9 transactions need review", ""},
+			{"delete fails", 0, true, func(s *memReviewStore, n *memNotificationStore) { n.deleteErr = errors.New("boom") }, "9 transactions need review", ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				store, notifs, h, key := newCase(t)
+				addPending(store, tc.pending)
+				if tc.row {
+					reviewRow(notifs, 9, "", base.Add(time.Minute))
+				}
+				tc.inject(store, notifs)
+
+				code, body := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", reviewHdr(t, key, sub))
+				if code != http.StatusOK {
+					t.Fatalf("GET /notifications status = %d, want 200 (body %s)", code, body)
+				}
+				// The failure was logged, not surfaced: the response is
+				// exactly what the (unreconciled) list holds.
+				if tc.wantList != "" {
+					if strings.TrimSpace(body) != tc.wantList {
+						t.Fatalf("body = %q, want %q", body, tc.wantList)
+					}
+				} else if !strings.Contains(body, tc.want) {
+					t.Fatalf("body = %s, want it to contain %q", body, tc.want)
+				}
+			})
 		}
 	})
 }
@@ -818,6 +1170,7 @@ func TestReviewAuth(t *testing.T) {
 		{http.MethodGet, "/api/v1/review", ""},
 		{http.MethodPost, "/api/v1/review/accept-all", `{"category_id":"` + id + `"}`},
 		{http.MethodPost, "/api/v1/review/" + id + "/accept", `{"category_id":"` + id + `"}`},
+		{http.MethodPost, "/api/v1/review/" + id + "/reject", ""},
 		{http.MethodPost, "/api/v1/review/" + id + "/reprompt", ""},
 	}
 	for _, r := range routes {

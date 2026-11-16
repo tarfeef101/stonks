@@ -63,6 +63,17 @@ type NotificationIn struct {
 	Ref   json.RawMessage
 }
 
+// NotificationUpdate is the Update input: it replaces title and body
+// (the self-heals refresh the kept row's live count) and optionally the
+// ref. Kind and ReadAt are not mutable here. Title/Body are trimmed and
+// must be non-blank; Ref is nil or "" = unset (NULL), otherwise a valid
+// JSON document.
+type NotificationUpdate struct {
+	Title string
+	Body  string
+	Ref   json.RawMessage
+}
+
 // NotificationFilter is the List query. Unread = unread rows only.
 // Limit defaults to 50, capped at 100. Rows come back ordered
 // created_at DESC, id DESC.
@@ -262,6 +273,39 @@ func (s *NotificationStore) List(ctx context.Context, userID string, f Notificat
 	return out, nil
 }
 
+// ListByKind returns EVERY notification of the user's with the given
+// kind (no limit: the kinds in use hold at most a handful of rows),
+// newest first (the List ordering). The round-33 self-heals walk these
+// to drop stale rows.
+func (s *NotificationStore) ListByKind(ctx context.Context, userID, kind string) ([]Notification, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, kind, title, body, ref, read_at, created_at
+		FROM notifications
+		WHERE user_id = $1 AND kind = $2
+		ORDER BY created_at DESC, id DESC`, userID, kind)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list notifications by kind: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Notification, 0)
+	for rows.Next() {
+		var (
+			id, k, title, body string
+			ref                []byte
+			readAt             sql.NullTime
+			createdAt          time.Time
+		)
+		if err := rows.Scan(&id, &k, &title, &body, &ref, &readAt, &createdAt); err != nil {
+			return nil, fmt.Errorf("repo: scan notification: %w", err)
+		}
+		out = append(out, notificationFrom(id, k, title, body, ref, readAt, createdAt))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list notifications by kind: %w", err)
+	}
+	return out, nil
+}
+
 // MarkRead sets read_at (first read wins: COALESCE keeps the original
 // timestamp) and returns the updated row. Idempotent — marking an
 // already-read notification leaves read_at untouched. An unknown or
@@ -290,6 +334,52 @@ func (s *NotificationStore) CountUnread(ctx context.Context, userID string) (int
 		return 0, fmt.Errorf("repo: count unread notifications: %w", err)
 	}
 	return n, nil
+}
+
+// Update replaces a notification's title, body, and ref in place (the
+// round-33 self-heal refreshes the kept review row's live count). The
+// kind is not mutable here. Same field validation as Create; Ref is
+// nil or "" = unset (NULL). An unknown or other user's id is
+// ErrNotificationNotFound; the row is left untouched. Returns the
+// updated row (a Get, as in Create).
+func (s *NotificationStore) Update(ctx context.Context, userID, id string, in NotificationUpdate) (Notification, error) {
+	in.Title = strings.TrimSpace(in.Title)
+	in.Body = strings.TrimSpace(in.Body)
+	if in.Title == "" {
+		return Notification{}, fmt.Errorf("repo: title must not be empty")
+	}
+	if utf8.RuneCountInString(in.Title) > maxNotificationTitleLen {
+		return Notification{}, fmt.Errorf("repo: title must be at most %d characters", maxNotificationTitleLen)
+	}
+	if in.Body == "" {
+		return Notification{}, fmt.Errorf("repo: body must not be empty")
+	}
+	if utf8.RuneCountInString(in.Body) > maxNotificationBodyLen {
+		return Notification{}, fmt.Errorf("repo: body must be at most %d characters", maxNotificationBodyLen)
+	}
+	if len(in.Ref) > 0 {
+		if !json.Valid(in.Ref) {
+			return Notification{}, fmt.Errorf("repo: ref must be a valid JSON document")
+		}
+		if len(in.Ref) > maxNotificationRefBytes {
+			return Notification{}, fmt.Errorf("repo: ref must be at most %d bytes", maxNotificationRefBytes)
+		}
+	}
+	var refArg any // nil = NULL; jsonb binds as string (pgx gotcha)
+	if len(in.Ref) > 0 {
+		refArg = string(in.Ref)
+	}
+	cmdTag, err := s.pool.Exec(ctx, `
+		UPDATE notifications
+		SET title = $3, body = $4, ref = $5
+		WHERE user_id = $1 AND id = $2`, userID, id, in.Title, in.Body, refArg)
+	if err != nil {
+		return Notification{}, fmt.Errorf("repo: update notification: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return Notification{}, ErrNotificationNotFound
+	}
+	return s.Get(ctx, userID, id)
 }
 
 // Delete removes the user's notification. An unknown or other user's

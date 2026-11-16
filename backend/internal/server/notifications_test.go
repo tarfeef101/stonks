@@ -18,6 +18,7 @@ import (
 	"errors"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,11 +42,14 @@ type memNotificationRow struct {
 type memNotificationStore struct {
 	rows []memNotificationRow
 
-	listErr   error
-	readErr   error
-	countErr  error
-	createErr error
-	findErr   error
+	listErr       error
+	readErr       error
+	countErr      error
+	createErr     error
+	findErr       error
+	listByKindErr error
+	updateErr     error
+	deleteErr     error
 }
 
 // addNotif seeds one row directly and returns the minted id; read rows
@@ -172,6 +176,79 @@ func (m *memNotificationStore) FindByKindRef(_ context.Context, userID, kind str
 		return repo.Notification{}, repo.ErrNotificationNotFound
 	}
 	return m.rows[best].n, nil
+}
+
+// ListByKind returns EVERY row of the user's with the given kind (no
+// limit, List's created_at DESC / id DESC ordering); the round-33
+// self-heals walk these lists.
+func (m *memNotificationStore) ListByKind(_ context.Context, userID, kind string) ([]repo.Notification, error) {
+	if m.listByKindErr != nil {
+		return nil, m.listByKindErr
+	}
+	out := make([]repo.Notification, 0)
+	for _, r := range m.rows {
+		if r.userID == userID && r.n.Kind == kind {
+			out = append(out, r.n)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	return out, nil
+}
+
+// Update replaces the row's title, body and ref in place (trimmed
+// non-blank title/body, valid JSON ref or null) and returns the
+// updated row; an unknown or other user's id is
+// ErrNotificationNotFound and leaves the row untouched.
+func (m *memNotificationStore) Update(_ context.Context, userID, id string, in repo.NotificationUpdate) (repo.Notification, error) {
+	if m.updateErr != nil {
+		return repo.Notification{}, m.updateErr
+	}
+	in.Title = strings.TrimSpace(in.Title)
+	in.Body = strings.TrimSpace(in.Body)
+	if in.Title == "" {
+		return repo.Notification{}, errors.New("title must not be empty")
+	}
+	if in.Body == "" {
+		return repo.Notification{}, errors.New("body must not be empty")
+	}
+	if len(in.Ref) > 0 && !json.Valid(in.Ref) {
+		return repo.Notification{}, errors.New("ref must be a valid JSON document")
+	}
+	for i := range m.rows {
+		r := &m.rows[i]
+		if r.userID != userID || r.n.ID != id {
+			continue
+		}
+		r.n.Title = in.Title
+		r.n.Body = in.Body
+		if len(in.Ref) == 0 {
+			r.n.Ref = nil
+		} else {
+			r.n.Ref = in.Ref
+		}
+		return r.n, nil
+	}
+	return repo.Notification{}, repo.ErrNotificationNotFound
+}
+
+// Delete removes the user's row; an unknown or other user's id is
+// ErrNotificationNotFound and leaves the row untouched.
+func (m *memNotificationStore) Delete(_ context.Context, userID, id string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	for i := range m.rows {
+		if m.rows[i].userID == userID && m.rows[i].n.ID == id {
+			m.rows = append(m.rows[:i], m.rows[i+1:]...)
+			return nil
+		}
+	}
+	return repo.ErrNotificationNotFound
 }
 
 // jsonbEqual mirrors jsonb equality: the documents are equal when they

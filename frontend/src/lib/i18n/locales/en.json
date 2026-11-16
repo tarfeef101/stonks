@@ -454,7 +454,16 @@
 		"all_category_label": "Category for all rows",
 		"apply_all": "Apply to all",
 		"applying_all": "Applying to all…",
-		"applied_all": "Applied to {n} transactions."
+		"applied_all": "Applied to {n} transactions.",
+		"reject": "Reject",
+		"rejecting": "Rejecting…",
+		"edit": "Edit",
+		"edit_loading": "Loading transaction…",
+		"edit_not_found": "The transaction is no longer available.",
+		"edit_save": "Save",
+		"edit_saving": "Saving…",
+		"edit_cancel": "Cancel",
+		"go_to_review": "Open the review queue"
 	},
 	"offsets": {
 		"title": "Offsets",
@@ -475,7 +484,7 @@
 	},
 	"notifications": {
 		"title": "Notifications",
-		"intro": "Alerts from the app — right now, a reminder when a categorise run finishes and transactions need your review.",
+		"intro": "Alerts from the app — open one to act on it right here; alerts clear themselves once their item is resolved.",
 		"sign_in_prompt": "Sign in to see your notifications.",
 		"loading": "Loading notifications…",
 		"empty": "No notifications yet.",
@@ -483,7 +492,6 @@
 		"unread": "Unread",
 		"read_on": "Read on",
 		"goto_mortgage": "Go to mortgage",
-		"suggestion_review": "Review suggestion",
 		"suggestion_loading": "Loading suggestion…",
 		"suggestion_gone": "This suggestion is no longer in the mortgage's matching report.",
 		"suggestion_implied": "Implied annual rate",
@@ -499,7 +507,19 @@
 		"suggestion_action_label": "Action",
 		"suggestion_apply": "Apply",
 		"suggestion_applying": "Applying…",
-		"suggestion_rate_required": "Annual rate is required."
+		"suggestion_rate_required": "Annual rate is required.",
+		"close": "Close",
+		"card_aria": "Open to take action",
+		"aberrant_one_off": "One-off payment",
+		"aberrant_one_off_busy": "Marking one-off…",
+		"aberrant_rate_change": "Rate change",
+		"aberrant_amount": "Amount",
+		"suggestion_observed": "Observed payment {payment} over {n} periods.",
+		"class_one_off": "one-off payment",
+		"class_rate_change": "rate change",
+		"class_rejected": "rejected",
+		"answered": "Already answered — classification: {kind}.",
+		"item_gone": "This item is no longer in the mortgage's matching report."
 	},
 	"settings": {
 		"title": "Settings",

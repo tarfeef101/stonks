@@ -1090,6 +1090,42 @@ func (s *TransactionStore) AcceptReview(ctx context.Context, userID, txnID, cate
 	return nil
 }
 
+// CountReviewPending returns how many of the user's transactions are in
+// the review queue: the same predicate the review endpoints share
+// (review_pending = true AND category_id IS NULL).
+func (s *TransactionStore) CountReviewPending(ctx context.Context, userID string) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM transactions
+		WHERE user_id = $1 AND review_pending = true AND category_id IS NULL`,
+		userID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("repo: count review pending: %w", err)
+	}
+	return n, nil
+}
+
+// RejectReview resolves one review-pending row WITHOUT a category
+// (round 33): the user declines to categorize it, so the transaction
+// stays uncategorized but leaves the queue (review_pending = false).
+// Same scoped update as AcceptReview minus the category ownership probe
+// — there is no category to own. 0 rows affected means the row is not
+// the caller's pending row — ErrTransactionNotFound.
+func (s *TransactionStore) RejectReview(ctx context.Context, userID, txnID string) error {
+	cmdTag, err := s.pool.Exec(ctx, `
+		UPDATE transactions
+		SET review_pending = false, updated_at = now()
+		WHERE user_id = $1 AND id = $2 AND review_pending = true AND category_id IS NULL`,
+		userID, txnID)
+	if err != nil {
+		return fmt.Errorf("repo: reject review: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrTransactionNotFound
+	}
+	return nil
+}
+
 // AcceptAll resolves every review-pending row of the user with one
 // category (the accept-all bulk action) and returns how many rows it
 // applied. Same ownership probe and scoped update as AcceptReview.

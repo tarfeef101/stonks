@@ -14,7 +14,8 @@
 // validation -> 400 (all violations joined), the (kind, date) pair
 // missing from the CURRENT report -> 400, then ONE Update (the
 // classification and, for a rate change, the event), and finally the
-// matching notification for that item is marked read (best effort).
+// matching notification for that item is DELETED (best effort, round 33:
+// a resolved notification is not kept — the bell stops nudging).
 package server
 
 import (
@@ -153,13 +154,13 @@ func upsertRateEvent(cur []repo.RateEvent, ev repo.RateEvent) []repo.RateEvent {
 	return append(cur, ev)
 }
 
-// markAberrantNotificationRead marks the lazily-created aberrant-payment
-// notification for this (kind, date) read (round 32): the user just
-// answered the question, so the bell must stop nudging. A missing row
-// is EXPECTED (notifications are only created when a report was viewed)
-// and silently ignored; any other failure is logged only — the
-// classification itself is already stored.
-func (h *handler) markAberrantNotificationRead(ctx context.Context, c caller, mortgageID, kind, date string) {
+// deleteAberrantNotification deletes the lazily-created aberrant-payment
+// notification for this (kind, date) (round 33: the user just answered
+// the question, so the row is resolved and is not kept — round 32 kept
+// it as read). A missing row is EXPECTED (notifications are only
+// created when a report was viewed) and silently ignored; any other
+// failure is logged only — the classification itself is already stored.
+func (h *handler) deleteAberrantNotification(ctx context.Context, c caller, mortgageID, kind, date string) {
 	if h.notifications == nil {
 		return
 	}
@@ -170,8 +171,8 @@ func (h *handler) markAberrantNotificationRead(ctx context.Context, c caller, mo
 		}
 		return
 	}
-	if _, err := h.notifications.MarkRead(ctx, c.row.ID, n.ID); err != nil && !errors.Is(err, repo.ErrNotificationNotFound) {
-		slog.Error("aberrant notification not marked read", "notification", n.ID, "error", err)
+	if err := h.notifications.Delete(ctx, c.row.ID, n.ID); err != nil && !errors.Is(err, repo.ErrNotificationNotFound) {
+		slog.Error("aberrant notification not deleted", "notification", n.ID, "error", err)
 	}
 }
 
@@ -245,6 +246,6 @@ func (h *handler) mortgageClassifyPost(w http.ResponseWriter, r *http.Request) {
 		h.mortgageError(w, "classify", err)
 		return
 	}
-	h.markAberrantNotificationRead(r.Context(), c, m.ID, b.Kind, b.Date)
+	h.deleteAberrantNotification(r.Context(), c, m.ID, b.Kind, b.Date)
 	writeJSON(w, http.StatusOK, toMortgageOut(updated))
 }

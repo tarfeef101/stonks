@@ -3,8 +3,9 @@
 // report flags. Pins the house error order (503 before auth, 404 before
 // the store, body validation before the Get), the joined validation
 // messages, the lazily-created "mortgage_aberrant" notifications
-// (exact bodies, the deterministic jsonb ref, dedup on revisit, and the
-// mark-read on classify), and both classification paths end to end: a
+// (exact bodies, the deterministic jsonb ref, dedup on revisit, and
+// the delete-on-classify of round 33), and both classification paths
+// end to end: a
 // one_off stores the answer without touching the schedule, a
 // rate_change upserts a rate event so the re-amortized plan explains
 // the higher payments and the suggestion disappears, and a rejected
@@ -14,10 +15,12 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"finance-tracker/internal/mortgage"
 	"finance-tracker/internal/repo"
@@ -138,9 +141,8 @@ func TestMortgageClassifyErrors(t *testing.T) {
 // first matching GET lazily creates one "mortgage_aberrant"
 // notification per unclassified item (exact bodies, deterministic jsonb
 // ref, title == body), a revisit dedupes, and the classify answer is
-// stored in the spec with its notification marked read (the short's
-// stays waiting). Re-classifying the same (kind, date) replaces in
-// place.
+// stored in the spec with its notification deleted (the short's stays
+// waiting). Re-classifying the same (kind, date) replaces in place.
 func TestMortgageClassifyOneOff(t *testing.T) {
 	store := &memMortgageStore{}
 	txs := &memTxStore{}
@@ -229,14 +231,22 @@ func TestMortgageClassifyOneOff(t *testing.T) {
 		t.Errorf("spec.rate_events = %#v, want none", m.Spec.RateEvents)
 	}
 
-	// The extra's notification is read; the short's is still waiting.
+	// The extra's notification is deleted (round 33); the short's is
+	// still waiting (unread).
+	shortSeen := false
 	for _, r := range notifs.rows {
-		if r.n.Body == extraBody && r.n.ReadAt == nil {
-			t.Errorf("the extra's notification was not marked read")
+		if r.n.Body == extraBody {
+			t.Errorf("the extra's notification was not deleted: %+v", r.n)
 		}
-		if r.n.Body == shortBody && r.n.ReadAt != nil {
-			t.Errorf("the short's notification was marked read early")
+		if r.n.Body == shortBody {
+			shortSeen = true
+			if r.n.ReadAt != nil {
+				t.Errorf("the short's notification was marked read early")
+			}
 		}
+	}
+	if !shortSeen {
+		t.Errorf("the short's notification is missing: %+v", notifs.rows)
 	}
 
 	// The report now carries the answer; the item is still reported
@@ -256,8 +266,8 @@ func TestMortgageClassifyOneOff(t *testing.T) {
 	if len(body.Shorts) != 1 || body.Shorts[0].Classification != nil {
 		t.Errorf("shorts = %+v, want the one short still unclassified", body.Shorts)
 	}
-	if len(notifs.rows) != 2 {
-		t.Errorf("rows after classify + revisit = %d, want 2 (no duplicates)", len(notifs.rows))
+	if len(notifs.rows) != 1 {
+		t.Errorf("rows after classify + revisit = %d, want 1 (the short's only: the classified extra's row was deleted and is never re-created)", len(notifs.rows))
 	}
 
 	// Re-classifying the same (kind, date) REPLACES in place: one
@@ -285,8 +295,8 @@ func TestMortgageClassifyOneOff(t *testing.T) {
 // TestMortgageClassifyRateChange pins the rate-change path end to end
 // on the drift scenario: the single suggestion surfaces with a null
 // classification and its notification, the answer upserts a rate event
-// (served in the 200 response, base rate untouched), the notification
-// is marked read, and the re-amortized plan now explains the higher
+// (served in the 200 response, base rate untouched), deletes the
+// notification, and the re-amortized plan now explains the higher
 // payments — the suggestion is gone and all 20 periods match.
 func TestMortgageClassifyRateChange(t *testing.T) {
 	store := &memMortgageStore{}
@@ -367,9 +377,9 @@ func TestMortgageClassifyRateChange(t *testing.T) {
 		t.Errorf("spec.rate_events = %#v, want %#v", m.Spec.RateEvents, wantEvent)
 	}
 
-	// The notification is read.
-	if notifs.rows[0].n.ReadAt == nil {
-		t.Error("the suggestion's notification was not marked read")
+	// The notification is deleted.
+	if len(notifs.rows) != 0 {
+		t.Errorf("the suggestion's notification was not deleted: %+v", notifs.rows)
 	}
 
 	// The re-amortized plan now EXPLAINS the higher payments: no
@@ -392,15 +402,15 @@ func TestMortgageClassifyRateChange(t *testing.T) {
 	if body.PeriodsMatched != 20 || body.PeriodsMissing != 0 {
 		t.Errorf("matched/missing = %d/%d, want 20/0", body.PeriodsMatched, body.PeriodsMissing)
 	}
-	if len(notifs.rows) != 1 {
-		t.Errorf("rows after classify + revisit = %d, want 1 (no duplicates)", len(notifs.rows))
+	if len(notifs.rows) != 0 {
+		t.Errorf("rows after classify + revisit = %d, want 0 (the answered item's row was deleted and is never re-created)", len(notifs.rows))
 	}
 }
 
 // TestMortgageClassifyRejected pins the third path: "rejected" is a
 // durable answer — it stores the classification (ignoring the rate
-// fields), creates no rate event, marks the notification read, leaves
-// the suggestion in the report (the unchanged plan still drifts, so the
+// fields), creates no rate event, deletes the notification, leaves the
+// suggestion in the report (the unchanged plan still drifts, so the
 // matcher re-derives it, annotated with the stored answer) without
 // creating a duplicate notification, and a later re-classification to
 // rate_change replaces the answer in place so the plan then explains
@@ -453,8 +463,8 @@ func TestMortgageClassifyRejected(t *testing.T) {
 	if len(m.Spec.RateEvents) != 0 {
 		t.Errorf("spec.rate_events = %#v, want none (a rejection writes no rate event)", m.Spec.RateEvents)
 	}
-	if notifs.rows[0].n.ReadAt == nil {
-		t.Error("the suggestion's notification was not marked read")
+	if len(notifs.rows) != 0 {
+		t.Errorf("the suggestion's notification was not deleted: %+v", notifs.rows)
 	}
 
 	// The plan is unchanged, so the matcher re-derives the suggestion —
@@ -468,8 +478,8 @@ func TestMortgageClassifyRejected(t *testing.T) {
 	if got := firstObjectInArray(t, rawJSONValueAt(t, out, "suggestions")); got != wantSuggestion {
 		t.Errorf("suggestions[0] = %s, want verbatim %s", got, wantSuggestion)
 	}
-	if len(notifs.rows) != 1 {
-		t.Errorf("rows after classify + revisit = %d, want 1 (no duplicates)", len(notifs.rows))
+	if len(notifs.rows) != 0 {
+		t.Errorf("rows after classify + revisit = %d, want 0 (the answered item's row was deleted and is never re-created)", len(notifs.rows))
 	}
 
 	// A later re-classification replaces the answer in place, and the
@@ -580,6 +590,111 @@ func TestMortgageClassifyValidation(t *testing.T) {
 		}
 		if len(m.Spec.RateEvents) != 0 {
 			t.Errorf("spec.rate_events = %#v, want none (a one-off writes no rate event)", m.Spec.RateEvents)
+		}
+	})
+}
+
+// TestAberrantNotificationSelfHeal pins the round-33 self-heal that
+// runs before GET /notifications serves the list: a
+// "mortgage_aberrant" row is purged when its (mortgage, kind, date)
+// item no longer needs classifying — the report no longer lists it, or
+// the mortgage no longer exists — and rows whose ref does not parse (or
+// carries no mortgage id) are stale by construction. A live item keeps
+// its row. A transient mortgage-store error leaves every row in place;
+// the list still answers 200 (best-effort: a notification write must
+// never change the response).
+func TestAberrantNotificationSelfHeal(t *testing.T) {
+	userID := "id-mort-a"
+	const (
+		extraBody = "Mortgage extra of 100.00 on 2026-01-22 needs classification"
+		shortBody = "Mortgage shortfall of 26.18 on 2026-03-01 needs classification"
+	)
+
+	newCase := func(t *testing.T) (*memMortgageStore, *memTxStore, *memNotificationStore, http.Handler, map[string]string) {
+		t.Helper()
+		store := &memMortgageStore{}
+		txs := &memTxStore{}
+		notifs := &memNotificationStore{}
+		h, key := newClassifyServer(t, newMortgageAccounts(), store, txs, notifs)
+		hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
+		return store, txs, notifs, h, hdr
+	}
+
+	// setup creates the mortgage, seeds the ExtrasAndShorts scenario,
+	// and runs the first matching GET (the lazy creation of the two
+	// notifications); it returns the mortgage id.
+	setup := func(t *testing.T, txs *memTxStore, h http.Handler, hdr map[string]string) string {
+		t.Helper()
+		id := createMatchMortgage(t, h, hdr)
+		seedExtrasAndShorts(t, txs)
+		code, out := doReq(t, h, http.MethodGet, "/api/v1/mortgages/"+id+"/matching", "", hdr)
+		if code != http.StatusOK {
+			t.Fatalf("get: status = %d, want 200 (body %s)", code, out)
+		}
+		return id
+	}
+
+	// staleRef seeds one stale "mortgage_aberrant" row (title == body,
+	// the single-sentence convention) with the given ref bytes.
+	staleRef := func(notifs *memNotificationStore, body, ref string, at time.Time) {
+		addNotif(notifs, userID, "mortgage_aberrant", body, body, []byte(ref), at, false)
+	}
+
+	t.Run("live rows stay, stale rows are purged", func(t *testing.T) {
+		_, txs, notifs, h, hdr := newCase(t)
+		id := setup(t, txs, h, hdr)
+		if len(notifs.rows) != 2 {
+			t.Fatalf("notifications = %d rows, want 2 (one per unclassified item)", len(notifs.rows))
+		}
+		base := time.Now().UTC().Add(-time.Hour)
+		// Stale: the pair is not in the current report.
+		staleRef(notifs, "Mortgage extra of 50.00 on 2026-09-09 needs classification",
+			`{"date":"2026-09-09","kind":"extra","mortgage_id":"`+id+`"}`, base)
+		// Stale: the ref does not parse (no report can own it).
+		staleRef(notifs, "broken ref", `{not json`, base.Add(time.Minute))
+		// Stale: the ref parses but carries no mortgage id.
+		staleRef(notifs, "no mortgage id", `{"date":"2026-01-22","kind":"extra"}`, base.Add(2*time.Minute))
+		// Stale: the mortgage no longer exists.
+		staleRef(notifs, "orphan", `{"date":"2026-01-22","kind":"extra","mortgage_id":"`+nextTestID()+`"}`, base.Add(3*time.Minute))
+
+		code, out := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", hdr)
+		if code != http.StatusOK {
+			t.Fatalf("notifications: status = %d, want 200 (body %s)", code, out)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("body is not JSON: %v (%s)", err, out)
+		}
+		seen := map[string]bool{}
+		for _, r := range rows {
+			seen[r["body"].(string)] = true
+		}
+		if len(rows) != 2 || !seen[extraBody] || !seen[shortBody] {
+			t.Fatalf("rows = %v, want exactly the two live items", rows)
+		}
+		if len(notifs.rows) != 2 {
+			t.Fatalf("store rows = %d, want 2 (the stale ones purged): %+v", len(notifs.rows), notifs.rows)
+		}
+	})
+
+	t.Run("a transient store error leaves every row", func(t *testing.T) {
+		store, txs, notifs, h, hdr := newCase(t)
+		id := setup(t, txs, h, hdr)
+		// A stale pair with a PARSEABLE ref: purged if the Get
+		// succeeds, left alone if it fails.
+		staleRef(notifs, "Mortgage extra of 50.00 on 2026-09-09 needs classification",
+			`{"date":"2026-09-09","kind":"extra","mortgage_id":"`+id+`"}`, time.Now().UTC().Add(-time.Hour))
+
+		store.getErr = errors.New("boom")
+		code, out := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", hdr)
+		if code != http.StatusOK {
+			t.Fatalf("notifications: status = %d, want 200 (body %s)", code, out)
+		}
+		if len(notifs.rows) != 3 {
+			t.Fatalf("store rows = %d, want 3 (the Get failed, nothing was purged): %+v", len(notifs.rows), notifs.rows)
+		}
+		if !strings.Contains(out, "2026-09-09") {
+			t.Fatalf("list = %s, want the stale row still listed", out)
 		}
 	})
 }

@@ -357,12 +357,14 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/categorise", h.postCategorise)
 		r.Get("/v1/categorise/{id}", h.getCategorise)
 		// Review queue (plan 5.5): the rows the categorise worker
-		// flagged for review, the per-row accept, the accept-all bulk
+		// flagged for review, the per-row accept, the per-row reject
+		// (round 33: resolve without a category), the accept-all bulk
 		// action (the static segment, distinct depth from /{id}/accept),
 		// and the single-row reprompt (re-run the LLM on one row).
 		r.Get("/v1/review", h.reviewList)
 		r.Post("/v1/review/accept-all", h.reviewAcceptAll)
 		r.Post("/v1/review/{id}/accept", h.reviewAccept)
+		r.Post("/v1/review/{id}/reject", h.reviewReject)
 		r.Post("/v1/review/{id}/reprompt", h.reviewReprompt)
 		// Offsets (migration 0012): the scan that proposes net-to-zero
 		// pairs, the pending suggestions and their accept/dismiss

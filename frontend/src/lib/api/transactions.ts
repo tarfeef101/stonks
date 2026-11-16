@@ -91,3 +91,27 @@ export function listTransactions(params: ListParams = {}): Promise<Transaction[]
 	const qs = q.toString();
 	return api<Transaction[]>(`/v1/transactions${qs ? `?${qs}` : ''}`);
 }
+
+/** The PATCH /v1/transactions/{id} body. Absent keys are left
+ * untouched by the server; an empty-string optional clears the column.
+ * Amount follows the same canonical grammar as creation. A transaction
+ * that is not the caller's answers 404. */
+export interface PatchTransactionInput {
+	account_id?: string;
+	amount?: string;
+	description?: string;
+	/** '' clears the category (re-flags the row for review). */
+	category_id?: string;
+	/** YYYY-MM-DD; '' clears the column. */
+	date_posted?: string;
+	/** YYYY-MM-DD; '' clears the column. */
+	date_executed?: string;
+	notes?: string;
+}
+
+/** Edits one of the caller's transactions (PATCH /v1/transactions/{id}
+ * — 200 + the updated row). Setting `category_id` to '' also re-flags
+ * the row `review_pending` so the review queue picks it back up. */
+export function patchTransaction(id: string, patch: PatchTransactionInput): Promise<Transaction> {
+	return api<Transaction>(`/v1/transactions/${id}`, { method: 'PATCH', body: patch });
+}

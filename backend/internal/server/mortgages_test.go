@@ -764,6 +764,148 @@ func TestMortgagesPatch(t *testing.T) {
 	expectAPIError(t, code, out, http.StatusNotFound, "not_found", "mortgage not found")
 }
 
+// TestMortgagesPatchClassifications covers the round-33
+// payment_classifications patch field: nil = untouched (an otherwise
+// empty patch 400s); a non-nil array FULLY replaces the stored
+// classifications (an empty array clears them — the only way to remove
+// a stored classification, since the classify endpoint upserts); each
+// element is validated with the classify endpoint's own rules
+// (classifyProblems), prefixed with the element's (kind, date); a
+// duplicate (kind, date) pair 400s; and the stored shape takes the
+// classify endpoint's convention — the three rate fields are set only
+// for a rate_change (canonical 2-decimal rate), nil for a one_off and
+// a rejected. The response never carries the field (the pinned wire
+// order in wantMortgageKeys has no place for it), so the stored shape
+// is asserted through the fake store.
+func TestMortgagesPatchClassifications(t *testing.T) {
+	store := &memMortgageStore{}
+	h, key := newMortgageServer(t, newMortgageAccounts(), store)
+	hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
+
+	code, out := doReq(t, h, http.MethodPost, "/api/v1/mortgages", baseMortgageBody(), hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("create: status = %d, want 201 (body %s)", code, out)
+	}
+	id1 := idFrom(t, out)
+	row := func() *repo.Mortgage {
+		if len(store.rows) != 1 {
+			t.Fatalf("store rows = %d, want 1", len(store.rows))
+		}
+		return &store.rows[0].m
+	}
+
+	// null = absent: with nothing else present, an empty patch.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1, `{"payment_classifications":null}`, hdr)
+	expectAPIError(t, code, out, http.StatusBadRequest, "invalid_request", "empty patch: provide at least one field")
+	if store.updateCalls != 0 {
+		t.Fatalf("store update calls = %d, want 0 (empty patch never reaches the store)", store.updateCalls)
+	}
+
+	// A valid two-element replacement: a one_off (no rate fields, must
+	// store them nil) and a rate_change (rate fields canonicalized to
+	// the 2-decimal string). The response omits the field entirely.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1,
+		`{"payment_classifications":[`+
+			`{"date":"2020-07-01","kind":"extra","classification":"one_off"},`+
+			`{"date":"2020-08-01","kind":"suggestion","classification":"rate_change","annual_rate":"5.5","rate_type":"variable","action":"keep_payment"}]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch classifications: status = %d, want 200 (body %s)", code, out)
+	}
+	if strings.Contains(out, "payment_classifications") {
+		t.Errorf("response body leaks payment_classifications: %s", out)
+	}
+	if keys := jsonKeyOrder(t, out); !reflect.DeepEqual(keys, wantMortgageKeys) {
+		t.Errorf("response keys = %v, want the pinned order (no classifications)", keys)
+	}
+	cls := row().Spec.PaymentClassifications
+	if len(cls) != 2 {
+		t.Fatalf("stored classifications = %v, want exactly 2", cls)
+	}
+	if cls[0].Date != "2020-07-01" || cls[0].Kind != "extra" || cls[0].Classification != "one_off" ||
+		cls[0].AnnualRate != nil || cls[0].RateType != nil || cls[0].Action != nil {
+		t.Errorf("one_off element = %+v, want nil rate fields", cls[0])
+	}
+	if cls[1].Date != "2020-08-01" || cls[1].Kind != "suggestion" || cls[1].Classification != "rate_change" ||
+		cls[1].AnnualRate == nil || *cls[1].AnnualRate != "5.50" ||
+		cls[1].RateType == nil || *cls[1].RateType != "variable" ||
+		cls[1].Action == nil || *cls[1].Action != "keep_payment" {
+		t.Errorf("rate_change element = %+v, want the verbatim fields and canonical 5.50/variable/keep_payment", cls[1])
+	}
+
+	// Replacement, not append: a one-element array replaces the two.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1,
+		`{"payment_classifications":[{"date":"2020-09-01","kind":"short","classification":"rejected"}]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch replace: status = %d, want 200 (body %s)", code, out)
+	}
+	cls = row().Spec.PaymentClassifications
+	if len(cls) != 1 || cls[0].Date != "2020-09-01" || cls[0].Kind != "short" ||
+		cls[0].Classification != "rejected" || cls[0].AnnualRate != nil ||
+		cls[0].RateType != nil || cls[0].Action != nil {
+		t.Fatalf("stored classifications = %v, want the single rejected short (full replacement, nil rate fields)", cls)
+	}
+
+	// An empty array is a valid full-array replacement: it clears.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1, `{"payment_classifications":[]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch clear: status = %d, want 200 (body %s)", code, out)
+	}
+	if len(row().Spec.PaymentClassifications) != 0 {
+		t.Fatalf("stored classifications = %v, want cleared", row().Spec.PaymentClassifications)
+	}
+
+	// Combined with another field: both apply in one update.
+	code, out = doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1,
+		`{"term_years":5,"payment_classifications":[{"date":"2020-07-01","kind":"extra","classification":"one_off"}]}`, hdr)
+	if code != http.StatusOK {
+		t.Fatalf("patch combined: status = %d, want 200 (body %s)", code, out)
+	}
+	if row().Spec.TermYears != 5 || len(row().Spec.PaymentClassifications) != 1 {
+		t.Errorf("combined patch left term/classifications = %d/%d, want 5/1",
+			row().Spec.TermYears, len(row().Spec.PaymentClassifications))
+	}
+
+	// Per-element 400s, EXACTLY as pinned. The prefix carries the
+	// element's (kind, date); the rest is classifyProblems verbatim.
+	// Nothing reaches the store.
+	classCases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"bad_date_form", `{"payment_classifications":[{"date":"2020/07/01","kind":"extra","classification":"one_off"}]}`,
+			"payment classification extra on 2020/07/01: date must be YYYY-MM-DD"},
+		{"bad_kind", `{"payment_classifications":[{"date":"2020-07-01","kind":"monthly","classification":"one_off"}]}`,
+			"payment classification monthly on 2020-07-01: kind must be extra, short or suggestion"},
+		{"bad_classification", `{"payment_classifications":[{"date":"2020-07-01","kind":"extra","classification":"ignored"}]}`,
+			"payment classification extra on 2020-07-01: classification must be one_off, rate_change or rejected"},
+		{"rate_change_missing_rate", `{"payment_classifications":[{"date":"2020-07-01","kind":"suggestion","classification":"rate_change","rate_type":"fixed","action":"re_amortize"}]}`,
+			"payment classification suggestion on 2020-07-01: annual_rate is required for a rate change"},
+		{"rate_change_non_positive", `{"payment_classifications":[{"date":"2020-07-01","kind":"suggestion","classification":"rate_change","annual_rate":"0","rate_type":"fixed","action":"re_amortize"}]}`,
+			"payment classification suggestion on 2020-07-01: annual_rate must be a positive amount"},
+		{"rate_change_bad_rate_type", `{"payment_classifications":[{"date":"2020-07-01","kind":"suggestion","classification":"rate_change","annual_rate":"5","rate_type":"arm","action":"re_amortize"}]}`,
+			"payment classification suggestion on 2020-07-01: rate_type must be fixed or variable"},
+		{"rate_change_bad_action", `{"payment_classifications":[{"date":"2020-07-01","kind":"suggestion","classification":"rate_change","annual_rate":"5","rate_type":"fixed","action":"swap"}]}`,
+			"payment classification suggestion on 2020-07-01: action must be re_amortize or keep_payment"},
+		{"duplicated_pair", `{"payment_classifications":[{"date":"2020-07-01","kind":"extra","classification":"one_off"},{"date":"2020-07-01","kind":"extra","classification":"rejected"}]}`,
+			"payment classification extra on 2020-07-01 is duplicated"},
+		{"two_problems_joined", `{"payment_classifications":[{"date":"bad","kind":"x","classification":"y"}]}`,
+			// Each problem carries its own prefix (self-contained when
+			// several elements fail in one body).
+			"payment classification x on bad: date must be YYYY-MM-DD; payment classification x on bad: kind must be extra, short or suggestion; payment classification x on bad: classification must be one_off, rate_change or rejected"},
+	}
+	for _, tc := range classCases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := store.updateCalls
+			code, out := doReq(t, h, http.MethodPatch, "/api/v1/mortgages/"+id1, tc.body, hdr)
+			expectAPIError(t, code, out, http.StatusBadRequest, "invalid_request", tc.want)
+			if store.updateCalls != before {
+				t.Errorf("store update calls = %d, want %d (400 before any store update)", store.updateCalls, before)
+			}
+		})
+	}
+}
+
 // TestMortgagesDelete covers DELETE: 204 (empty body) on success, 404
 // for an unknown well-formed id, and 404 for a malformed id without
 // reaching the store.

@@ -63,3 +63,11 @@ export function acceptAllReview(categoryId: string): Promise<{ applied: number }
 export function repromptReview(id: string): Promise<RepromptResult> {
 	return api<RepromptResult>(`/v1/review/${id}/reprompt`, { method: 'POST' });
 }
+
+/** Resolves one row WITHOUT a category (POST /v1/review/{id}/reject —
+ * no body): the row leaves the queue and stays uncategorized (the
+ * categorise worker will re-flag it on its next pass over the account).
+ * A row that is not in the caller's queue answers 404. */
+export function rejectReview(id: string): Promise<Transaction> {
+	return api<Transaction>(`/v1/review/${id}/reject`, { method: 'POST' });
+}

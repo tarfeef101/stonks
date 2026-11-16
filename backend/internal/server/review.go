@@ -2,11 +2,15 @@
 // queue the categorise worker flagged), POST
 // /api/v1/review/{id}/accept (resolve one row with one of the
 // caller's categories), POST /api/v1/review/accept-all (resolve every
-// row with one category) and POST /api/v1/review/{id}/reprompt
-// (re-run the LLM on one row). A row leaves the queue when it gets a
-// category: the queue predicate is review_pending = true AND
+// row with one category), POST /api/v1/review/{id}/reject (round 33:
+// resolve one row WITHOUT a category — the transaction stays
+// uncategorized) and POST /api/v1/review/{id}/reprompt (re-run the
+// LLM on one row). A row leaves the queue when it gets a category or
+// is rejected: the queue predicate is review_pending = true AND
 // category_id IS NULL, so a manual edit that sets a category resolves
-// the row too. Every store call is scoped to the caller's users.id.
+// the row too. Every store call is scoped to the caller's users.id;
+// after every mutation the "N transactions need review" notification
+// is reconciled to the live queue (round 33, best-effort).
 package server
 
 import (
@@ -31,6 +35,8 @@ type ReviewStore interface {
 	GetReviewPending(ctx context.Context, userID, id string, dek []byte) (repo.Transaction, error)
 	AcceptReview(ctx context.Context, userID, txnID, categoryID string) error
 	AcceptAll(ctx context.Context, userID, categoryID string) (int, error)
+	CountReviewPending(ctx context.Context, userID string) (int, error)
+	RejectReview(ctx context.Context, userID, txnID string) error
 }
 
 // CredentialResolver resolves the user's stored LLM credential, the
@@ -251,6 +257,46 @@ func (h *handler) reviewAccept(w http.ResponseWriter, r *http.Request) {
 	// mutation between load and response.
 	tx.CategoryID = b.CategoryID
 	tx.ReviewPending = false
+	h.syncReviewNotification(r.Context(), c)
+	writeJSON(w, http.StatusOK, toTransactionOut(tx))
+}
+
+// reviewReject serves POST /api/v1/review/{id}/reject (round 33, no
+// body): the user declines to categorize one review-pending row.
+// Non-destructive — the transaction stays uncategorized — but the row
+// leaves the queue (review_pending = false). House order as
+// reviewAccept: 503 before auth, 404 on a malformed id before the
+// store (existence is not disclosed), then the store error mapping;
+// the answer is 200 with the full updated row (the local-echo
+// pattern).
+func (h *handler) reviewReject(w http.ResponseWriter, r *http.Request) {
+	if h.review == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if !uuidShapeOK(id) {
+		writeAPIError(w, http.StatusNotFound, codeNotFound, "transaction not found")
+		return
+	}
+	tx, err := h.review.GetReviewPending(r.Context(), c.row.ID, id, c.dek)
+	if err != nil {
+		h.reviewError(w, "get", err)
+		return
+	}
+	if err := h.review.RejectReview(r.Context(), c.row.ID, id); err != nil {
+		h.reviewError(w, "reject", err)
+		return
+	}
+	// Apply the change locally and echo the full row: GetReviewPending
+	// already loaded (and decrypted) it, and RejectReview is the only
+	// mutation between load and response.
+	tx.ReviewPending = false
+	h.syncReviewNotification(r.Context(), c)
 	writeJSON(w, http.StatusOK, toTransactionOut(tx))
 }
 
@@ -280,6 +326,7 @@ func (h *handler) reviewAcceptAll(w http.ResponseWriter, r *http.Request) {
 		h.reviewError(w, "accept all", err)
 		return
 	}
+	h.syncReviewNotification(r.Context(), c)
 	writeJSON(w, http.StatusOK, acceptAllOut{Applied: n})
 }
 
@@ -313,6 +360,12 @@ func (h *handler) reviewReprompt(w http.ResponseWriter, r *http.Request) {
 		slog.Error("reprompt failed", "op", "reprompt", "transaction", id, "error", err)
 		writeAPIError(w, http.StatusInternalServerError, codeInternal, "reprompt failed")
 		return
+	}
+	// Only this call mutated the queue when applied (a not-applied
+	// reprompt either left the row pending or lost a race that the
+	// winning handler already reconciled).
+	if applied {
+		h.syncReviewNotification(r.Context(), c)
 	}
 	writeJSON(w, http.StatusOK, repromptOut{
 		Category:   sug.Category,

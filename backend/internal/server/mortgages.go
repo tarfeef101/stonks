@@ -114,21 +114,40 @@ type mortgageIn struct {
 // mortgagePatch is the PATCH body: the 8 spec fields plus the term
 // metadata (round 23), all optional (nil = untouched), at least one
 // present. rate_events, when non-nil, FULLY replaces the stored events
-// (an empty array clears them). account_id is immutable and NOT in the
-// patch DTO — a client-sent account_id is silently ignored by the
-// decoder.
+// (an empty array clears them); payment_classifications (round 33) does
+// the same for the stored aberrant-payment classifications — the only
+// way to clear or correct a mis-answered item, since the classify
+// endpoint upserts and never deletes. account_id is immutable and NOT
+// in the patch DTO — a client-sent account_id is silently ignored by
+// the decoder.
 type mortgagePatch struct {
-	Principal             *string     `json:"principal"`
-	AnnualRate            *string     `json:"annual_rate"`
-	AmortizationYears     *int        `json:"amortization_years"`
-	StartDate             *string     `json:"start_date"`
-	PaymentFrequency      *string     `json:"payment_frequency"`
-	ExtraPaymentAmount    *string     `json:"extra_payment_amount"`
-	ExtraPaymentFrequency *string     `json:"extra_payment_frequency"`
-	ExtraPrepaymentType   *string     `json:"extra_prepayment_type"`
-	TermYears             *int        `json:"term_years"`
-	RateType              *string     `json:"rate_type"`
-	RateEvents            []rateEvent `json:"rate_events"`
+	Principal              *string                 `json:"principal"`
+	AnnualRate             *string                 `json:"annual_rate"`
+	AmortizationYears      *int                    `json:"amortization_years"`
+	StartDate              *string                 `json:"start_date"`
+	PaymentFrequency       *string                 `json:"payment_frequency"`
+	ExtraPaymentAmount     *string                 `json:"extra_payment_amount"`
+	ExtraPaymentFrequency  *string                 `json:"extra_payment_frequency"`
+	ExtraPrepaymentType    *string                 `json:"extra_prepayment_type"`
+	TermYears              *int                    `json:"term_years"`
+	RateType               *string                 `json:"rate_type"`
+	RateEvents             []rateEvent             `json:"rate_events"`
+	PaymentClassifications []paymentClassification `json:"payment_classifications"`
+}
+
+// paymentClassification is one element of the patch's
+// payment_classifications array (round 33): the same field set and
+// rules as the classify endpoint's body (classifyIn), so an element
+// that could not have been recorded by classify is rejected here too.
+// The three rate fields are only meaningful for a rate_change; a
+// one_off and a rejected ignore them.
+type paymentClassification struct {
+	Date           string `json:"date"`
+	Kind           string `json:"kind"`
+	Classification string `json:"classification"`
+	AnnualRate     string `json:"annual_rate"`
+	RateType       string `json:"rate_type"`
+	Action         string `json:"action"`
 }
 
 // todayUTCMidnight is the server's current calendar date at UTC
@@ -330,6 +349,27 @@ func (h *handler) validateMortgagePatch(p *mortgagePatch, stored *repo.Mortgage)
 		p.ExtraPaymentAmount, p.ExtraPaymentFrequency, p.ExtraPrepaymentType,
 		p.AmortizationYears, p.TermYears, p.RateType, p.RateEvents, eventStart,
 	)
+	// payment_classifications (round 33): each element is validated with
+	// the classify endpoint's own rules (classifyProblems — no drift),
+	// prefixed with the element's (kind, date) so several bad elements
+	// stay readable when joined; the stored array keys on that pair, so
+	// a duplicate is a 400 (classify's upsert would silently pick one).
+	// No check against the CURRENT matching report: a classification may
+	// outlive its item (the data can change), and the replacement is a
+	// statement of intent, not a per-item action.
+	seen := make(map[[2]string]bool, len(p.PaymentClassifications))
+	for _, pc := range p.PaymentClassifications {
+		key := [2]string{pc.Kind, pc.Date}
+		if seen[key] {
+			problems = append(problems, "payment classification "+pc.Kind+" on "+pc.Date+" is duplicated")
+		}
+		seen[key] = true
+		b := classifyIn{Date: pc.Date, Kind: pc.Kind, Classification: pc.Classification,
+			AnnualRate: pc.AnnualRate, RateType: pc.RateType, Action: pc.Action}
+		for _, pr := range classifyProblems(b) {
+			problems = append(problems, "payment classification "+pc.Kind+" on "+pc.Date+": "+pr)
+		}
+	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
 	}
@@ -505,7 +545,8 @@ func (h *handler) mortgagesUpdate(w http.ResponseWriter, r *http.Request) {
 	if p.Principal == nil && p.AnnualRate == nil && p.AmortizationYears == nil &&
 		p.StartDate == nil && p.PaymentFrequency == nil && p.ExtraPaymentAmount == nil &&
 		p.ExtraPaymentFrequency == nil && p.ExtraPrepaymentType == nil &&
-		p.TermYears == nil && p.RateType == nil && p.RateEvents == nil {
+		p.TermYears == nil && p.RateType == nil && p.RateEvents == nil &&
+		p.PaymentClassifications == nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "empty patch: provide at least one field")
 		return
 	}
@@ -577,6 +618,27 @@ func (h *handler) mortgagesUpdate(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		patch.RateEvents = events
+	}
+	if p.PaymentClassifications != nil {
+		// Full-array replacement (round 33): the elements take the
+		// stored shape of the classify endpoint — the rate fields are
+		// set only for a rate_change (canonical 2-decimal rate), nil
+		// for a one_off and a rejected. A non-nil empty slice clears
+		// the stored classifications. Rate EVENTS are not touched here:
+		// they stay under rate_events (and the classify endpoint).
+		cls := make([]repo.PaymentClassification, 0, len(p.PaymentClassifications))
+		for _, pc := range p.PaymentClassifications {
+			out := repo.PaymentClassification{Date: pc.Date, Kind: pc.Kind, Classification: pc.Classification}
+			if pc.Classification == "rate_change" {
+				rate, _ := repo.CanonicalAmount(pc.AnnualRate) // validated above
+				rateType, action := pc.RateType, pc.Action
+				out.AnnualRate = &rate
+				out.RateType = &rateType
+				out.Action = &action
+			}
+			cls = append(cls, out)
+		}
+		patch.PaymentClassifications = cls
 	}
 	m, err = h.mortgages.Update(r.Context(), c.row.ID, id, patch, c.dek)
 	if err != nil {
