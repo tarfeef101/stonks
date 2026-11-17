@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 const (
@@ -126,9 +127,22 @@ func Rewrap(oldKek, newKek, wrapped []byte) ([]byte, error) {
 	return WrapDEK(newKek, dek)
 }
 
+// aeadCache caches built AES-256-GCM AEADs by raw key bytes so the hot
+// paths (every Seal/Open, every DEK unwrap) skip cipher construction.
+// cipher.AEAD is safe for concurrent use, so a shared instance is
+// correct. All keys are 32 bytes (KEK and DEK alike), so the cache is
+// bounded by the number of distinct keys in the process: one entry for
+// the KEK plus one per user DEK ever unwrapped. Entries are never evicted
+// because keys never change (see bootstrap's DEK cache for the only
+// re-key path, which rewrites the pack, not the DEK).
+var aeadCache sync.Map // map[string]cipher.AEAD
+
 func newAEAD(key []byte) (cipher.AEAD, error) {
 	if len(key) != DEKSize {
 		return nil, fmt.Errorf("crypto: key must be %d bytes, got %d", DEKSize, len(key))
+	}
+	if v, ok := aeadCache.Load(string(key)); ok {
+		return v.(cipher.AEAD), nil
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -137,6 +151,11 @@ func newAEAD(key []byte) (cipher.AEAD, error) {
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("crypto: gcm: %w", err)
+	}
+	// LoadOrStore: a concurrent call may have built the same AEAD
+	// between our miss and store; either instance is equivalent.
+	if v, loaded := aeadCache.LoadOrStore(string(key), gcm); loaded {
+		return v.(cipher.AEAD), nil
 	}
 	return gcm, nil
 }

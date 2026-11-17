@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"time"
 
 	"finance-tracker/internal/authn"
 	"finance-tracker/internal/crypto"
@@ -90,6 +92,12 @@ type Bootstrap struct {
 	store  UserStore
 	kek    []byte
 	mailer mail.Sender
+
+	// dekCache holds unwrapped per-user DEKs, keyed by users.id and
+	// guarded by mu (see UnwrapDEK). It is bounded by the number of
+	// users this process has served.
+	mu       sync.Mutex
+	dekCache map[string]dekCacheEntry
 }
 
 // NewBootstrap returns a Bootstrap. It fails fast on a nil store or a KEK
@@ -102,7 +110,7 @@ func NewBootstrap(store UserStore, kek []byte, mailer mail.Sender) (*Bootstrap, 
 	if len(kek) != crypto.KEKSize {
 		return nil, fmt.Errorf("server: KEK must be %d bytes, got %d", crypto.KEKSize, len(kek))
 	}
-	return &Bootstrap{store: store, kek: kek, mailer: mailer}, nil
+	return &Bootstrap{store: store, kek: kek, mailer: mailer, dekCache: map[string]dekCacheEntry{}}, nil
 }
 
 // EnsureUser idempotently creates the users row for id. The first call
@@ -152,14 +160,50 @@ func (b *Bootstrap) EnsureUser(ctx context.Context, id authn.Identity) (UserRow,
 	return row, nil
 }
 
+// dekCacheEntry is one cached unwrapped DEK.
+type dekCacheEntry struct {
+	dek     []byte
+	expires time.Time
+}
+
+// dekCacheTTL is how long an unwrapped DEK may sit in memory. A DEK is
+// minted exactly once (at user creation) and the app never re-keys it —
+// KEK rotation re-wraps the pack but the DEK bytes stay the same — so a
+// cached entry stays valid for the user's whole life. The TTL is pure
+// hygiene: it bounds how long a live DEK lingers in process memory
+// (crash dumps, heap snapshots) at the cost of one GCM unwrap per user
+// per 5 minutes, which is negligible against the per-request Seal/Open
+// work it used to replace on every handler.
+const dekCacheTTL = 5 * time.Minute
+
 // UnwrapDEK opens the row's wrapped DEK pack with the KEK so handlers can
 // pass the raw key to the repo layer (step 3.1). A pack that does not
 // open means the row was written under a different KEK (or is corrupt):
 // callers 500 it — re-wrapping would lose the data the old key sealed.
+// Successful unwraps are cached per users.id for dekCacheTTL (the DEK
+// never changes after creation, so a stale entry can never be wrong);
+// failed unwraps are never cached and surface the exact error as before.
 func (b *Bootstrap) UnwrapDEK(row UserRow) ([]byte, error) {
+	if row.ID != "" {
+		b.mu.Lock()
+		if e, ok := b.dekCache[row.ID]; ok {
+			if time.Now().Before(e.expires) {
+				b.mu.Unlock()
+				return e.dek, nil
+			}
+			// Expired: drop it so the map doesn't hold stale key bytes.
+			delete(b.dekCache, row.ID)
+		}
+		b.mu.Unlock()
+	}
 	dek, err := crypto.UnwrapDEK(b.kek, row.WrappedDEK)
 	if err != nil {
 		return nil, fmt.Errorf("server: unwrap DEK for %s: %w", row.Sub, err)
+	}
+	if row.ID != "" {
+		b.mu.Lock()
+		b.dekCache[row.ID] = dekCacheEntry{dek: dek, expires: time.Now().Add(dekCacheTTL)}
+		b.mu.Unlock()
 	}
 	return dek, nil
 }
