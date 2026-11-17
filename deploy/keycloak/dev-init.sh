@@ -4,7 +4,8 @@
 # Phase 1 — first boot only (detected by an empty Keycloak DB):
 #   * `kc.sh import --file <realm json> --override false` — OFFLINE import
 #     of the committed deploy/keycloak/finance-realm.json (master realm,
-#     'finance' realm, finance-spa + finance-api clients, one test user)
+#     'finance' realm, finance-spa + finance-api clients — no users: the
+#     test user is created/synced in phase 2, never imported)
 #     directly into the ftrk-kc-data volume, with the server NOT running.
 #     `kcadm.sh import` was REMOVED in Keycloak 26.8 (verified in 26.8.1);
 #     `kc.sh import` is the offline 26.x replacement. (KC_BOOTSTRAP_KEYCLOAK_IMPORT
@@ -31,9 +32,12 @@
 # Phase 2 — every boot:
 #   * start `kc.sh start-dev` in the background,
 #   * wait for the readiness endpoint (no curl/wget in the image — bash /dev/tcp),
-#   * sync the test user's password via the RAW admin API (bash /dev/tcp):
-#     mint a FRESH master-realm admin token (admin-cli password grant),
-#     then PUT /admin/realms/finance/users/<id>/reset-password — 204 expected.
+#   * ensure the test user EXISTS and sync its password via the RAW admin
+#     API (bash /dev/tcp): mint a FRESH master-realm admin token
+#     (admin-cli password grant), resolve the user's id with GET
+#     /admin/realms/finance/users?username=test (create it with POST
+#     /admin/realms/finance/users — 201 — if absent), then PUT
+#     /admin/realms/finance/users/<id>/reset-password — 204 expected.
 #     kcadm is deliberately NOT used here: kcadm 26.8 caches tokens per
 #     (server, realm) in $HOME/.keycloak/kcadm.config, and the admin user
 #     exists only in the master realm — `kcadm --realm finance` finds no
@@ -49,8 +53,9 @@
 #     verified), so the GET-modify-PUT round-trip (the same one the admin
 #     console does) is the partial-update path. The session max lifespan
 #     is raised with the token because Keycloak CAPS the access-token
-#     expiry at ssoSessionMaxLifespan (empirically: max 36000 → expires_in
-#     36000 even with a 604800 lifespan; both 604800 → 604800).
+#     expiry at ssoSessionMaxLifespan (empirically: max 36000 capped
+#     expires_in at 36000 even with a 604800 access-token lifespan; with
+#     both set to the same N the token expires in N — here 3600).
 #     finance-realm.json sets neither field, so the global defaults apply
 #     (300s access token) — the 5-minute token made the SPA's session
 #     expire constantly. The offline import (phase 1) runs on the FIRST
@@ -72,7 +77,7 @@
 #   KC_BOOTSTRAP_ADMIN_USERNAME / KC_BOOTSTRAP_ADMIN_PASSWORD  (compose sets)
 #   KC_HEALTH_ENABLED=true / KC_HTTP_MANAGEMENT_HEALTH_ENABLED (compose sets)
 #   FTRK_TEST_USER_PASSWORD                                    (compose, default test1234)
-#   FTRK_ACCESS_TOKEN_LIFESPAN                                 (compose, default 604800)
+#   FTRK_ACCESS_TOKEN_LIFESPAN                                 (compose, default 3600)
 set -euo pipefail
 
 SERVER="http://127.0.0.1:8080"
@@ -84,21 +89,20 @@ ADMIN_PASS="${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}"
 TEST_USER="test"
 TEST_PASS="${FTRK_TEST_USER_PASSWORD:-test1234}"
 # Access-token lifespan for realm 'finance', in seconds (round 9). Keycloak's
-# default is 60s, which made the SPA's session expire constantly; 604800
-# (a week) keeps a signed-in browser session valid across reboots of the
-# IdP. MUST be a positive integer — validated before the server starts so
-# a typo in .env fails the container loudly instead of 400-ing at sync time.
-LIFESPAN="${FTRK_ACCESS_TOKEN_LIFESPAN:-604800}"
+# default is 60s, which made the SPA's session expire constantly. Default is
+# now 3600 (2026-11-16: down from 604800) — a week of token lifetime bought
+# reboot-survival the SPA doesn't need (the oidc-client silent refresh
+# renews active sessions well before an hour) while leaving a stolen token
+# valid for a week. 1h keeps dev sessions comfortable without that exposure.
+# MUST be a positive integer — validated before the server starts so a typo
+# in .env fails the container loudly instead of 400-ing at sync time.
+LIFESPAN="${FTRK_ACCESS_TOKEN_LIFESPAN:-3600}"
 case "$LIFESPAN" in
   '' | *[!0-9]*)
     echo "dev-init: ERROR: FTRK_ACCESS_TOKEN_LIFESPAN must be a positive integer (seconds), got '$LIFESPAN'" >&2
     exit 1
     ;;
 esac
-# Fixed id from finance-realm.json — the offline import preserves it
-# (verified via GET /admin/realms/finance/users?max=10).
-TEST_USER_ID="11111111-2222-3333-4444-555555555555"
-
 # --- Phase 1: first-boot-only offline import --------------------------------
 if [ ! -e "$H2_FILE" ]; then
   echo "dev-init: fresh Keycloak DB — importing realm '$REALM' from $IMPORT_FILE"
@@ -161,16 +165,53 @@ mint_admin_token() {
 }
 
 # PUT the test user's password via the raw admin API (see header for why
-# not kcadm). Expects "HTTP/1.1 204 No Content".
+# not kcadm). Expects "HTTP/1.1 204 No Content". The user's id is resolved
+# per boot by fetch_test_user_id — it is not a fixed constant anymore.
 sync_test_user_password() {
-  local token json resp_line
+  local user_id="$1" token json resp_line
   token=$(mint_admin_token) || return 1
   json="{\"type\":\"password\",\"value\":\"${TEST_PASS}\"}"
   exec 3<> /dev/tcp/127.0.0.1/8080
-  printf 'PUT /admin/realms/%s/users/%s/reset-password HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$REALM" "$TEST_USER_ID" "$token" "${#json}" "$json" >&3
+  printf 'PUT /admin/realms/%s/users/%s/reset-password HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$REALM" "$user_id" "$token" "${#json}" "$json" >&3
   IFS= read -r resp_line <&3 || resp_line=""
   exec 3>&-
   [[ "$resp_line" == *" 204 "* ]]
+}
+
+# Resolve the test user's id via GET /admin/realms/finance/users?username=test
+# and print it on stdout. The response is a single-line JSON array with at
+# most one element (the username filter), so the pure-bash split + sed
+# pattern from fetch_realm_json (the image has no jq/awk) is complete; the
+# greedy sed match is safe because a user representation carries exactly one
+# "id" key. Fails on connection error, non-200, or an empty array (user
+# absent). Deliberately NO `| head -n 1`: under pipefail, head closing the
+# pipe early would SIGPIPE the producer and fail the function for no reason.
+fetch_test_user_id() {
+  local token raw id
+  token=$(mint_admin_token) || return 1
+  exec 3<> /dev/tcp/127.0.0.1/8080
+  printf 'GET /admin/realms/%s/users?username=%s HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nConnection: close\r\n\r\n' "$REALM" "$TEST_USER" "$token" >&3
+  raw=$(tr -d '\r' <&3)
+  exec 3>&-
+  [[ "${raw%%$'\n'*}" == *" 200 "* ]] || return 1
+  id=$(printf '%s' "${raw#*$'\n\n'}" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  [[ -n "$id" ]] || return 1
+  printf '%s' "$id"
+}
+
+# Create the test user (first boot — the committed realm JSON is user-free,
+# see phase 1). The password is NOT set here: sync_test_user_password
+# follows and resets it, so FTRK_TEST_USER_PASSWORD stays the single source
+# of truth for the credential. Expects "HTTP/1.1 201 Created".
+create_test_user() {
+  local token json resp_line
+  token=$(mint_admin_token) || return 1
+  json="{\"username\":\"${TEST_USER}\",\"enabled\":true,\"email\":\"test@localhost\",\"emailVerified\":true,\"firstName\":\"Test\",\"lastName\":\"User\"}"
+  exec 3<> /dev/tcp/127.0.0.1/8080
+  printf 'POST /admin/realms/%s/users HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' "$REALM" "$token" "${#json}" "$json" >&3
+  IFS= read -r resp_line <&3 || resp_line=""
+  exec 3>&-
+  [[ "$resp_line" == *" 201 "* ]]
 }
 
 # GET the full realm representation via the raw admin API and print the
@@ -224,11 +265,27 @@ sync_access_token_lifespan() {
   [[ "$resp_line" == *" 204 "* ]]
 }
 
-# Idempotent: keeps the test user's password in sync with the docs even if
-# the realm JSON's credential ever changes. Runs on every boot (the realm
-# import itself happened in phase 1, on the very first boot only).
-if ! sync_test_user_password; then
-  echo "dev-init: ERROR: could not sync test user '$TEST_USER' password via the admin API. Most likely the admin-cli password grant 401'd: if KC_ADMIN_PASSWORD in .env was changed after the first boot, the DB still holds the OLD password (Keycloak does not re-sync it from env on later boots). Stop the stack and delete the ftrk-kc-data volume to re-import (docs/DEVELOPMENT.md)." >&2
+# Idempotent: ensures the test user exists (created on first boot — the
+# realm import no longer carries it) and keeps its password in sync with
+# the docs. Runs on every boot (the realm import itself happened in phase
+# 1, on the very first boot only). The user's id is resolved per boot via
+# the admin API — it is not fixed — so deleting the user, or re-importing
+# a realm that assigns a different id, self-heals on the next boot.
+if ! TEST_USER_ID=$(fetch_test_user_id); then
+  if ! create_test_user; then
+    echo "dev-init: ERROR: could not create test user '$TEST_USER' via the admin API (POST expected 201). Most likely the admin-cli password grant 401'd: if KC_ADMIN_PASSWORD in .env was changed after the first boot, the DB still holds the OLD password (Keycloak does not re-sync it from env on later boots). Stop the stack and delete the ftrk-kc-data volume to re-import (docs/DEVELOPMENT.md)." >&2
+    kill -TERM "$KC_PID" 2>/dev/null || true
+    exit 1
+  fi
+  echo "dev-init: test user '$TEST_USER' created"
+  if ! TEST_USER_ID=$(fetch_test_user_id); then
+    echo "dev-init: ERROR: test user '$TEST_USER' was created (POST 201) but GET users?username=$TEST_USER still resolves no id — giving up." >&2
+    kill -TERM "$KC_PID" 2>/dev/null || true
+    exit 1
+  fi
+fi
+if ! sync_test_user_password "$TEST_USER_ID"; then
+  echo "dev-init: ERROR: could not sync test user '$TEST_USER' password via the admin API (reset-password expected 204). Most likely the admin-cli password grant 401'd: if KC_ADMIN_PASSWORD in .env was changed after the first boot, the DB still holds the OLD password (Keycloak does not re-sync it from env on later boots). Stop the stack and delete the ftrk-kc-data volume to re-import (docs/DEVELOPMENT.md)." >&2
   kill -TERM "$KC_PID" 2>/dev/null || true
   exit 1
 fi

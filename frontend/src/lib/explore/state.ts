@@ -112,10 +112,13 @@ function isValidDate(s: string): boolean {
 	return d >= 1 && d <= max;
 }
 
-/** The Explore page's "last settings" localStorage key (house ftrk-
+/** The Explore page's "last settings" sessionStorage key (house ftrk-
  * prefix): the full canonical state string the page last held. The
- * Explore page rewrites it on every change (a bare /explore reopens
- * it); the dashboard's "add current view" tile reads it. */
+ * Explore page rewrites it on every change (a bare /explore in the same
+ * tab reopens it); the dashboard's "add current view" tile reads it.
+ * sessionStorage, not localStorage: the settings are a tab's working
+ * state — they die with the tab and must not leak into other tabs or
+ * later sessions. */
 export const EXPLORE_STATE_KEY = 'ftrk-explore-state';
 
 /** Parses a query string WITHOUT a leading '?' into the full state.

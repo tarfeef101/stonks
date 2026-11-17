@@ -336,6 +336,7 @@
 		"sign_out": "Sign out",
 		"signing_in": "Signing in…",
 		"error_title": "Sign-in failed",
+		"callback_failed": "Sign-in could not be completed. Please go home and try again.",
 		"go_home": "Go home",
 		"complete_onboarding": "Complete onboarding",
 		"session_expired_title": "Session expired",

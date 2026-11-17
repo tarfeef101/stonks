@@ -90,6 +90,15 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
+      # LLM endpoint SRF guard (internal/llm): comma-separated CIDRs /
+      # bare IPs the LLM base URL may additionally resolve to. Unset/
+      # empty = no extra admission (the strict policy then admits only
+      # public https); the always-rejected set (cloud metadata /
+      # link-local, ::1, 0.0.0.0) is never admitted. Dev default = this
+      # project's docker bridge subnet (verified with `docker network
+      # inspect`), so the opt-in `make dev-llm` llama service is
+      # reachable.
+      FTRK_LLM_ENDPOINT_CIDRS: ${FTRK_LLM_ENDPOINT_CIDRS:-172.19.0.0/16}
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,6 +136,10 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
+      # Mirrors the backend's LLM endpoint SRF guard (see the comment on
+      # the backend service above): dev default = this project's bridge
+      # subnet so the llama service is dialable.
+      FTRK_LLM_ENDPOINT_CIDRS: ${FTRK_LLM_ENDPOINT_CIDRS:-172.19.0.0/16}
       # FI sync (step 9.2): dev-only fake adapter + the 8.3 clock override.
       FI_FAKE_ADAPTERS: ${FI_FAKE_ADAPTERS:-}
       FI_FAKE_ADAPTER_FAIL: ${FI_FAKE_ADAPTER_FAIL:-}
@@ -230,13 +243,16 @@ services:
       KC_HEALTH_ENABLED: "true"
       KC_HTTP_MANAGEMENT_HEALTH_ENABLED: "false"
       FTRK_TEST_USER_PASSWORD: ${FTRK_TEST_USER_PASSWORD:-test1234}
-      # Realm 'finance' access-token lifespan in seconds (round 9). Keycloak's
+      # Realm 'finance' access-token lifespan in seconds (round 9; default
+      # 3600 since 2026-11-16 — down from 604800: a week of token lifetime
+      # was stale-token exposure the SPA didn't need, because its silent
+      # refresh renews active sessions well before an hour). Keycloak's
       # default is 60s, which made SPA sessions expire constantly — a stale
       # token 401s on the next API call and the page shows raw error JSON.
-      # 604800 = one week. dev-init.sh syncs it to the persisted realm on
-      # EVERY boot (the first-boot offline import does not re-apply env), so
-      # changing this in .env takes effect on the next `docker compose up`.
-      FTRK_ACCESS_TOKEN_LIFESPAN: ${FTRK_ACCESS_TOKEN_LIFESPAN:-604800}
+      # dev-init.sh syncs it to the persisted realm on EVERY boot (the
+      # first-boot offline import does not re-apply env), so changing this
+      # in .env takes effect on the next `docker compose up`.
+      FTRK_ACCESS_TOKEN_LIFESPAN: ${FTRK_ACCESS_TOKEN_LIFESPAN:-3600}
     ports:
       - "18081:8080"
     volumes:

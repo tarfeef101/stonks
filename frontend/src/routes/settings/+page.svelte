@@ -578,6 +578,8 @@
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('settings.api_key_label')}</span>
 					<input
+						type="password"
+						autocomplete="new-password"
 						class="w-full max-w-md rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
 						value={apiKey}
 						oninput={(e) => {

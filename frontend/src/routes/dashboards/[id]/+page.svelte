@@ -3,8 +3,6 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { _ } from 'svelte-i18n';
-	import DOMPurify from 'dompurify';
-	import { marked } from 'marked';
 	import { user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
 	import {
@@ -27,14 +25,16 @@
 		withoutRange,
 		type Names
 	} from '#lib/explore/state';
+	import { renderMarkdown } from '#lib/markdown';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
 
 	// Dashboard editor (rounds 6–7): one dashboard's 12-col × N-row
 	// widget grid (fixed 120px row pitch at md+ — the card bodies
 	// scroll inside). A widget is either a card whose body is the
 	// shared ExploreView over the widget's stored (canonical) explore
-	// state, or a markdown text card (marked → DOMPurify → @html —
-	// user text is untrusted). Resize is desktop-window-style drag:
+	// state, or a markdown text card (renderMarkdown — marked → DOMPurify
+	// allowlist → @html; user text is untrusted). Resize is
+	// desktop-window-style drag:
 	// the right edge (width), the bottom edge (height), the corner
 	// (both) — pointer-captured, live-previewed, one PATCH on
 	// release — with the ⋯ menu's width/height selects as the a11y
@@ -633,15 +633,6 @@
 		return '';
 	}
 
-	/** Renders a markdown widget's body: marked → DOMPurify
-	 * (sanitized before the @html — user-authored text is not
-	 * trusted). Runs on each render of a markdown card (cheap for
-	 * note-sized text — same stance as parseState in the explore
-	 * cards). */
-	function renderMarkdown(src: string): string {
-		return DOMPurify.sanitize(marked.parse(src, { async: false }) as string);
-	}
-
 	// --- Widget ops ---------------------------------------------------------
 
 	/** Resizes the widget's width (the ⋯ menu's width select — the
@@ -784,13 +775,13 @@
 		}
 	}
 
-	/** The Explore page's remembered last settings — its localStorage
+	/** The Explore page's remembered last settings — its sessionStorage
 	 * last-settings (the same key the page writes on every change);
 	 * '' when none (the default view). A read failure is the same as
 	 * none. */
 	function rememberedExploreState(): string {
 		try {
-			return window.localStorage.getItem(EXPLORE_STATE_KEY) ?? '';
+			return window.sessionStorage.getItem(EXPLORE_STATE_KEY) ?? '';
 		} catch {
 			// storage unavailable (private mode) — the default view
 			return '';

@@ -114,7 +114,14 @@ const RETURN_TO_KEY = 'ftrk-return-to';
 
 function stashReturnTo(returnTo: string | undefined): void {
 	try {
-		if (returnTo) window.localStorage.setItem(RETURN_TO_KEY, returnTo);
+		// Stash the pathname ONLY (L44): the callback hands the target to
+		// goto(resolve(...)), which wants a bare route path — a stashed
+		// query/hash would survive the resolve and ride along into the
+		// post-login URL. Every call site passes
+		// page.url.pathname + page.url.search, so trimming here covers
+		// them all.
+		const path = returnTo?.split(/[?#]/)[0];
+		if (path) window.localStorage.setItem(RETURN_TO_KEY, path);
 		else window.localStorage.removeItem(RETURN_TO_KEY);
 	} catch {
 		/* storage unavailable: the callback falls back to '/' */
@@ -157,8 +164,9 @@ let redirectInFlightTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
  * Redirect to the IdP login screen. `returnTo` (a same-origin relative
- * path) is stashed in localStorage for the /auth/callback page to read —
- * see the RETURN_TO_KEY note above.
+ * URL — only its pathname is stashed; query/hash are dropped) is kept in
+ * localStorage for the /auth/callback page to read — see the
+ * RETURN_TO_KEY note above.
  */
 export function login(returnTo?: string): void {
 	if (redirectInFlight) return;
@@ -199,7 +207,17 @@ export async function signInCallback(): Promise<void> {
 	const c = client();
 	signInInFlight = true;
 	try {
-		setStoreUser(await c.signinRedirectCallback(window.location.href));
+		// signinCallback, NOT signinRedirectCallback: this same URL also
+		// hosts the SILENT-RENEW iframe's landing. oidc-client-ts
+		// dispatches on the state's request type — si:r → redirect
+		// exchange in this document; si:s → notify the parent that
+		// spawned the iframe, and the PARENT performs the exchange.
+		// Calling signinRedirectCallback from the silent child never
+		// notifies the parent, so the renew hits its 10 s timeout and the
+		// user is dropped. (The store write here is inert in the child
+		// case — separate document context; the WebStorageStateStore is
+		// written by the parent's exchange, not by this call.)
+		setStoreUser((await c.signinCallback(window.location.href)) ?? null);
 		// The exchange succeeded: clear any dialog the race above raised,
 		// and keep 401s from re-raising it for a short grace window while
 		// the layout settles on the new user (a late 401 from the

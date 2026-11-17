@@ -35,29 +35,31 @@
 			// must decide the redirect target before navigating.)
 			// Both targets are internal paths — resolve() keeps base-path
 			// deployments working. `target` is typed as a parameterless
-			// route id with an optional query string: login() only ever
-			// stashes page.url.pathname + page.url.search, and
-			// readReturnTo() re-validates the relative-path rule, so the
-			// target is one of this app's own routes. The parameterized
-			// route id is EXCLUDED from the cast because SvelteKit 3's
-			// typed resolve() demands a second params argument for those
-			// (ResolveArgs in $app/paths); a plain string or the full
-			// RouteIdWithSearchOrHash union is rejected. At runtime this
-			// is harmless — resolve() only treats bracketed ids as routes
-			// and any other absolute path as a plain pathname to prefix
-			// with the base path.
+			// route id: login() stashes the pathname ONLY (stashReturnTo
+			// trims at the first ? / #) and readReturnTo() re-validates
+			// the relative-path rule, so the target is one of this app's
+			// own routes. The parameterized route id is EXCLUDED from the
+			// cast because SvelteKit 3's typed resolve() demands a second
+			// params argument for those (ResolveArgs in $app/paths); a
+			// plain string or the full RouteIdWithSearchOrHash union is
+			// rejected. At runtime this is harmless — resolve() only
+			// treats bracketed ids as routes and any other absolute path
+			// as a plain pathname to prefix with the base path.
 			const st = await loadSettings();
 			const target = (st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')) as
-				| Exclude<RouteId, '/dashboards/[id]'>
-				| `${Exclude<RouteId, '/dashboards/[id]'>}?${string}`;
+				Exclude<RouteId, '/dashboards/[id]'>;
 			clearReturnTo();
 			goto(resolve(target), { replaceState: true });
 		} catch (e) {
 			// e.g. visiting /auth/callback directly with no pending state,
 			// or a state mismatch (double-clicked sign-in): the stale user
 			// was already cleared by signInCallback, so this renders the
-			// error card over a clean signed-out state.
-			error = e instanceof Error ? e.message : String(e);
+			// error card over a clean signed-out state. The raw error
+			// stays in the console only — IdP error bodies can echo the
+			// callback URL (state blob included), which the UI should not
+			// show.
+			console.error('[auth] OIDC callback failed:', e);
+			error = $_('auth.callback_failed');
 		}
 	});
 </script>

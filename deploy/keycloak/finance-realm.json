@@ -65,23 +65,5 @@
       "fullScopeAllowed": false,
       "protocolMappers": []
     }
-  ],
-  "users": [
-    {
-      "id": "11111111-2222-3333-4444-555555555555",
-      "username": "test",
-      "enabled": true,
-      "email": "test@localhost",
-      "emailVerified": true,
-      "firstName": "Test",
-      "lastName": "User",
-      "requiredActions": [],
-      "credentials": [
-        {
-          "type": "password",
-          "value": "test1234"
-        }
-      ]
-    }
   ]
 }

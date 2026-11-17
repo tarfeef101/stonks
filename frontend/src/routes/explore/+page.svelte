@@ -62,7 +62,7 @@
 		if (qs !== '') return parseState(qs);
 		let stored = '';
 		try {
-			stored = window.localStorage.getItem(EXPLORE_STATE_KEY) ?? '';
+			stored = window.sessionStorage.getItem(EXPLORE_STATE_KEY) ?? '';
 		} catch {
 			// storage unavailable (private mode) — the defaults
 		}
@@ -133,7 +133,7 @@
 		// mode) is a silent no-op — the URL stays the shareable source
 		// of truth.
 		try {
-			window.localStorage.setItem(EXPLORE_STATE_KEY, qs);
+			window.sessionStorage.setItem(EXPLORE_STATE_KEY, qs);
 		} catch {
 			// storage unavailable — skip the remember
 		}

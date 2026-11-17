@@ -1,14 +1,22 @@
 # Personal Finance Tracker — frontend
 #
-# Stage 1: build the SvelteKit SPA in node:26.13.0 (pinned in .tool-versions
-# and the Makefile).
-# Stage 2: serve the static bundle with nginx:alpine (1.31.x as of 2026-11-02).
+# Stage 1: build the SvelteKit SPA in node:26.13.0 (pinned in
+# .tool-versions and the Makefile), then derive the nginx
+# security-header include (scripts/generate-csp.mjs) from the REAL
+# built index.html — the Content-Security-Policy inline-script hashes
+# are per-build and must never be hardcoded.
+# Stage 2: serve the static bundle with nginx:alpine (1.31.x as of
+# 2026-11-02), non-root (USER nginx, L42) on port 8080.
 #
 # Build-time env (baked into the bundle at build time; all optional —
 # defaults keep the dev image working with zero configuration):
 #   PUBLIC_API_BASE           API base path           (default /api)
 #   PUBLIC_NR_LICENSE_KEY     NR browser license key  (agent off when unset)
 #   PUBLIC_NR_APPLICATION_ID  NR browser app id       (agent off when unset)
+#   PUBLIC_AUTH0_ISSUER       IdP issuer URL; its origin goes into the
+#                             CSP frame-src (default
+#                             http://localhost:18081/realms/finance,
+#                             i.e. the src/lib/auth/client.ts fallback)
 
 FROM node:26.13.0 AS build
 WORKDIR /src
@@ -18,38 +26,37 @@ COPY . .
 ARG PUBLIC_API_BASE=/api
 ARG PUBLIC_NR_LICENSE_KEY=
 ARG PUBLIC_NR_APPLICATION_ID=
+ARG PUBLIC_AUTH0_ISSUER=http://localhost:18081/realms/finance
 ENV PUBLIC_API_BASE=$PUBLIC_API_BASE \
     PUBLIC_NR_LICENSE_KEY=$PUBLIC_NR_LICENSE_KEY \
-    PUBLIC_NR_APPLICATION_ID=$PUBLIC_NR_APPLICATION_ID
-RUN npm run build
+    PUBLIC_NR_APPLICATION_ID=$PUBLIC_NR_APPLICATION_ID \
+    PUBLIC_AUTH0_ISSUER=$PUBLIC_AUTH0_ISSUER
+# Build, then derive the CSP include from the built index.html. The
+# NR connect-src origin is only added when the agent is compiled in
+# (a license key was provided at build time).
+RUN npm run build \
+    && if [ -n "$PUBLIC_NR_LICENSE_KEY" ]; then \
+           export CSP_CONNECT_EXTRA='https://bam.nr-data.net'; \
+       else \
+           export CSP_CONNECT_EXTRA=''; \
+       fi \
+    && CSP_ISSUER="$PUBLIC_AUTH0_ISSUER" node scripts/generate-csp.mjs
 
 FROM nginx:alpine
-# SPA config: unknown paths fall back to /index.html (client-side routing).
-COPY <<'EOF' /etc/nginx/conf.d/default.conf
-server {
-    listen 80;
-    listen [::]:80;
-    server_name _;
-
-    root /usr/share/nginx/html;
-    index index.html;
-
-    gzip on;
-    gzip_types text/css application/javascript application/json image/svg+xml;
-
-    # Hashed assets from the SvelteKit build — safe to cache forever.
-    location /_app/ {
-        add_header Cache-Control "public, max-age=31536000, immutable";
-        try_files $uri =404;
-    }
-
-    # SPA fallback: real files first, then the app shell.
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-EOF
+# SPA + security config: our own main conf (no user directive — the
+# container runs as the unprivileged nginx user), our server block
+# (port 8080, per-location header includes), and the per-build CSP
+# include derived from the built index.html.
+RUN rm /etc/nginx/nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
+COPY nginx/default.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /src/csp.conf /etc/nginx/headers.conf
 COPY --from=build /src/build /usr/share/nginx/html
-EXPOSE 80
+# nginx's startup mkdir is single-level: it will create /tmp/nginx/<temp>
+# itself, but the /tmp/nginx parent must already exist (and be writable by
+# the nginx user — /var/cache/nginx is root-owned, hence /tmp).
+RUN mkdir -p /tmp/nginx && chown nginx:nginx /tmp/nginx
+USER nginx
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1
