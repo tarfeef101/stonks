@@ -78,7 +78,7 @@ func TestCategorize_HappyPath(t *testing.T) {
 	srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, "test-model", `  {"i": 1,  "category": "Groceries", "confidence": 0.9}  `, 12, 34)
 	})
-	p := New(srv.URL+"/v1", "sk-test", "test-model")
+	p := New(srv.URL+"/v1", "sk-test", "test-model", WithEndpointAllowlist(loopbackNet()))
 	res, err := p.Categorize(context.Background(), Request{System: "You are a categorizer.", User: "Categorize: milk $4"})
 	if err != nil {
 		t.Fatalf("Categorize: %v", err)
@@ -130,7 +130,7 @@ func TestCategorize_NoAPIKeySendsNoAuthorization(t *testing.T) {
 	srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, "llama3", `{"i":1,"category":"Dining"}`, 3, 5)
 	})
-	p := New(srv.URL+"/v1", "", "llama3")
+	p := New(srv.URL+"/v1", "", "llama3", WithEndpointAllowlist(loopbackNet()))
 	if _, err := p.Categorize(context.Background(), Request{User: "coffee $3"}); err != nil {
 		t.Fatalf("Categorize: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestCategorize_FencedJSON(t *testing.T) {
 		srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 			respondOK(w, "m", content, 1, 1)
 		})
-		p := New(srv.URL+"/v1", "", "m")
+		p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 		res, err := p.Categorize(context.Background(), Request{User: "bus ticket $2"})
 		if err != nil {
 			t.Fatalf("Categorize(%q): %v", content, err)
@@ -173,7 +173,7 @@ func TestCategorize_ProseWrappedJSON(t *testing.T) {
 	srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, "m", `Here you go: {"i": 3, "category": "Utilities"} — hope that helps!`, 1, 1)
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	res, err := p.Categorize(context.Background(), Request{User: "electric bill $80"})
 	if err != nil {
 		t.Fatalf("Categorize: %v", err)
@@ -196,7 +196,7 @@ func TestCategorize_MalformedThenGood(t *testing.T) {
 		}
 		respondOK(w, "m", `{"i": 1, "category": "Groceries"}`, 1, 1)
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	res, err := p.Categorize(context.Background(), Request{User: "milk $4"})
 	if err != nil {
 		t.Fatalf("Categorize: %v", err)
@@ -222,7 +222,7 @@ func TestCategorize_MalformedTwice(t *testing.T) {
 	srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, "m", "sorry, I cannot produce JSON", 1, 1)
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	_, err := p.Categorize(context.Background(), Request{User: "milk $4"})
 	if err == nil {
 		t.Fatal("want error after two malformed attempts")
@@ -244,7 +244,7 @@ func TestCategorize_HTTPErrorNoRetry(t *testing.T) {
 	srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal explosion", http.StatusInternalServerError)
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	_, err := p.Categorize(context.Background(), Request{User: "milk $4"})
 	if err == nil {
 		t.Fatal("want error on HTTP 500")
@@ -264,7 +264,7 @@ func TestCategorize_NonJSONBody(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = io.WriteString(w, "<html>bad gateway</html>")
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	_, err := p.Categorize(context.Background(), Request{User: "milk $4"})
 	if err == nil {
 		t.Fatal("want error on non-JSON response body")
@@ -281,7 +281,7 @@ func TestCategorize_EmptyChoices(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"model":"m","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}`)
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	_, err := p.Categorize(context.Background(), Request{User: "milk $4"})
 	if err == nil {
 		t.Fatal("want error on empty choices")
@@ -301,7 +301,7 @@ func TestCategorize_PerAttemptTimeout(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		respondOK(w, "m", `{"i":1}`, 1, 1)
 	})
-	p := New(srv.URL+"/v1", "", "m", WithTimeout(50*time.Millisecond))
+	p := New(srv.URL+"/v1", "", "m", WithTimeout(50*time.Millisecond), WithEndpointAllowlist(loopbackNet()))
 	start := time.Now()
 	_, err := p.Categorize(context.Background(), Request{User: "milk $4"})
 	elapsed := time.Since(start)
@@ -327,7 +327,7 @@ func TestCategorize_URLConstruction(t *testing.T) {
 		srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 			respondOK(w, "m", `{"i":1}`, 1, 1)
 		})
-		p := New(srv.URL+base, "", "m")
+		p := New(srv.URL+base, "", "m", WithEndpointAllowlist(loopbackNet()))
 		if _, err := p.Categorize(context.Background(), Request{User: "milk $4"}); err != nil {
 			t.Fatalf("Categorize(base %q): %v", base, err)
 		}
@@ -347,7 +347,7 @@ func TestCategorize_ContextCanceled(t *testing.T) {
 	srv := newServer(t, &recs, func(w http.ResponseWriter, r *http.Request) {
 		respondOK(w, "m", `{"i":1}`, 1, 1)
 	})
-	p := New(srv.URL+"/v1", "", "m")
+	p := New(srv.URL+"/v1", "", "m", WithEndpointAllowlist(loopbackNet()))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()

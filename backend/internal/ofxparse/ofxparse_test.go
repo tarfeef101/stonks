@@ -15,6 +15,23 @@ func mustParseTrns(t *testing.T, in string) []Transaction {
 	return trns
 }
 
+// TestParseTooLarge: a file over maxParseBytes is refused before
+// the line loop sees it, and a file within the cap still takes the
+// usual path (T-P0-3).
+func TestParseTooLarge(t *testing.T) {
+	old := maxParseBytes
+	maxParseBytes = 10
+	defer func() { maxParseBytes = old }()
+
+	_, err := Parse(strings.NewReader(qfxBMO))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Parse error = %v, want ErrTooLarge", err)
+	}
+	if _, err := Parse(strings.NewReader("<STMTTRN>^")); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("Parse error = %v, want ErrEmpty (in-cap path)", err)
+	}
+}
+
 func wantTrn(t *testing.T, i int, got Transaction, date, amt, name, ref string) {
 	t.Helper()
 	if got.DatePosted != date || got.Amount != amt ||

@@ -21,6 +21,17 @@ import (
 // non-empty STMTTRN record.
 var ErrEmpty = errors.New("ofxparse: no STMTTRN records")
 
+// maxParseBytes bounds how much of the file Parse reads (T-P0-3).
+// The upload step caps statements at 10 MB; this mirrors that bound
+// inside the parser so a larger payload can never reach the line
+// loop, and reading one extra byte keeps "exactly the cap"
+// distinguishable from "over it". Tests may lower it.
+var maxParseBytes int64 = 10 << 20
+
+// ErrTooLarge is returned by Parse when the file exceeds
+// maxParseBytes.
+var ErrTooLarge = errors.New("ofxparse: document too large")
+
 // Transaction is one parsed STMTTRN record. All fields are the raw
 // tag values from the file (missing tag -> ""); 4.6 decides what is
 // fatal (an empty DatePosted or Amount becomes a row error there,
@@ -42,9 +53,12 @@ type Transaction struct {
 // exactly such a record and the rule doubles as the section/record
 // disambiguator.
 func Parse(r io.Reader) ([]Transaction, error) {
-	raw, err := io.ReadAll(r)
+	raw, err := io.ReadAll(io.LimitReader(r, maxParseBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(raw)) > maxParseBytes {
+		return nil, ErrTooLarge
 	}
 	text := string(raw)
 	if strings.HasPrefix(text, "\uFEFF") { // BOM, harmless to strip

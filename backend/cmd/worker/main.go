@@ -21,6 +21,7 @@ import (
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
 	"finance-tracker/internal/fisync"
+	"finance-tracker/internal/llm"
 	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
 	"finance-tracker/internal/report"
@@ -118,6 +119,15 @@ func main() {
 		dekForUser,
 		categorize.LLMEnv{BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model},
 	)
+	// Endpoint policy (T-P0-1): the worker dials user-influenced LLM
+	// endpoints, so it runs the same strict policy as the API —
+	// WithEndpointAllowlist is always armed, and FTRK_LLM_ENDPOINT_CIDRS
+	// admits the docker-network llama service. With the CIDRs unset the
+	// default http://llama:8080/v1 (a private address) is blocked until
+	// the operator sets them.
+	r.LLM = func(baseURL, apiKey, model string) (llm.Categorizer, error) {
+		return llm.New(baseURL, apiKey, model, llm.WithEndpointAllowlist(cfg.LLM.EndpointCIDRs)), nil
+	}
 
 	// Scheduler leader election (step 8.3): a dedicated *pgx.Conn (NOT
 	// the pool) holds the session advisory locks, so the lock survives

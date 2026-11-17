@@ -98,3 +98,14 @@ type Suggestion struct {
 
 // ErrEmpty is returned by Parse when the input has no data rows.
 var ErrEmpty = errors.New("csvparse: no data rows")
+
+// MaxRows is the cap on the raw CSV records Parse accepts (T-P0-3).
+// It counts EVERY record the reader returns — the header row and
+// all-empty records included — so a file with millions of lines is
+// refused before its rows can exhaust memory, well before the 10 MB
+// upload cap could bound them. Tests may lower it.
+var MaxRows = 200000
+
+// ErrTooManyRows is returned by Parse when the input exceeds MaxRows
+// raw records.
+var ErrTooManyRows = errors.New("csvparse: too many rows")

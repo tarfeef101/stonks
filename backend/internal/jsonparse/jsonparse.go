@@ -21,6 +21,17 @@ import (
 // array, or only non-object items).
 var ErrEmpty = errors.New("jsonparse: no transaction items")
 
+// maxParseBytes bounds how much of the document Parse reads
+// (T-P0-3). The upload step caps statements at 10 MB; this mirrors
+// that bound inside the parser so a larger payload can never reach
+// the decoder, and reading one extra byte keeps "exactly the cap"
+// distinguishable from "over it". Tests may lower it.
+var maxParseBytes int64 = 10 << 20
+
+// ErrTooLarge is returned by Parse when the document exceeds
+// maxParseBytes.
+var ErrTooLarge = errors.New("jsonparse: document too large")
+
 // FieldSpec names one app field and the JSON pointers (RFC 6901) to
 // look for it at, relative to each item. Pointers are tried in order;
 // the first that resolves to a scalar (string / number / bool) wins.
@@ -88,9 +99,12 @@ func Parse(r io.Reader, spec Spec) (*File, error) {
 	if err := spec.Valid(); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxParseBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) > maxParseBytes {
+		return nil, ErrTooLarge
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber() // keep numbers in their file spelling (no float64)

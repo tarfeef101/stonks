@@ -5,9 +5,14 @@ package config
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
+
+	"finance-tracker/internal/llm"
 )
 
 // SMTP holds generic SMTP configuration (iteration 1: Mailpit sink).
@@ -25,6 +30,13 @@ type LLM struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+
+	// EndpointCIDRs (FTRK_LLM_ENDPOINT_CIDRS, comma-separated CIDRs or
+	// bare IPs) additionally admits private/reserved endpoint
+	// addresses — e.g. the docker network's llama service. The
+	// always-reject set (metadata/link-local, ::1, 0.0.0.0) is never
+	// admitted (see internal/llm).
+	EndpointCIDRs []*net.IPNet
 }
 
 // Config is the full application configuration shared by cmd/api and
@@ -116,13 +128,27 @@ func load(getenv func(string) string) (*Config, error) {
 	default:
 		return nil, fmt.Errorf("SMTP_TLS_POLICY: unsupported %q (want starttls, implicit or none)", cfg.SMTP.TLSPolicy)
 	}
-	if cfg.KEK != "" {
-		if len(cfg.KEK) != 64 {
-			return nil, fmt.Errorf("KEK: want 64 hex chars (32 bytes), got %d chars", len(cfg.KEK))
+	if v := getenv("FTRK_LLM_ENDPOINT_CIDRS"); v != "" {
+		nets, err := llm.ParseEndpointCIDRs(v)
+		if err != nil {
+			return nil, fmt.Errorf("FTRK_LLM_ENDPOINT_CIDRS: %w", err)
 		}
-		if _, err := hex.DecodeString(cfg.KEK); err != nil {
-			return nil, fmt.Errorf("KEK: not valid hex: %w", err)
-		}
+		cfg.LLM.EndpointCIDRs = nets
+	}
+	// The KEK wraps every user's DEK, so it is ALWAYS required: fail
+	// fast on a missing or degenerate value instead of letting the
+	// crypto layer fail per request (or wrap data with a garbage key).
+	if cfg.KEK == "" {
+		return nil, errors.New("KEK: required (64 hex chars, 32 bytes)")
+	}
+	if len(cfg.KEK) != 64 {
+		return nil, fmt.Errorf("KEK: want 64 hex chars (32 bytes), got %d chars", len(cfg.KEK))
+	}
+	if _, err := hex.DecodeString(cfg.KEK); err != nil {
+		return nil, fmt.Errorf("KEK: not valid hex: %w", err)
+	}
+	if cfg.KEK == strings.Repeat("0", 64) {
+		return nil, errors.New("KEK: all-zeros value is not acceptable")
 	}
 	return cfg, nil
 }

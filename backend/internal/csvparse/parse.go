@@ -18,7 +18,10 @@ func Parse(r io.Reader) (*File, error) {
 	}
 	text, encoding := decode(raw)
 	del := sniffDelimiter(text)
-	rows := readRows(text, del)
+	rows, err := readRows(text, del)
+	if err != nil {
+		return nil, err
+	}
 	if len(rows) == 0 {
 		return nil, ErrEmpty
 	}
@@ -181,14 +184,18 @@ func countColumns(line string, r rune) int {
 // trimmed per record); LazyQuotes tolerates the stray quotes bank
 // exports are full of. Records that still fail to parse are skipped
 // (the reader recovers on the next line) so one bad line never loses
-// the whole file; all-empty records are dropped.
-func readRows(text string, del rune) [][]string {
+// the whole file; all-empty records are dropped. More than MaxRows
+// raw records (the header and all-empty records count too) is an
+// error: the cap bounds memory independently of the upload step's
+// byte cap (T-P0-3).
+func readRows(text string, del rune) ([][]string, error) {
 	rd := csv.NewReader(strings.NewReader(text))
 	rd.Comma = del
 	rd.FieldsPerRecord = -1
 	rd.LazyQuotes = true
 	rd.TrimLeadingSpace = true
 	var rows [][]string
+	var seen int
 	for {
 		rec, err := rd.Read()
 		if err == io.EOF {
@@ -197,13 +204,17 @@ func readRows(text string, del rune) [][]string {
 		if err != nil {
 			continue
 		}
+		seen++
+		if seen > MaxRows {
+			return nil, ErrTooManyRows
+		}
 		rec = trimTrailingEmpty(rec)
 		if isAllEmpty(rec) {
 			continue
 		}
 		rows = append(rows, rec)
 	}
-	return rows
+	return rows, nil
 }
 
 // trimTrailingEmpty drops trailing empty cells so a row like

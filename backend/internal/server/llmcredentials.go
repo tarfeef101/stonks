@@ -275,12 +275,12 @@ func (h *handler) llmCredsTest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	resp, err := provider.Categorize(r.Context(), req)
 	if err != nil {
-		// Full details in the server log only; the client message
-		// carries the llm package's error (status, endpoint and
-		// response snippets — never request material, so never the
-		// key).
+		// The client message stays generic on purpose (T-P0-1): an
+		// endpoint-policy error may name the blocked address or the
+		// address a host resolved to — that is server-log material,
+		// not client material. The full error goes to the log only.
 		slog.Error("llm credential test failed", "endpoint", b.Endpoint, "model", env.Model, "error", err)
-		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "connection test failed: "+err.Error())
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "connection test failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, llmCredTestOut{

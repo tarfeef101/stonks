@@ -6,17 +6,28 @@ import (
 )
 
 func TestLoadDefaults(t *testing.T) {
-	cfg, err := load(func(string) string { return "" })
+	// The KEK is mandatory even with no database (T-P0-2), so the
+	// default load supplies one.
+	kek := strings.Repeat("0123456789abcdef", 4)
+	cfg, err := load(func(k string) string {
+		if k == "KEK" {
+			return kek
+		}
+		return ""
+	})
 	if err != nil {
 		t.Fatalf("load with no env: %v", err)
 	}
 	if cfg.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", cfg.Port)
 	}
+	if cfg.KEK != kek {
+		t.Errorf("KEK = %q, want the supplied value", cfg.KEK)
+	}
 	if cfg.SMTP.TLSPolicy != "starttls" {
 		t.Errorf("SMTP.TLSPolicy = %q, want %q", cfg.SMTP.TLSPolicy, "starttls")
 	}
-	if cfg.DatabaseURL != "" || cfg.KEK != "" || cfg.NRLicenseKey != "" ||
+	if cfg.DatabaseURL != "" || cfg.NRLicenseKey != "" ||
 		cfg.Auth0Audience != "" || cfg.OIDCDiscoveryURL != "" {
 		t.Errorf("expected zero-value secrets, got %+v", cfg)
 	}
@@ -77,6 +88,8 @@ func TestLoadInvalid(t *testing.T) {
 		{"bad port", "PORT", "notanumber"},
 		{"bad smtp port", "SMTP_PORT", "abc"},
 		{"bad tls policy", "SMTP_TLS_POLICY", "off"},
+		{"empty kek", "KEK", ""},
+		{"all-zero kek", "KEK", strings.Repeat("0", 64)},
 		{"short kek", "KEK", "abc123"},
 		{"non-hex kek", "KEK", strings.Repeat("zz", 32)},
 	}

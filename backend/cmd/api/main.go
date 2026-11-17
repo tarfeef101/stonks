@@ -195,8 +195,11 @@ func main() {
 			Env: categorize.NormalizeEnv(categorize.LLMEnv{
 				BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model,
 			}),
+			// Endpoint policy (T-P0-1): strict mode, with the
+			// docker-network llama service admitted via
+			// FTRK_LLM_ENDPOINT_CIDRS.
 			LLM: func(baseURL, apiKey, model string) (llm.Categorizer, error) {
-				return llm.New(baseURL, apiKey, model), nil
+				return llm.New(baseURL, apiKey, model, llm.WithEndpointAllowlist(cfg.LLM.EndpointCIDRs)), nil
 			},
 		}
 		// LLM credentials (step 5.6): the per-user credential routes
@@ -211,7 +214,8 @@ func main() {
 				BaseURL: cfg.LLM.BaseURL, APIKey: cfg.LLM.APIKey, Model: cfg.LLM.Model,
 			}),
 			LLM: func(baseURL, apiKey, model string) (llm.Categorizer, error) {
-				return llm.New(baseURL, apiKey, model, llm.WithTimeout(20*time.Second)), nil
+				return llm.New(baseURL, apiKey, model, llm.WithTimeout(20*time.Second),
+					llm.WithEndpointAllowlist(cfg.LLM.EndpointCIDRs)), nil
 			},
 		}
 		// Dashboards + widgets (round 6 rework, migration 0013): same

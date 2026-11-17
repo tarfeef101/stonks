@@ -33,7 +33,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -72,6 +74,12 @@ const defaultMaxTokens = 1024
 
 var errNoContent = errors.New("llm: model returned no content")
 
+// maxResponseBytes caps a chat-completions response body (T-P0-1): a
+// real answer is orders of magnitude smaller, and the cap bounds
+// memory against a hostile endpoint streaming an unbounded body. The
+// first read past the cap fails with *http.MaxBytesError.
+var maxResponseBytes int64 = 4 << 20
+
 // Provider is an OpenAI-compatible chat-completions Categorizer.
 type Provider struct {
 	url       string
@@ -80,6 +88,16 @@ type Provider struct {
 	timeout   time.Duration
 	maxTokens int
 	client    *http.Client
+
+	// scheme + host identify the endpoint so the pre-flight and
+	// dial-time policy checks know what they are vetting (T-P0-1).
+	// Empty = non-http(s) or unparseable URL: the checks are skipped
+	// and the request fails in Do with the standard url error.
+	scheme string
+	host   string
+
+	// policy vets the endpoint's addresses (see endpoint.go).
+	policy endpointPolicy
 }
 
 // Option customizes a Provider created by New.
@@ -102,19 +120,75 @@ func WithMaxTokens(n int) Option {
 // must end in /v1 (a trailing slash is normalized away); the client
 // POSTs to baseURL + "/chat/completions". apiKey may be "" (then no
 // Authorization header is sent).
+//
+// Endpoint policy (T-P0-1): the always-rejected set (cloud metadata
+// / link-local 169.254.0.0/16 and fe80::/10, IPv6 loopback ::1,
+// unspecified 0.0.0.0 / ::) is refused in every mode and can never
+// be allowlisted, and response bodies are capped at maxResponseBytes.
+// A bare New is non-strict beyond that. WithEndpointAllowlist arms
+// strict mode: plain http is refused unless the address is
+// allowlisted, private and loopback addresses need an explicit CIDR,
+// and public https is the only other thing dialable. A hostname is
+// resolved and EVERY returned address is vetted — before the request
+// and again at dial time, when the connection is made to a vetted IP
+// (TOCTOU guard) while SNI and the Host header keep the original
+// host. See endpoint.go.
 func New(baseURL, apiKey, model string, opts ...Option) *Provider {
 	p := &Provider{
 		apiKey:    apiKey,
 		model:     model,
 		timeout:   defaultTimeout,
 		maxTokens: defaultMaxTokens,
-		client:    &http.Client{},
 	}
 	for _, opt := range opts {
 		opt(p)
 	}
 	p.url = strings.TrimRight(baseURL, "/") + "/chat/completions"
+	// Identify the endpoint host so the transport can vet the
+	// address at dial time. Non-http(s) schemes (and unparseable
+	// URLs) skip the checks; Do fails on them with the standard
+	// url error, as before.
+	if u, err := url.Parse(p.url); err == nil {
+		if u.Scheme == "http" || u.Scheme == "https" {
+			if h := u.Hostname(); h != "" {
+				p.scheme = u.Scheme
+				p.host = h
+			}
+		}
+	}
+	p.client = &http.Client{Transport: p.transport()}
 	return p
+}
+
+// transport returns the transport the provider's client dials with.
+// For an identified endpoint host, every dial re-resolves the host,
+// vets EVERY returned address against the policy, and connects to a
+// vetted IP — closing the resolve-then-dial race. The transport
+// still presents the ORIGINAL host for SNI and the Host header, so
+// TLS and virtual hosting are unaffected. A redirect that leaves the
+// endpoint's host is refused: a provider must not silently call a
+// second server (T-P0-1).
+func (p *Provider) transport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	if p.host == "" {
+		return t
+	}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if host != p.host {
+			return nil, fmt.Errorf("llm: %w: redirect host %s", errEndpointBlocked, host)
+		}
+		ips, err := p.policy.checkHost(ctx, p.scheme, host)
+		if err != nil {
+			return nil, err
+		}
+		d := net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		return d.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+	}
+	return t
 }
 
 var _ Categorizer = (*Provider)(nil)
@@ -165,6 +239,15 @@ func (p *Provider) do(ctx context.Context, req Request) (content, model string, 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// Pre-flight policy check: a blocked endpoint fails before any
+	// byte goes out. The transport checks again at dial time; the
+	// pair closes the resolve-then-dial window (T-P0-1).
+	if p.host != "" {
+		if _, err := p.policy.checkHost(ctx, p.scheme, p.host); err != nil {
+			return "", "", 0, 0, fmt.Errorf("llm: %w", err)
+		}
+	}
+
 	msgs := make([]message, 0, 2)
 	if req.System != "" {
 		msgs = append(msgs, message{Role: "system", Content: req.System})
@@ -194,6 +277,10 @@ func (p *Provider) do(ctx context.Context, req Request) (content, model string, 
 		return "", "", 0, 0, fmt.Errorf("llm: %w", err)
 	}
 	defer resp.Body.Close()
+	// Cap the body before reading it (T-P0-1); a read past the cap
+	// fails with *http.MaxBytesError, and the %w wrap below keeps it
+	// matchable with errors.As.
+	resp.Body = http.MaxBytesReader(nil, resp.Body, maxResponseBytes)
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", "", 0, 0, fmt.Errorf("llm: read response: %w", err)

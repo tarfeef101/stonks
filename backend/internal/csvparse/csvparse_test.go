@@ -17,6 +17,25 @@ func mustParse(t *testing.T, in string) *File {
 	return f
 }
 
+// TestParseMaxRows: more than MaxRows raw records is an error. The
+// counter includes the header and all-empty records, so with
+// MaxRows=2 the header + one data row parse, and a third record
+// trips the cap (T-P0-3).
+func TestParseMaxRows(t *testing.T) {
+	old := MaxRows
+	MaxRows = 2
+	defer func() { MaxRows = old }()
+
+	f := mustParse(t, "a,b\n1,2\n")
+	if len(f.Rows) != 1 {
+		t.Fatalf("Rows = %d, want 1", len(f.Rows))
+	}
+	_, err := Parse(strings.NewReader("a,b\n1,2\n3,4\n"))
+	if !errors.Is(err, ErrTooManyRows) {
+		t.Fatalf("Parse error = %v, want ErrTooManyRows", err)
+	}
+}
+
 func TestParseCommaHeader(t *testing.T) {
 	f := mustParse(t, "Date,Description,Amount\n01/05/2026,Coffee,-4.50\n01/06/2026,Salary,1800.00\n")
 	if f.Delimiter != ',' || f.Encoding != "utf-8" {

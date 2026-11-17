@@ -80,6 +80,33 @@ func mintToken(t *testing.T, key jwk.Key, sub, iss, aud string) string {
 	return string(signed)
 }
 
+// mintSkewed builds a token like mintToken whose exp is
+// now.Add(offset) (negative = expired that long ago), to exercise the
+// verifier's clock-skew leeway.
+func mintSkewed(t *testing.T, key jwk.Key, sub, iss, aud string, offset time.Duration) string {
+	t.Helper()
+	now := time.Now()
+	tok, err := jwt.NewBuilder().
+		Issuer(iss).
+		Subject(sub).
+		Audience([]string{aud}).
+		IssuedAt(now).
+		Expiration(now.Add(offset)).
+		Build()
+	if err != nil {
+		t.Fatalf("build token: %v", err)
+	}
+	payload, err := jwt.NewSerializer().Serialize(tok)
+	if err != nil {
+		t.Fatalf("serialize token: %v", err)
+	}
+	signed, err := jws.Sign(payload, jws.WithKey(jwa.RS256(), key))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	return string(signed)
+}
+
 // doToken dispatches a GET through the middleware with the given bearer
 // token ("" = no Authorization header) and returns status, body, and the
 // WWW-Authenticate header.
@@ -155,6 +182,29 @@ func TestVerifierAcceptsAndExposesSubject(t *testing.T) {
 	if body != "sub="+want {
 		t.Fatalf("body = %q, want %q", body, "sub="+want)
 	}
+}
+
+// TestVerifierClockSkew pins the exp/nbf leeway: a token that expired
+// 10 s ago is still accepted (inside the 30 s skew), one expired 60 s
+// ago is rejected.
+func TestVerifierClockSkew(t *testing.T) {
+	v, key := testVerifier(t, mintKey(t))
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	t.Run("expired 10s ago accepted", func(t *testing.T) {
+		code, body, _ := doToken(t, v, inner,
+			mintSkewed(t, key, "sub-1", testIssuer, testAudience, -10*time.Second))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", code, body)
+		}
+	})
+	t.Run("expired 60s ago rejected", func(t *testing.T) {
+		code, body, _ := doToken(t, v, inner,
+			mintSkewed(t, key, "sub-1", testIssuer, testAudience, -60*time.Second))
+		if code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401 (body %s)", code, body)
+		}
+	})
 }
 
 // TestSubjectWithoutClaims guards the Subject() contract for contexts that

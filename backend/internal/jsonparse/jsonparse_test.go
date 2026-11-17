@@ -35,6 +35,24 @@ func wantRow(t *testing.T, i int, got []string, want ...string) {
 	}
 }
 
+// TestParseTooLarge: a document over maxParseBytes is refused
+// before the decoder sees it, and a document within the cap still
+// takes the usual path (T-P0-3).
+func TestParseTooLarge(t *testing.T) {
+	old := maxParseBytes
+	maxParseBytes = 10
+	defer func() { maxParseBytes = old }()
+
+	_, err := Parse(strings.NewReader(`[{"date":"1"}]`), flatSpec)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Parse error = %v, want ErrTooLarge", err)
+	}
+	_, err = Parse(strings.NewReader("[]"), flatSpec)
+	if !errors.Is(err, ErrEmpty) {
+		t.Fatalf("Parse error = %v, want ErrEmpty (in-cap path)", err)
+	}
+}
+
 func TestParseRootArray(t *testing.T) {
 	f := mustParse(t, `[
 		{"date": "2026-01-05", "amount": -45.23, "description": "GROCERY"},

@@ -608,8 +608,8 @@ func TestLLMCredTest(t *testing.T) {
 		if c != codeInvalidRequest {
 			t.Errorf("code = %q, want %q", c, codeInvalidRequest)
 		}
-		if !strings.Contains(m, "connection test failed") || !strings.Contains(m, "connection refused") {
-			t.Errorf("message = %q, want the provider error", m)
+		if !strings.Contains(m, "connection test failed") {
+			t.Errorf("message = %q, want the generic connection-test message", m)
 		}
 		if strings.Contains(body, formKey) {
 			t.Errorf("error body contains the full key")

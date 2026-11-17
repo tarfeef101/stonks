@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	jwtmiddleware "github.com/auth0/go-jwt-middleware/v3"
 	"github.com/auth0/go-jwt-middleware/v3/core"
@@ -102,6 +103,11 @@ func NewWithKeyFunc(cfg Config, keyFunc KeyFunc) (*Verifier, error) {
 		validator.WithAlgorithm(validator.RS256),
 		validator.WithIssuer(cfg.Issuer),
 		validator.WithAudience(cfg.Audience),
+		// IdP and backend clocks are not perfectly in sync (self-hosted
+		// Keycloak drifts in particular), so a 30 s exp/nbf leeway keeps
+		// freshly-issued tokens from failing right at their boundaries
+		// without meaningfully weakening expiry.
+		validator.WithAllowedClockSkew(30*time.Second),
 		// D-024: the library only decodes RFC 7519 registered claims, so
 		// the OIDC profile claims are opt-in via WithCustomClaims. The
 		// factory runs per request and the library re-decodes the payload

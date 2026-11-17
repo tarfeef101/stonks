@@ -260,7 +260,11 @@ func mappedFile(m Mapping, file []byte) (names []string, rows [][]string, total 
 	case "csv":
 		f, err := csvparse.Parse(bytes.NewReader(file))
 		if err != nil {
-			return nil, nil, 0, nil, "file could not be parsed as CSV"
+			msg := "file could not be parsed as CSV"
+			if errors.Is(err, csvparse.ErrTooManyRows) {
+				msg = "file has too many rows to import"
+			}
+			return nil, nil, 0, nil, msg
 		}
 		resolved := resolveCSV(m, f.Header)
 		total = len(f.Rows)
@@ -280,6 +284,8 @@ func mappedFile(m Mapping, file []byte) (names []string, rows [][]string, total 
 			msg := "file could not be parsed as JSON"
 			if errors.Is(err, jsonparse.ErrEmpty) {
 				msg = "no transactions found at the mapped location"
+			} else if errors.Is(err, jsonparse.ErrTooLarge) {
+				msg = "file is too large to import"
 			}
 			return nil, nil, 0, nil, msg
 		}
@@ -290,6 +296,8 @@ func mappedFile(m Mapping, file []byte) (names []string, rows [][]string, total 
 			msg := "file could not be parsed as OFX"
 			if errors.Is(err, ofxparse.ErrEmpty) {
 				msg = "no transactions found in file"
+			} else if errors.Is(err, ofxparse.ErrTooLarge) {
+				msg = "file is too large to import"
 			}
 			return nil, nil, 0, nil, msg
 		}
@@ -619,7 +627,11 @@ func (h *handler) importAnalyze(w http.ResponseWriter, r *http.Request) {
 	case "csv":
 		f, err := csvparse.Parse(bytes.NewReader(file))
 		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "file could not be parsed as CSV")
+			msg := "file could not be parsed as CSV"
+			if errors.Is(err, csvparse.ErrTooManyRows) {
+				msg = "file has too many rows to import"
+			}
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, msg)
 			return
 		}
 		if chosen == nil {
@@ -664,6 +676,8 @@ func (h *handler) importAnalyze(w http.ResponseWriter, r *http.Request) {
 			msg := "file could not be parsed as OFX"
 			if errors.Is(err, ofxparse.ErrEmpty) {
 				msg = "no transactions found in file"
+			} else if errors.Is(err, ofxparse.ErrTooLarge) {
+				msg = "file is too large to import"
 			}
 			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, msg)
 			return
