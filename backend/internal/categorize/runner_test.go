@@ -584,6 +584,247 @@ func TestRunJobReviewNotification(t *testing.T) {
 	})
 }
 
+// hookCategorizer runs hook before delegating each call (the
+// missing-category test deletes the user's category between the
+// runner's Cats.List and the apply probe).
+type hookCategorizer struct {
+	next llm.Categorizer
+	hook func()
+}
+
+func (h *hookCategorizer) Categorize(ctx context.Context, req llm.Request) (*llm.Response, error) {
+	if h.hook != nil {
+		h.hook()
+	}
+	return h.next.Categorize(ctx, req)
+}
+
+// TestRunJobBatchedApplyMixed pins the batched apply (T-P1-3b): one
+// batch with autos across TWO categories plus review rows. The DB
+// state is checked per row (category_id set on autos, review_pending
+// with category_id still NULL on reviews) and the job counters must
+// add up (auto/review totals in the job row).
+func TestRunJobBatchedApplyMixed(t *testing.T) {
+	env := newRunnerEnv(t, "mixed")
+	uid := seedData(t, env, "mixed", []string{"Groceries", "Utilities"}, 10)
+	u := env.users["mixed"]
+	ctx := env.ctx
+	catStore := repo.NewCategoryStore(env.pool)
+	ids := map[string]string{}
+	cats, err := catStore.List(ctx, uid, u.dek)
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	for _, c := range cats {
+		ids[c.Name] = c.ID
+	}
+	// The batch order the worker will see (Uncategorized is ORDER BY
+	// id): position i (1-based) gets the entry with index i below.
+	batch, err := repo.NewTransactionStore(env.pool).Uncategorized(ctx, uid, defaultBatch, u.dek)
+	if err != nil {
+		t.Fatalf("snapshot batch: %v", err)
+	}
+	// items 1-3 auto Groceries, 4-6 auto Utilities, 7-10 review.
+	fake := &fakeCategorizer{
+		in: 100, out: 50,
+		garbage: json.RawMessage(`[
+			{"i": 1, "category": "Groceries", "confidence": 0.9},
+			{"i": 2, "category": "Groceries", "confidence": 0.9},
+			{"i": 3, "category": "Groceries", "confidence": 0.9},
+			{"i": 4, "category": "Utilities", "confidence": 0.9},
+			{"i": 5, "category": "Utilities", "confidence": 0.9},
+			{"i": 6, "category": "Utilities", "confidence": 0.9},
+			{"i": 7, "category": "Groceries", "confidence": 0.5},
+			{"i": 8, "category": "Groceries", "confidence": 0.5},
+			{"i": 9, "category": "Groceries", "confidence": 0.5},
+			{"i":10, "category": "Groceries", "confidence": 0.5}]`),
+	}
+	r := buildRunner(t, env, func(_, _, _ string) (llm.Categorizer, error) {
+		return fake, nil
+	})
+	job, err := r.Jobs.Create(ctx, uid, "manual", nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := r.RunJob(ctx, job.ID, uid); err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	got, err := r.Jobs.Get(ctx, uid, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != "done" || got.Total != 10 || got.Done != 10 ||
+		got.AutoApplied != 6 || got.ToReview != 4 ||
+		got.TokensIn != 100 || got.TokensOut != 50 {
+		t.Fatalf("job: %+v", got)
+	}
+	// Autos: exactly the expected rows carry each category.
+	descOf := func(from, to int) map[string]bool {
+		out := make(map[string]bool)
+		for i := from; i < to; i++ {
+			out[batch[i].Description] = true
+		}
+		return out
+	}
+	checkCat := func(catID string, want map[string]bool) {
+		t.Helper()
+		rows, err := r.Txns.List(ctx, uid, repo.TransactionFilter{
+			CategoryIDs: []string{catID}, Limit: 100,
+		}, u.dek)
+		if err != nil {
+			t.Fatalf("list %s rows: %v", catID, err)
+		}
+		if len(rows) != len(want) {
+			t.Fatalf("%s rows = %d, want %d", catID, len(rows), len(want))
+		}
+		for _, row := range rows {
+			if !want[row.Description] {
+				t.Errorf("%s: unexpected row %q", catID, row.Description)
+			}
+		}
+	}
+	checkCat(ids["Groceries"], descOf(0, 3))
+	checkCat(ids["Utilities"], descOf(3, 6))
+	// Reviews: exactly the expected rows are flagged, and the queue
+	// predicate (review_pending AND category_id IS NULL) proves the
+	// review rows kept category_id NULL.
+	pending, err := r.Txns.ReviewPending(ctx, uid, u.dek)
+	if err != nil {
+		t.Fatalf("review pending: %v", err)
+	}
+	if len(pending) != 4 {
+		t.Fatalf("review queue = %d, want 4", len(pending))
+	}
+	for i, row := range pending {
+		if row.ID != batch[6+i].ID {
+			t.Errorf("review queue row %d = %s, want %s", i, row.ID, batch[6+i].ID)
+		}
+	}
+	uncat, err := r.Txns.CountUncategorized(ctx, uid, u.dek)
+	if err != nil {
+		t.Fatalf("count uncategorized: %v", err)
+	}
+	if uncat != 0 {
+		t.Fatalf("uncategorised = %d, want 0", uncat)
+	}
+}
+
+// TestRunJobMissingCategoryFails pins the ownership strictness of the
+// batched apply: the category exists when the runner lists the user's
+// categories but is deleted before the apply probe (the hook runs at
+// the LLM call, after Cats.List), so the batch fails with
+// ErrCategoryNotFound, the job is 'failed' with the category error,
+// and nothing was applied.
+func TestRunJobMissingCategoryFails(t *testing.T) {
+	env := newRunnerEnv(t, "catgone")
+	uid := seedData(t, env, "catgone", []string{"Groceries"}, 1)
+	u := env.users["catgone"]
+	ctx := env.ctx
+	catStore := repo.NewCategoryStore(env.pool)
+	cats, err := catStore.List(ctx, uid, u.dek)
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	if len(cats) != 1 {
+		t.Fatalf("categories = %d, want 1", len(cats))
+	}
+	goneID := cats[0].ID
+	fake := &fakeCategorizer{in: 100, out: 50} // answers: item 1 auto Groceries
+	r := buildRunner(t, env, func(_, _, _ string) (llm.Categorizer, error) {
+		return &hookCategorizer{
+			next: fake,
+			hook: func() {
+				if err := catStore.Delete(ctx, uid, goneID); err != nil {
+					t.Errorf("delete category: %v", err)
+				}
+			},
+		}, nil
+	})
+	job, err := r.Jobs.Create(ctx, uid, "manual", nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := r.RunJob(ctx, job.ID, uid); err != nil {
+		t.Fatalf("RunJob (terminal state persisted, want nil): %v", err)
+	}
+	got, err := r.Jobs.Get(ctx, uid, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != "failed" || got.Total != 1 || got.Done != 0 ||
+		got.AutoApplied != 0 || got.ToReview != 0 ||
+		got.Error == nil || !strings.Contains(*got.Error, "category not found") {
+		t.Fatalf("job: %+v", got)
+	}
+	uncat, err := r.Txns.CountUncategorized(ctx, uid, u.dek)
+	if err != nil {
+		t.Fatalf("count uncategorized: %v", err)
+	}
+	if uncat != 1 {
+		t.Fatalf("uncategorised = %d, want 1", uncat)
+	}
+	var withCat int
+	if err := env.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND category_id IS NOT NULL`,
+		uid).Scan(&withCat); err != nil {
+		t.Fatalf("count categorized: %v", err)
+	}
+	if withCat != 0 {
+		t.Fatalf("categorised = %d, want 0", withCat)
+	}
+}
+
+// TestRunJobNoSuggestionsBreaks pins the applied==0 stuck guard with a
+// clean empty answer (the LLM returns "[]"): the batched apply is a
+// no-op (empty inputs), the job finishes 'done' with done=0, the
+// tokens are still counted, and the rows stay uncategorised.
+func TestRunJobNoSuggestionsBreaks(t *testing.T) {
+	env := newRunnerEnv(t, "nosugs")
+	uid := seedData(t, env, "nosugs", []string{"Groceries"}, 3)
+	fake := &fakeCategorizer{
+		in: 100, out: 50,
+		garbage: json.RawMessage(`[]`),
+	}
+	r := buildRunner(t, env, func(_, _, _ string) (llm.Categorizer, error) {
+		return fake, nil
+	})
+	job, err := r.Jobs.Create(env.ctx, uid, "manual", nil)
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if err := r.RunJob(env.ctx, job.ID, uid); err != nil {
+		t.Fatalf("RunJob: %v", err)
+	}
+	got, err := r.Jobs.Get(env.ctx, uid, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got.Status != "done" || got.Total != 3 || got.Done != 0 ||
+		got.AutoApplied != 0 || got.ToReview != 0 ||
+		got.TokensIn != 100 || got.TokensOut != 50 {
+		t.Fatalf("job: %+v", got)
+	}
+	if n := len(fake.batchSizes()); n != 1 {
+		t.Fatalf("llm calls = %d, want 1", n)
+	}
+	uncat, err := r.Txns.CountUncategorized(env.ctx, uid, env.users["nosugs"].dek)
+	if err != nil {
+		t.Fatalf("count uncategorized: %v", err)
+	}
+	if uncat != 3 {
+		t.Fatalf("uncategorised = %d, want 3", uncat)
+	}
+	var review int
+	if err := env.pool.QueryRow(env.ctx,
+		`SELECT COUNT(*) FROM transactions WHERE user_id = $1 AND review_pending`,
+		uid).Scan(&review); err != nil {
+		t.Fatalf("count review: %v", err)
+	}
+	if review != 0 {
+		t.Fatalf("review pending = %d, want 0", review)
+	}
+}
+
 // TestRunJobNoCategories pins the fail-fast: a user with zero
 // categories gets a 'failed' job ("user has no categories") before any
 // LLM call and before the total is written.

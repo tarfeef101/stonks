@@ -208,20 +208,31 @@ func (r *Runner) RunJob(ctx context.Context, jobID, userID string) error {
 		if err != nil {
 			return r.failJob(ctx, jobID, model, fmt.Errorf("runner: categorise batch: %w", err))
 		}
-		auto, review := 0, 0
+		// One pass over the batch: auto-apply pairs (txn + category)
+		// and review txn ids, then two round trips (the per-row
+		// ApplySuggestion cost 25–50 round trips for a 25-row batch).
+		// The two updates touch disjoint columns (review_pending vs
+		// category_id), so their order cannot change the result; the
+		// review flags go first so the review queue is already
+		// populated when the category probe fails the job.
+		autos := make([]repo.CategoryPair, 0, len(sugs))
+		reviewIDs := make([]string, 0, len(sugs))
 		for i, s := range sugs {
-			var aerr error
 			if s.NeedsReview(r.Threshold) {
-				aerr = r.Txns.ApplySuggestion(ctx, userID, rows[i-1].ID, "", true)
-				review++
+				reviewIDs = append(reviewIDs, rows[i-1].ID)
 			} else {
-				aerr = r.Txns.ApplySuggestion(ctx, userID, rows[i-1].ID, s.CategoryID, false)
-				auto++
-			}
-			if aerr != nil {
-				return r.failJob(ctx, jobID, model, fmt.Errorf("runner: apply suggestion: %w", aerr))
+				autos = append(autos, repo.CategoryPair{TxnID: rows[i-1].ID, CategoryID: s.CategoryID})
 			}
 		}
+		if _, err := r.Txns.MarkReviewPending(ctx, userID, reviewIDs); err != nil {
+			return r.failJob(ctx, jobID, model, fmt.Errorf("runner: mark review pending: %w", err))
+		}
+		if _, err := r.Txns.ApplyCategories(ctx, userID, autos); err != nil {
+			return r.failJob(ctx, jobID, model, fmt.Errorf("runner: apply categories: %w", err))
+		}
+		// The repo methods are strict about the affected rows, so the
+		// lengths are truthful counts of applied rows.
+		auto, review := len(autos), len(reviewIDs)
 		applied := auto + review
 		// Advance ALWAYS records the batch (tokens count even when
 		// nothing applied); the stuck guard comes after.
