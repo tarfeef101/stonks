@@ -1,13 +1,13 @@
 // importRun is the final step (4.6) of the import pipeline: it applies
 // the job's confirmed mapping to the uploaded statement, normalizes
-// dates and amounts, and writes each row through the transaction
-// store's dedup-aware Upsert, so re-importing a file inserts nothing
-// new (colliding rows come back "skipped"). A job must be in the
-// "mapping" state; the run walks mapping -> importing -> done | failed.
-// Row-level decode errors never fail the run: they are collected in
-// result.Errors and the remaining rows are imported. Structural
-// failures (unreadable file, invalid mapping, store errors) fail the
-// run.
+// dates and amounts, and writes the rows in one dedup-aware batch
+// (the transaction store's UpsertBatch), so re-importing a file
+// inserts nothing new (colliding rows come back "skipped"). A job must
+// be in the "mapping" state; the run walks mapping -> importing -> done
+// | failed. Row-level decode errors never fail the run: they are
+// collected in result.Errors and the remaining rows are imported.
+// Structural failures (unreadable file, invalid mapping, store errors)
+// fail the run.
 package server
 
 import (
@@ -249,6 +249,12 @@ func (h *handler) importRun(w http.ResponseWriter, r *http.Request) {
 
 	res := importRunResult{Errors: []rowError{}}
 	var offMin, offMax *time.Time // posted-date range of the inserted rows
+	// Decode every row first — the row-level errors above are the only
+	// per-row outcome that is not a landed/skipped row — then hand the
+	// valid rows to the store as one batch: valid[i] and validDates[i]
+	// are the same row.
+	var valid []repo.TransactionIn
+	var validDates []time.Time
 	for i, row := range rows {
 		dateCell := cell(row, dateIdx)
 		date, err := parseImportDate(normalizeOFXZone(dateCell), layouts...)
@@ -269,28 +275,37 @@ func (h *handler) importRun(w http.ResponseWriter, r *http.Request) {
 			})
 			continue
 		}
-		in := repo.TransactionIn{
+		valid = append(valid, repo.TransactionIn{
 			AccountID:    job.AccountID,
 			DateExecuted: &date, // date_executed = date_posted always
 			DatePosted:   date,
 			Amount:       amount,
 			Description:  strings.TrimSpace(cell(row, descIdx)),
-		}
-		_, inserted, err := h.transactions.Upsert(ctx, c.row.ID, in, c.dek)
+		})
+		validDates = append(validDates, date)
+	}
+	if len(valid) > 0 {
+		// One dedup-aware batched upsert for the whole file; an
+		// all-bad file never touches the store and finishes "done",
+		// exactly as the per-row loop did.
+		landed, err := h.transactions.UpsertBatch(ctx, c.row.ID, valid, c.dek)
 		if err != nil {
 			h.runFatal(w, r, c, job, err)
 			return
 		}
-		if inserted {
-			res.Inserted++
-			if offMin == nil || date.Before(*offMin) {
-				offMin = &date
+		for i, didLand := range landed {
+			if didLand {
+				res.Inserted++
+				d := validDates[i]
+				if offMin == nil || d.Before(*offMin) {
+					offMin = &d
+				}
+				if offMax == nil || d.After(*offMax) {
+					offMax = &d
+				}
+			} else {
+				res.Skipped++
 			}
-			if offMax == nil || date.After(*offMax) {
-				offMax = &date
-			}
-		} else {
-			res.Skipped++
 		}
 	}
 

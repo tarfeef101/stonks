@@ -113,6 +113,22 @@ func (m *memTxStore) Upsert(ctx context.Context, userID string, in repo.Transact
 	return repo.Transaction{}, false, err
 }
 
+// UpsertBatch is the runner-facing batch form. The in-memory store has
+// no chunking or multi-row path, so it delegates to the per-row Upsert
+// in input order — the same dedup semantics the repo batch has (first
+// occurrence wins, colliding rows come back false).
+func (m *memTxStore) UpsertBatch(ctx context.Context, userID string, ins []repo.TransactionIn, dek []byte) ([]bool, error) {
+	perRow := make([]bool, len(ins))
+	for i, in := range ins {
+		_, inserted, err := m.Upsert(ctx, userID, in, dek)
+		if err != nil {
+			return nil, err
+		}
+		perRow[i] = inserted
+	}
+	return perRow, nil
+}
+
 // runErrRow / runResult decode the job row's result jsonb — the same
 // shape the runner marshals (inserted, skipped, per-row errors).
 type runErrRow struct {
