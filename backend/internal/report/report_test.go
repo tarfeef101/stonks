@@ -15,6 +15,8 @@ const (
 	catG = "11111111-1111-1111-1111-111111111111"
 	catD = "22222222-2222-2222-2222-222222222222"
 	catS = "33333333-3333-3333-3333-333333333333"
+	catA = "44444444-4444-4444-4444-444444444444"
+	catB = "55555555-5555-5555-5555-555555555555"
 )
 
 // fixData is the golden fixture: monthly, as of 2026-10-15 UTC
@@ -164,6 +166,16 @@ func TestTopMerchants(t *testing.T) {
 			t.Fatalf("got %v, want empty", got)
 		}
 	})
+	t.Run("new Row fields are ignored", func(t *testing.T) {
+		rich := []Row{
+			{Description: "A", Amount: "-2.00", CategoryID: catA, Date: time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC), Currency: "EUR"},
+			{Description: "A", Amount: "-3.00", CategoryID: catB, Currency: "GBP"},
+		}
+		want := []MerchantCount{{Name: "A", Count: 2, Total: "5.00"}}
+		if got := TopMerchants(rich, 10); !reflect.DeepEqual(want, got) {
+			t.Fatalf("got %v\nwant %v", got, want)
+		}
+	})
 }
 
 func TestRange(t *testing.T) {
@@ -285,39 +297,32 @@ func TestRenderFixture(t *testing.T) {
 	}
 }
 
-// fakeTx is a scriptable TxSource that records every call so Collect's
-// page walk and window choices can be asserted.
+// fakeTx is a scriptable TxSource that records every call so the
+// collector's page walk and window choices can be asserted. The window
+// is picked by From: curFrom (00:00 UTC of the current period's first
+// day) selects currentRows, anything else priorRows; List serves pages
+// of txPageSize.
 type fakeTx struct {
-	current   []CategorySpend
-	prior     []CategorySpend
-	rows      []Row
-	aggCalls  []aggCall
-	listCalls []ListFilter
-}
-
-type aggCall struct {
-	from, to time.Time
-	accounts []string
-}
-
-func (f *fakeTx) Aggregate(_ context.Context, _ string, from, to time.Time, accountIDs []string) ([]CategorySpend, error) {
-	f.aggCalls = append(f.aggCalls, aggCall{from: from, to: to, accounts: accountIDs})
-	if from.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) {
-		return f.current, nil
-	}
-	return f.prior, nil
+	curFrom     time.Time
+	currentRows []Row
+	priorRows   []Row
+	listCalls   []ListFilter
 }
 
 func (f *fakeTx) List(_ context.Context, _ string, fl ListFilter, _ []byte) ([]Row, error) {
 	f.listCalls = append(f.listCalls, fl)
-	end := fl.Offset + txPageSize
-	if end > len(f.rows) {
-		end = len(f.rows)
+	rows := f.currentRows
+	if !fl.From.Equal(f.curFrom) {
+		rows = f.priorRows
 	}
-	if fl.Offset >= len(f.rows) {
+	end := fl.Offset + txPageSize
+	if end > len(rows) {
+		end = len(rows)
+	}
+	if fl.Offset >= len(rows) {
 		return nil, nil
 	}
-	return f.rows[fl.Offset:end], nil
+	return rows[fl.Offset:end], nil
 }
 
 type fakeBudgets struct{ budgets []Budget }
@@ -332,32 +337,68 @@ func (f fakeCats) List(_ context.Context, _ string, _ []byte) ([]Name, error) {
 	return f.cats, nil
 }
 
+// fxCall is one FxSource.Factor invocation, as the collector issues it
+// (the row's date, from -> base).
+type fxCall struct {
+	date     time.Time
+	from, to string
+}
+
+// fakeFx is a scriptable FxSource: a known (from, to) pair returns its
+// factor, an unknown pair reports converted=false (the keep-original
+// path), and any row whose from currency equals errFrom fails with an
+// error. JPY is deliberately absent from the default factors so tests
+// can exercise the unresolvable-pair path.
+type fakeFx struct {
+	factors map[[2]string]float64
+	errFrom string
+	calls   []fxCall
+}
+
+func (f *fakeFx) Factor(_ context.Context, date time.Time, from, to string) (float64, bool, error) {
+	f.calls = append(f.calls, fxCall{date: date, from: from, to: to})
+	if f.errFrom != "" && from == f.errFrom {
+		return 0, false, fmt.Errorf("boom")
+	}
+	if factor, ok := f.factors[[2]string{from, to}]; ok {
+		return factor, true, nil
+	}
+	return 1, false, nil
+}
+
 func TestCollect(t *testing.T) {
 	asOf := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	oct1 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	oct31 := time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)
 	sep1 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	sep30 := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
-	current := []CategorySpend{
-		{CategoryID: catG, Spend: "612.30", Income: "0.00", Net: "-612.30"},
-		{CategoryID: catS, Spend: "0.00", Income: "4500.00", Net: "4500.00"},
-	}
-	prior := []CategorySpend{
-		{CategoryID: catG, Spend: "600.00", Income: "0.00", Net: "-600.00"},
-	}
-	// 250 rows: 3 merchant descriptions, interleaved income and
-	// empty-description rows; pages of 100 -> 100/100/50.
+	// 250 rows: 36 empty-description uncategorized spends of 1.00,
+	// 72 payroll incomes of 25.00, 142 merchant spends of 1.00; pages
+	// of 100 -> 100/100/50.
 	merch := []string{"Alpha Market", "Beta Coffee", "Gamma Fuel"}
 	rows := make([]Row, 0, 250)
 	for i := 0; i < 250; i++ {
 		switch {
 		case i%7 == 0:
-			rows = append(rows, Row{Description: "", Amount: "-1.00"})
+			rows = append(rows, Row{Description: "", Amount: "-1.00", CategoryID: ""})
 		case i%3 == 0:
-			rows = append(rows, Row{Description: "Payroll deposit", Amount: "+25.00"})
+			rows = append(rows, Row{Description: "Payroll deposit", Amount: "+25.00", CategoryID: catS})
 		default:
-			rows = append(rows, Row{Description: merch[i%3], Amount: fmt.Sprintf("-%d.%02d", 1+i%9, (i*7)%100)})
+			rows = append(rows, Row{Description: merch[i%3], Amount: "-1.00", CategoryID: catG})
 		}
+	}
+	priorRows := []Row{
+		{Description: "Sep market", Amount: "-50.00", CategoryID: catG},
+		{Description: "Sep payroll", Amount: "+4500.00", CategoryID: catS},
+	}
+	wantCurrent := []CategorySpend{
+		{CategoryID: "", Spend: "36.00", Income: "0.00", Net: "-36.00"},
+		{CategoryID: catG, Spend: "142.00", Income: "0.00", Net: "-142.00"},
+		{CategoryID: catS, Spend: "0.00", Income: "1800.00", Net: "1800.00"},
+	}
+	wantPrior := []CategorySpend{
+		{CategoryID: catG, Spend: "50.00", Income: "0.00", Net: "-50.00"},
+		{CategoryID: catS, Spend: "0.00", Income: "4500.00", Net: "4500.00"},
 	}
 	budgets := []Budget{
 		{Period: "month", Active: false, Targets: map[string]string{catG: "1.00"}},
@@ -367,7 +408,7 @@ func TestCollect(t *testing.T) {
 	cats := []Name{{ID: catG, Name: "Groceries"}, {ID: catD, Name: "Dining out"}}
 
 	t.Run("walks pages and wires data", func(t *testing.T) {
-		tx := &fakeTx{current: current, prior: prior, rows: rows}
+		tx := &fakeTx{curFrom: oct1, currentRows: rows, priorRows: priorRows}
 		col := &Collector{Tx: tx, Budget: fakeBudgets{budgets: budgets}, Category: fakeCats{cats: cats}}
 		data, err := col.Collect(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"))
 		if err != nil {
@@ -376,11 +417,11 @@ func TestCollect(t *testing.T) {
 		if data.Period != PeriodMonthly || !data.AsOf.Equal(asOf) {
 			t.Errorf("Period/AsOf = %v/%v", data.Period, data.AsOf)
 		}
-		if !reflect.DeepEqual(data.CategorySpend, current) {
-			t.Errorf("CategorySpend = %v, want %v", data.CategorySpend, current)
+		if !reflect.DeepEqual(data.CategorySpend, wantCurrent) {
+			t.Errorf("CategorySpend = %v, want %v", data.CategorySpend, wantCurrent)
 		}
-		if !reflect.DeepEqual(data.PriorCategorySpend, prior) {
-			t.Errorf("PriorCategorySpend = %v, want %v", data.PriorCategorySpend, prior)
+		if !reflect.DeepEqual(data.PriorCategorySpend, wantPrior) {
+			t.Errorf("PriorCategorySpend = %v, want %v", data.PriorCategorySpend, wantPrior)
 		}
 		if want := TopMerchants(rows, 10); !reflect.DeepEqual(data.Merchants, want) {
 			t.Errorf("Merchants = %v, want %v", data.Merchants, want)
@@ -397,29 +438,21 @@ func TestCollect(t *testing.T) {
 			t.Errorf("CategoryNames = %v, want %v", data.CategoryNames, wantNames)
 		}
 
-		if len(tx.aggCalls) != 2 {
-			t.Fatalf("Aggregate called %d times, want 2", len(tx.aggCalls))
-		}
-		if !tx.aggCalls[0].from.Equal(oct1) || !tx.aggCalls[0].to.Equal(oct31) || tx.aggCalls[0].accounts != nil {
-			t.Errorf("first Aggregate = (%v, %v, %v), want (Oct 1, Oct 31, nil)",
-				tx.aggCalls[0].from, tx.aggCalls[0].to, tx.aggCalls[0].accounts)
-		}
-		if !tx.aggCalls[1].from.Equal(sep1) || !tx.aggCalls[1].to.Equal(sep30) {
-			t.Errorf("second Aggregate = (%v, %v), want (Sep 1, Sep 30)",
-				tx.aggCalls[1].from, tx.aggCalls[1].to)
-		}
-		if len(tx.listCalls) != 3 {
-			t.Fatalf("List called %d times, want 3 (250 rows / page 100)", len(tx.listCalls))
+		if len(tx.listCalls) != 4 {
+			t.Fatalf("List called %d times, want 4 (3 current pages + 1 prior page)", len(tx.listCalls))
 		}
 		for i, wantOff := range []int{0, 100, 200} {
 			if !tx.listCalls[i].From.Equal(oct1) || !tx.listCalls[i].To.Equal(oct31) || tx.listCalls[i].Offset != wantOff {
 				t.Errorf("List[%d] = %v, want From=Oct 1 To=Oct 31 Offset=%d", i, tx.listCalls[i], wantOff)
 			}
 		}
+		if !tx.listCalls[3].From.Equal(sep1) || !tx.listCalls[3].To.Equal(sep30) || tx.listCalls[3].Offset != 0 {
+			t.Errorf("List[3] = %v, want From=Sep 1 To=Sep 30 Offset=0", tx.listCalls[3])
+		}
 	})
 
-	t.Run("empty prior aggregate normalizes to nil", func(t *testing.T) {
-		tx := &fakeTx{current: current, prior: []CategorySpend{}, rows: rows[:10]}
+	t.Run("empty prior normalizes to nil", func(t *testing.T) {
+		tx := &fakeTx{curFrom: oct1, currentRows: rows[:10]}
 		col := &Collector{Tx: tx, Budget: fakeBudgets{budgets: budgets}, Category: fakeCats{cats: cats}}
 		data, err := col.Collect(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"))
 		if err != nil {
@@ -431,7 +464,7 @@ func TestCollect(t *testing.T) {
 	})
 
 	t.Run("no matching active budget gives empty map", func(t *testing.T) {
-		tx := &fakeTx{current: current, prior: prior, rows: rows[:10]}
+		tx := &fakeTx{curFrom: oct1, currentRows: rows[:10], priorRows: priorRows}
 		other := []Budget{
 			{Period: "month", Active: false, Targets: map[string]string{catG: "1.00"}},
 			{Period: "year", Active: true, Targets: map[string]string{catG: "9.99"}},
@@ -447,12 +480,209 @@ func TestCollect(t *testing.T) {
 	})
 
 	t.Run("unknown period is an error", func(t *testing.T) {
-		tx := &fakeTx{current: current, prior: prior, rows: rows[:10]}
+		tx := &fakeTx{}
 		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}}
 		if _, err := col.Collect(context.Background(), "user-1", Period("weekly"), asOf, nil); err == nil {
 			t.Fatal("want error for unknown period")
 		} else if !strings.HasPrefix(err.Error(), "report: ") {
 			t.Fatalf("error %q must carry the report: prefix", err)
+		}
+	})
+}
+
+func TestCollectForFx(t *testing.T) {
+	asOf := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	oct1 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	oct5 := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+	oct12 := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	oct20 := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	sep5 := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	// newFx gives each subtest a fresh recorder with the default
+	// factors; JPY is deliberately absent so tests can exercise the
+	// unresolvable-pair (converted=false) path.
+	newFx := func() *fakeFx {
+		return &fakeFx{factors: map[[2]string]float64{
+			{"EUR", "USD"}: 1.10,
+			{"GBP", "USD"}: 0.80,
+			{"USD", "USD"}: 1.00,
+		}}
+	}
+	current := []Row{
+		{Description: "EUR spend", Amount: "-10.05", CategoryID: catA, Date: oct5, Currency: "EUR"},
+		{Description: "GBP spend", Amount: "-20.15", CategoryID: catA, Date: oct12, Currency: "GBP"},
+		{Description: "USD spend", Amount: "-3.21", CategoryID: catB, Currency: "USD"},
+		{Description: "Cash", Amount: "+7.77", CategoryID: catB},
+		{Description: "JPY spend", Amount: "-1.50", CategoryID: catB, Date: oct20, Currency: "JPY"},
+	}
+	prior := []Row{
+		{Description: "EUR prior", Amount: "-100.00", CategoryID: catA, Date: sep5, Currency: "EUR"},
+		{Description: "USD prior", Amount: "+2.00", CategoryID: catB, Currency: "USD"},
+	}
+
+	t.Run("converts both windows at the row date", func(t *testing.T) {
+		fx := newFx()
+		tx := &fakeTx{curFrom: oct1, currentRows: current, priorRows: prior}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		data, err := col.CollectFor(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"), "USD")
+		if err != nil {
+			t.Fatalf("CollectFor: %v", err)
+		}
+		// -10.05 EUR at 1.10 -> -11.06 (1105.5 cents rounds half away
+		// from zero); -20.15 GBP at 0.80 -> -16.12; JPY stays raw.
+		wantCurrent := []CategorySpend{
+			{CategoryID: catA, Spend: "27.18", Income: "0.00", Net: "-27.18"},
+			{CategoryID: catB, Spend: "4.71", Income: "7.77", Net: "3.06"},
+		}
+		// -100.00 EUR at 1.10 -> -110.00; USD prior is identity.
+		wantPrior := []CategorySpend{
+			{CategoryID: catA, Spend: "110.00", Income: "0.00", Net: "-110.00"},
+			{CategoryID: catB, Spend: "0.00", Income: "2.00", Net: "2.00"},
+		}
+		if !reflect.DeepEqual(data.CategorySpend, wantCurrent) {
+			t.Fatalf("CategorySpend = %v, want %v", data.CategorySpend, wantCurrent)
+		}
+		if !reflect.DeepEqual(data.PriorCategorySpend, wantPrior) {
+			t.Fatalf("PriorCategorySpend = %v, want %v", data.PriorCategorySpend, wantPrior)
+		}
+		// Identity (USD) and empty-currency rows never reach the source;
+		// the rest are looked up in walk order: current window first.
+		wantCalls := []fxCall{
+			{date: oct5, from: "EUR", to: "USD"},
+			{date: oct12, from: "GBP", to: "USD"},
+			{date: oct20, from: "JPY", to: "USD"},
+			{date: sep5, from: "EUR", to: "USD"},
+		}
+		if !reflect.DeepEqual(fx.calls, wantCalls) {
+			t.Fatalf("fx calls = %v, want %v", fx.calls, wantCalls)
+		}
+		// Merchants are the current period only, from the RAW
+		// (unconverted) amounts: "EUR spend" stays 10.05, not 11.06.
+		wantMerch := []MerchantCount{
+			{Name: "EUR spend", Count: 1, Total: "10.05"},
+			{Name: "GBP spend", Count: 1, Total: "20.15"},
+			{Name: "JPY spend", Count: 1, Total: "1.50"},
+			{Name: "USD spend", Count: 1, Total: "3.21"},
+		}
+		if !reflect.DeepEqual(data.Merchants, wantMerch) {
+			t.Fatalf("Merchants = %v, want %v (raw amounts)", data.Merchants, wantMerch)
+		}
+	})
+
+	t.Run("missing pair keeps the original amount", func(t *testing.T) {
+		fx := newFx()
+		tx := &fakeTx{curFrom: oct1, currentRows: []Row{
+			{Description: "JPY spend", Amount: "-1.50", CategoryID: catB, Date: oct20, Currency: "JPY"},
+		}}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		data, err := col.CollectFor(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"), "USD")
+		if err != nil {
+			t.Fatalf("CollectFor: %v", err)
+		}
+		want := []CategorySpend{{CategoryID: catB, Spend: "1.50", Income: "0.00", Net: "-1.50"}}
+		if !reflect.DeepEqual(data.CategorySpend, want) {
+			t.Fatalf("CategorySpend = %v, want %v (raw kept)", data.CategorySpend, want)
+		}
+		if len(fx.calls) != 1 || fx.calls[0].from != "JPY" || fx.calls[0].to != "USD" {
+			t.Fatalf("fx calls = %v, want one JPY -> USD lookup", fx.calls)
+		}
+	})
+
+	t.Run("identity and empty currency make no fx calls", func(t *testing.T) {
+		fx := newFx()
+		tx := &fakeTx{curFrom: oct1, currentRows: []Row{
+			{Description: "USD spend", Amount: "-3.21", CategoryID: catB, Currency: "USD"},
+			{Description: "Cash", Amount: "+7.77", CategoryID: catB},
+		}}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		data, err := col.CollectFor(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"), "USD")
+		if err != nil {
+			t.Fatalf("CollectFor: %v", err)
+		}
+		want := []CategorySpend{{CategoryID: catB, Spend: "3.21", Income: "7.77", Net: "4.56"}}
+		if !reflect.DeepEqual(data.CategorySpend, want) {
+			t.Fatalf("CategorySpend = %v, want %v", data.CategorySpend, want)
+		}
+		if len(fx.calls) != 0 {
+			t.Fatalf("fx calls = %v, want none", fx.calls)
+		}
+	})
+
+	t.Run("empty base keeps raw sums even with Fx set", func(t *testing.T) {
+		// Pins the pre-change Aggregate equivalence: Collect (base "")
+		// sums the raw amounts exactly, with zero FxSource traffic.
+		fx := newFx()
+		tx := &fakeTx{curFrom: oct1, currentRows: []Row{
+			{Description: "EUR", Amount: "-300.00", CategoryID: catG, Currency: "EUR"},
+			{Description: "GBP", Amount: "-312.30", CategoryID: catG, Currency: "GBP"},
+			{Description: "JPY", Amount: "+4500.00", CategoryID: catS, Currency: "JPY"},
+		}}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		data, err := col.Collect(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"))
+		if err != nil {
+			t.Fatalf("Collect: %v", err)
+		}
+		want := []CategorySpend{
+			{CategoryID: catG, Spend: "612.30", Income: "0.00", Net: "-612.30"},
+			{CategoryID: catS, Spend: "0.00", Income: "4500.00", Net: "4500.00"},
+		}
+		if !reflect.DeepEqual(data.CategorySpend, want) {
+			t.Fatalf("CategorySpend = %v, want %v", data.CategorySpend, want)
+		}
+		if len(fx.calls) != 0 {
+			t.Fatalf("fx calls = %v, want none", fx.calls)
+		}
+	})
+
+	t.Run("empty prior with base set normalizes to nil", func(t *testing.T) {
+		fx := newFx()
+		tx := &fakeTx{curFrom: oct1, currentRows: []Row{
+			{Description: "USD", Amount: "-1.00", CategoryID: catB, Currency: "USD"},
+		}}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		data, err := col.CollectFor(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"), "USD")
+		if err != nil {
+			t.Fatalf("CollectFor: %v", err)
+		}
+		if data.PriorCategorySpend != nil {
+			t.Fatalf("PriorCategorySpend = %v, want nil", data.PriorCategorySpend)
+		}
+	})
+
+	t.Run("fx error aborts the collection", func(t *testing.T) {
+		fx := newFx()
+		fx.errFrom = "EUR"
+		tx := &fakeTx{curFrom: oct1, currentRows: []Row{
+			{Description: "EUR", Amount: "-10.05", CategoryID: catA, Date: oct5, Currency: "EUR"},
+		}}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		_, err := col.CollectFor(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"), "USD")
+		if err == nil {
+			t.Fatal("want error for an fx rate failure")
+		}
+		if !strings.HasPrefix(err.Error(), "report: fx rate:") {
+			t.Fatalf("error %q must carry the report: fx rate: prefix", err)
+		}
+	})
+
+	t.Run("rows sort by CategoryID with uncategorized first", func(t *testing.T) {
+		fx := newFx()
+		tx := &fakeTx{curFrom: oct1, currentRows: []Row{
+			{Description: "b", Amount: "-1.00", CategoryID: catB},
+			{Description: "a", Amount: "-2.00", CategoryID: catA},
+			{Description: "u", Amount: "-3.00", CategoryID: ""},
+		}}
+		col := &Collector{Tx: tx, Budget: fakeBudgets{}, Category: fakeCats{}, Fx: fx}
+		data, err := col.CollectFor(context.Background(), "user-1", PeriodMonthly, asOf, []byte("dek"), "USD")
+		if err != nil {
+			t.Fatalf("CollectFor: %v", err)
+		}
+		want := []CategorySpend{
+			{CategoryID: "", Spend: "3.00", Income: "0.00", Net: "-3.00"},
+			{CategoryID: catA, Spend: "2.00", Income: "0.00", Net: "-2.00"},
+			{CategoryID: catB, Spend: "1.00", Income: "0.00", Net: "-1.00"},
+		}
+		if !reflect.DeepEqual(data.CategorySpend, want) {
+			t.Fatalf("CategorySpend = %v, want %v", data.CategorySpend, want)
 		}
 	})
 }

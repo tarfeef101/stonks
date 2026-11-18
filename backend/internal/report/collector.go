@@ -3,6 +3,9 @@ package report
 import (
 	"context"
 	"fmt"
+	"math"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -14,10 +17,11 @@ import (
 const txPageSize = 100
 
 // ListFilter selects one page of transaction rows for TxSource.List:
-// [From, To] inclusive at date precision (the same window semantics
-// TxSource.Aggregate uses), Offset the zero-based row offset. Ordering
-// is the source's (repo: date_posted DESC, id DESC); the collector
-// advances Offset by each page's length until a short page.
+// [From, To] inclusive at date precision (the same windows Range
+// produces, passed through unchanged), Offset the zero-based row
+// offset. Ordering is the source's (repo: date_posted DESC, id DESC);
+// the collector advances Offset by each page's length until a short
+// page.
 type ListFilter struct {
 	From   time.Time
 	To     time.Time
@@ -29,10 +33,25 @@ type ListFilter struct {
 // internal/server or internal/repo types) so step 8.3 can implement it
 // with a small adapter over *repo.TransactionStore. CategorySpend and
 // Row are the report-local structs; the adapter copies the repo types.
-// Aggregate's accountIDs is the account filter (nil = all accounts).
+// The per-category math happens here (categorySpend), not in the
+// source: both periods share one code path, and the optional per-row
+// FX conversion runs before the sums (see FxSource).
 type TxSource interface {
-	Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]CategorySpend, error)
 	List(ctx context.Context, userID string, f ListFilter, dek []byte) ([]Row, error)
+}
+
+// FxSource resolves one conversion factor per row: Factor returns the
+// factor that turns an amount in from (ISO-4217) into to as of date
+// (the row's date_posted). converted is false when the source cannot
+// resolve the pair (no rate on or before date for it): the collector
+// keeps the row's original amount and does NOT fail the collection.
+// Any other failure is an error and aborts the collection (wrapped as
+// "report: fx rate: %w").
+//
+// This package must not import internal/fx: the worker's adapter
+// implements FxSource over the fx.Client (TECH-DECISIONS.md D-027).
+type FxSource interface {
+	Factor(ctx context.Context, date time.Time, from, to string) (factor float64, converted bool, err error)
 }
 
 // Budget is one budget row as the collector consumes it; the adapter
@@ -68,24 +87,43 @@ type CategorySource interface {
 	List(ctx context.Context, userID string, dek []byte) ([]Name, error)
 }
 
-// Collector gathers a Data snapshot from the three narrow sources. All
+// Collector gathers a Data snapshot from the narrow sources. All
 // time-dependent input is explicit (asOf); Collect never calls now().
+// Fx nil = no conversion: rows stay in their account's own currency.
 type Collector struct {
 	Tx       TxSource
 	Budget   BudgetSource
 	Category CategorySource
+	Fx       FxSource
 }
 
-// Collect gathers the Data snapshot for period p as of asOf:
-// Aggregates the current and prior period, walks Tx.List for the
-// CURRENT period only (merchant counts are current-period only) and
-// derives TopMerchants from those rows, takes the first active
-// period-matching budget's targets (empty map when none — not an
-// error), and maps category ids to names. An empty prior aggregate
-// normalizes to a nil slice, so Generate renders no comparison section
-// for a user's first period. dek is passed through to the sources for
-// field decryption.
+// Collect gathers the Data snapshot for period p as of asOf without FX
+// conversion (each row stays in its account's own currency). It
+// delegates to CollectFor with an empty base, which is numerically the
+// pre-change behavior: per-category sums over the walked rows plus
+// current-period merchants, the first active period-matching budget's
+// targets (empty map when none — not an error), and category names. An
+// empty prior window normalizes to a nil slice, so Generate renders no
+// comparison section for a user's first period. dek is passed through
+// to the sources for field decryption.
 func (c *Collector) Collect(ctx context.Context, userID string, p Period, asOf time.Time, dek []byte) (Data, error) {
+	return c.CollectFor(ctx, userID, p, asOf, dek, "")
+}
+
+// CollectFor gathers the Data snapshot for period p as of asOf, with
+// optional FX conversion: when base (ISO-4217) is non-empty and Fx is
+// set, each row whose Currency is non-empty and differs from base is
+// converted into base at its Date (an unresolvable pair keeps the
+// original amount — see FxSource). An empty base means no conversion
+// even when Fx is set.
+//
+// Both windows are walked (current first, then prior) and their
+// CategorySpend computed by the same categorySpend; an empty prior
+// normalizes to a nil slice. Merchants is the current period only,
+// always from the raw (unconverted) row amounts. An unknown period is
+// an error before any source is touched. dek is passed through to the
+// sources for field decryption.
+func (c *Collector) CollectFor(ctx context.Context, userID string, p Period, asOf time.Time, dek []byte, base string) (Data, error) {
 	// Validate p before touching the sources: an unknown period is a
 	// caller bug surfaced as the documented error rather than Range's
 	// panic.
@@ -95,21 +133,25 @@ func (c *Collector) Collect(ctx context.Context, userID string, p Period, asOf t
 	from, to, _ := Range(asOf, p)
 	priorFrom, priorTo, _ := Range(priorAsOf(asOf, p), p)
 
-	current, err := c.Tx.Aggregate(ctx, userID, from, to, nil)
+	currentRows, err := c.listAll(ctx, userID, from, to, dek)
 	if err != nil {
-		return Data{}, fmt.Errorf("report: aggregate current period: %w", err)
+		return Data{}, err
 	}
-	prior, err := c.Tx.Aggregate(ctx, userID, priorFrom, priorTo, nil)
+	priorRows, err := c.listAll(ctx, userID, priorFrom, priorTo, dek)
 	if err != nil {
-		return Data{}, fmt.Errorf("report: aggregate prior period: %w", err)
+		return Data{}, err
+	}
+
+	current, err := categorySpend(ctx, currentRows, base, c.Fx)
+	if err != nil {
+		return Data{}, err
+	}
+	prior, err := categorySpend(ctx, priorRows, base, c.Fx)
+	if err != nil {
+		return Data{}, err
 	}
 	if len(prior) == 0 {
 		prior = nil
-	}
-
-	rows, err := c.listAll(ctx, userID, from, to, dek)
-	if err != nil {
-		return Data{}, err
 	}
 
 	targets, err := c.budgetTargets(ctx, userID, p, dek)
@@ -130,7 +172,7 @@ func (c *Collector) Collect(ctx context.Context, userID string, p Period, asOf t
 		Period:             p,
 		AsOf:               asOf,
 		CategorySpend:      current,
-		Merchants:          TopMerchants(rows, 10),
+		Merchants:          TopMerchants(currentRows, 10),
 		PriorCategorySpend: prior,
 		BudgetTargets:      targets,
 		CategoryNames:      names,
@@ -154,6 +196,58 @@ func (c *Collector) listAll(ctx context.Context, userID string, from, to time.Ti
 		}
 		offset += len(page)
 	}
+}
+
+// categorySpend sums one window's rows into per-category spend, income
+// and net. A row is converted into base only when base != "", fx !=
+// nil, and the row's Currency is non-empty and != base: the converted
+// value is round(originalCents × factor) (half away from zero) and the
+// sign is the original cents' (a factor is always positive). An
+// unresolvable pair (converted == false) keeps the original amount.
+// The output is sorted by CategoryID ("" = uncategorized first),
+// matching the old SQL aggregate's ORDER BY category_id NULLS FIRST. A
+// non-canonical row Amount fails the collection (the adapter
+// re-canonicalizes on scan, so a parse failure is a caller bug). Empty
+// input yields an empty non-nil slice.
+func categorySpend(ctx context.Context, rows []Row, base string, fx FxSource) ([]CategorySpend, error) {
+	type acc struct{ spend, income int64 }
+	by := make(map[string]*acc)
+	for _, r := range rows {
+		cents, err := parse2dec(r.Amount)
+		if err != nil {
+			return nil, fmt.Errorf("report: row %q: %s", r.Amount, strings.TrimPrefix(err.Error(), "report: "))
+		}
+		if base != "" && fx != nil && r.Currency != "" && r.Currency != base {
+			factor, converted, err := fx.Factor(ctx, r.Date, r.Currency, base)
+			if err != nil {
+				return nil, fmt.Errorf("report: fx rate: %w", err)
+			}
+			if converted {
+				cents = int64(math.Round(float64(cents) * factor))
+			}
+		}
+		a := by[r.CategoryID]
+		if a == nil {
+			a = &acc{}
+			by[r.CategoryID] = a
+		}
+		if cents < 0 {
+			a.spend += -cents
+		} else {
+			a.income += cents
+		}
+	}
+	out := make([]CategorySpend, 0, len(by))
+	for id, a := range by {
+		out = append(out, CategorySpend{
+			CategoryID: id,
+			Spend:      fmt2dec(a.spend),
+			Income:     fmt2dec(a.income),
+			Net:        fmt2dec(a.income - a.spend),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CategoryID < out[j].CategoryID })
+	return out, nil
 }
 
 // budgetTargets returns the targets of the first active budget whose

@@ -3,13 +3,16 @@
 // a comparison against the prior period. The package is database-free on
 // purpose — Generate and the Render functions are pure over a Data
 // snapshot, and Collector gathers that snapshot through the narrow
-// TxSource/BudgetSource/CategorySource interfaces. Step 8.3 (the cron
-// worker) will call Collector.Collect, Generate, and RenderText/
-// RenderHTML and hand the two renderings to the step 8.1 mailer
-// (multipart/alternative text + inline-CSS HTML).
+// TxSource/BudgetSource/CategorySource/FxSource interfaces. Step 8.3
+// (the cron worker) will call Collector.CollectFor, Generate, and
+// RenderText/RenderHTML and hand the two renderings to the step 8.1
+// mailer (multipart/alternative text + inline-CSS HTML).
 //
 // Money is canonical 2-decimal strings on every boundary and int64 at
-// scale 100 internally; float64 never touches a money value.
+// scale 100 internally; float64 never touches a money value. The one
+// exception is FX conversion in the collector (D-027): the factor is a
+// float64, and the converted amount is rounded back to int64 cents
+// before it enters any sum.
 package report
 
 import (
@@ -154,11 +157,12 @@ type Report struct {
 }
 
 // Data is the snapshot Generate works from. CategorySpend and
-// PriorCategorySpend come from a TransactionStore.Aggregate pair (the
-// caller sorts; Generate preserves the order); Merchants is the
-// caller's top-N (TopMerchants computes it from rows when wanted);
-// BudgetTargets maps category id -> canonical 2-decimal target (absent
-// = no target); CategoryNames maps category id -> name.
+// PriorCategorySpend come from the collector's categorySpend over the
+// walked rows of the current and prior windows (both sorted by
+// CategoryID; Generate preserves the order); Merchants is the caller's
+// top-N (TopMerchants computes it from rows when wanted); BudgetTargets
+// maps category id -> canonical 2-decimal target (absent = no target);
+// CategoryNames maps category id -> name.
 type Data struct {
 	Period             Period
 	AsOf               time.Time
@@ -169,12 +173,19 @@ type Data struct {
 	CategoryNames      map[string]string
 }
 
-// Row is one transaction row for TopMerchants: Description is the
-// decrypted memo and Amount the canonical 2-decimal signed amount
-// (negative = spend).
+// Row is one transaction row. TopMerchants reads only Description (the
+// decrypted memo) and Amount (the canonical 2-decimal signed amount,
+// negative = spend); the collector's categorySpend also reads
+// CategoryID (the row's category, "" = uncategorized — a NULL or
+// deleted category), Date (the row's date_posted at UTC date precision;
+// zero = no FX lookup) and Currency (the account's ISO-4217 code; empty
+// = no FX conversion).
 type Row struct {
 	Description string
 	Amount      string
+	CategoryID  string
+	Date        time.Time
+	Currency    string
 }
 
 // Generate builds a Report from d. It is pure (no ctx, no DB, no
@@ -353,10 +364,11 @@ func fmt2dec(cents int64) string {
 		cents = -cents
 	}
 	frac := cents % 100
-	out := strconv.FormatInt(cents/100, 10) + "." + strconv.FormatInt(frac, 10)
+	fracStr := strconv.FormatInt(frac, 10)
 	if frac < 10 {
-		out += "0"
+		fracStr = "0" + fracStr
 	}
+	out := strconv.FormatInt(cents/100, 10) + "." + fracStr
 	if neg {
 		out = "-" + out
 	}
