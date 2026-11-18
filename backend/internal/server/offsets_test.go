@@ -52,7 +52,7 @@ func (s *memOffsetStore) InsertOffsetSuggestions(ctx context.Context, userID str
 	return s.insN, s.insErr
 }
 
-func (s *memOffsetStore) ListOffsetSuggestions(ctx context.Context, userID string, dek []byte) ([]repo.OffsetSuggestion, error) {
+func (s *memOffsetStore) ListOffsetSuggestions(ctx context.Context, userID string, dek []byte, limit, offset int) ([]repo.OffsetSuggestion, error) {
 	return s.sugs, s.listErr
 }
 
@@ -76,7 +76,7 @@ func (s *memOffsetStore) ClearOffsetGroup(ctx context.Context, userID, id string
 	return s.clearErr
 }
 
-func (s *memOffsetStore) ListOffsetGroups(ctx context.Context, userID string, dek []byte) ([]repo.OffsetGroup, error) {
+func (s *memOffsetStore) ListOffsetGroups(ctx context.Context, userID string, dek []byte, limit, offset int) ([]repo.OffsetGroup, error) {
 	return s.groups, s.groupsErr
 }
 
@@ -91,7 +91,7 @@ func newOffsetServer(t *testing.T, store OffsetStore) (http.Handler, jwk.Key) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, store), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, store, nil), key
 }
 
 // offsetTx is a canned repo.Transaction leg with only the fields the

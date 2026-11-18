@@ -33,7 +33,7 @@ func TestCategoriseEndpoints(t *testing.T) {
 	}
 	jobs := repo.NewCategoriseJobStore(pool)
 	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil,
-		nil, nil, nil, nil, nil, nil, nil, jobs, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil)
+		nil, nil, nil, nil, nil, nil, nil, jobs, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil)
 	mine := authHdr(mintIdentityToken(t, key, "cat-core", "cat-core@localhost", "cat-core", "cat-core"))
 	theirs := authHdr(mintIdentityToken(t, key, "cat-other", "cat-other@localhost", "cat-other", "cat-other"))
 
@@ -53,7 +53,7 @@ func TestCategoriseEndpoints(t *testing.T) {
 
 	t.Run("nil store", func(t *testing.T) {
 		hNil := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil,
-			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil)
+			nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil)
 		code, body := doReq(t, hNil, http.MethodPost, "/api/v1/categorise", "", mine)
 		if code != http.StatusServiceUnavailable {
 			t.Fatalf("status = %d, want 503 (body %s)", code, body)

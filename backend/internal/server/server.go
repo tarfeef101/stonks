@@ -117,6 +117,7 @@ type handler struct {
 	institutions  InstitutionStore
 	fiCredentials FICredentialStore
 	offsets       OffsetStore
+	fx            FX
 	m             *httpMetrics
 }
 
@@ -169,12 +170,14 @@ type handler struct {
 // POST /api/v1/offsets/scan, GET /api/v1/offsets/suggestions, the
 // suggestion accept/dismiss writes, POST/GET /api/v1/offsets/groups
 // and DELETE /api/v1/offsets/groups/{id}); nil and those routes answer
-// 503.
+// 503. fx resolves the display-only FX rates the summary and
+// transaction routes convert into the user's default currency
+// (REVIEW-PLAN §4.4); nil leaves every amount in its own currency.
 // mailer
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
 // reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore, fx FX) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -203,6 +206,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		institutions:  institutions,
 		fiCredentials: fiCredentials,
 		offsets:       offsets,
+		fx:            fx,
 		m:             newHTTPMetrics(),
 	}
 

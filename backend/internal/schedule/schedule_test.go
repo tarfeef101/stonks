@@ -55,7 +55,8 @@ func (f *fakeUsers) List(ctx context.Context) ([]User, error) {
 // fakeCollector returns a minimal valid Data (one category row with
 // canonical money, a category name; nil Merchants/PriorCategorySpend —
 // Generate and both renderers accept it, and Generate's output always
-// passes checkReport). Collect runs concurrently under the dispatcher's
+// passes checkReport). CollectFor runs concurrently under the
+// dispatcher's
 // bounded fan-out: calls is mutex-guarded, and inflight/maxFlight are
 // atomics the bounded-concurrency test asserts on (incr before the
 // work, max-observe, decr after).
@@ -68,7 +69,7 @@ type fakeCollector struct {
 	maxFlight int64 // atomic: observed max concurrent Collects
 }
 
-func (c *fakeCollector) Collect(ctx context.Context, userID string, p report.Period, asOf time.Time, dek []byte) (report.Data, error) {
+func (c *fakeCollector) CollectFor(ctx context.Context, userID string, p report.Period, asOf time.Time, dek []byte, base string) (report.Data, error) {
 	n := atomic.AddInt64(&c.inflight, 1)
 	for {
 		cur := atomic.LoadInt64(&c.maxFlight)

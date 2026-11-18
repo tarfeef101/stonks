@@ -252,13 +252,21 @@ func (s *TransactionStore) InsertOffsetSuggestions(ctx context.Context, userID s
 }
 
 // ListOffsetSuggestions returns the caller's pending suggestions,
-// oldest first, with both legs opened.
-func (s *TransactionStore) ListOffsetSuggestions(ctx context.Context, userID string, dek []byte) ([]OffsetSuggestion, error) {
+// oldest first, with both legs opened. limit <= 0 defaults to 100
+// and offset < 0 clamps to 0.
+func (s *TransactionStore) ListOffsetSuggestions(ctx context.Context, userID string, dek []byte, limit, offset int) ([]OffsetSuggestion, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, tx_a, tx_b, created_at
 		FROM offset_suggestions
 		WHERE user_id = $1 AND status = 'pending'
-		ORDER BY created_at, id`, userID)
+		ORDER BY created_at, id
+		LIMIT $2 OFFSET $3`, userID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("repo: list offset suggestions: %w", err)
 	}
@@ -482,13 +490,47 @@ func (s *TransactionStore) ClearOffsetGroup(ctx context.Context, userID, id stri
 }
 
 // ListOffsetGroups returns the caller's active groups, members opened
-// and in (date_posted, id) order within a group.
-func (s *TransactionStore) ListOffsetGroups(ctx context.Context, userID string, dek []byte) ([]OffsetGroup, error) {
+// and in (date_posted, id) order within a group, paged by group id
+// (limit <= 0 defaults to 100, offset < 0 clamps to 0). An empty page
+// answers an empty slice without loading member rows.
+func (s *TransactionStore) ListOffsetGroups(ctx context.Context, userID string, dek []byte, limit, offset int) ([]OffsetGroup, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT offset_group_id, id
+		SELECT DISTINCT offset_group_id
 		FROM transactions
 		WHERE user_id = $1 AND offset_group_id IS NOT NULL
-		ORDER BY offset_group_id, date_posted, id`, userID)
+		ORDER BY offset_group_id
+		LIMIT $2 OFFSET $3`, userID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list offset group ids: %w", err)
+	}
+	var gids []string
+	for rows.Next() {
+		var gid string
+		if err := rows.Scan(&gid); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("repo: scan offset group id: %w", err)
+		}
+		gids = append(gids, gid)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("repo: iterate offset group ids: %w", err)
+	}
+	rows.Close()
+	if len(gids) == 0 {
+		return []OffsetGroup{}, nil
+	}
+	rows, err = s.pool.Query(ctx, `
+		SELECT offset_group_id, id
+		FROM transactions
+		WHERE user_id = $1 AND offset_group_id = ANY($2)
+		ORDER BY offset_group_id, date_posted, id`, userID, gids)
 	if err != nil {
 		return nil, fmt.Errorf("repo: list offset groups: %w", err)
 	}

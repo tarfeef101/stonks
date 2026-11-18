@@ -14,9 +14,11 @@ import (
 
 // dispatchUserQuery is the pinned user listing: every ONBOARDED user
 // with at least one notify flag (the period filtering happens in Go —
-// one query, once per dispatch execution).
+// one query, once per dispatch execution). default_currency is the
+// report's base currency (users.default_currency is NOT NULL).
 const dispatchUserQuery = `
-	SELECT id, email, onboarded_at, notify_monthly, notify_quarterly, notify_annual
+	SELECT id, email, onboarded_at, notify_monthly, notify_quarterly, notify_annual,
+	       default_currency
 	FROM users
 	WHERE onboarded_at IS NOT NULL
 	  AND (notify_monthly OR notify_quarterly OR notify_annual)`
@@ -46,7 +48,7 @@ func (l *PoolUserLister) List(ctx context.Context) ([]User, error) {
 			u         User
 			onboarded *time.Time
 		)
-		if err := rows.Scan(&u.ID, &u.Email, &onboarded, &u.Monthly, &u.Quarterly, &u.Annual); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &onboarded, &u.Monthly, &u.Quarterly, &u.Annual, &u.DefaultCurrency); err != nil {
 			return nil, fmt.Errorf("schedule: scan dispatch user: %w", err)
 		}
 		u.Onboarded = onboarded != nil
@@ -107,41 +109,23 @@ func NewTransactionAdapter(store *repo.TransactionStore) *TransactionAdapter {
 	return &TransactionAdapter{Store: store}
 }
 
-// Aggregate is a 1:1 copy of repo.TransactionStore.Aggregate's rows
-// (repo.CategorySpend -> report.CategorySpend, field for field).
-func (a *TransactionAdapter) Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]report.CategorySpend, error) {
-	rows, err := a.Store.Aggregate(ctx, userID, from, to, accountIDs)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]report.CategorySpend, 0, len(rows))
-	for _, g := range rows {
-		out = append(out, report.CategorySpend{
-			CategoryID: g.CategoryID,
-			Spend:      g.Spend,
-			Income:     g.Income,
-			Net:        g.Net,
-		})
-	}
-	return out, nil
-}
-
 // List pages one report.ListFilter window (the limit pinned to the
-// repo hard cap) and copies the rows to report.Row.
+// repo hard cap) through the narrow ListReportRows query and copies
+// all five report fields.
 func (a *TransactionAdapter) List(ctx context.Context, userID string, f report.ListFilter, dek []byte) ([]report.Row, error) {
-	from, to := f.From, f.To
-	rows, err := a.Store.List(ctx, userID, repo.TransactionFilter{
-		DateFrom: &from,
-		DateTo:   &to,
-		Limit:    txPageLimit,
-		Offset:   f.Offset,
-	}, dek)
+	rows, err := a.Store.ListReportRows(ctx, userID, f.From, f.To, txPageLimit, f.Offset, dek)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]report.Row, 0, len(rows))
-	for _, tx := range rows {
-		out = append(out, report.Row{Description: tx.Description, Amount: tx.Amount})
+	for _, r := range rows {
+		out = append(out, report.Row{
+			Description: r.Description,
+			Amount:      r.Amount,
+			CategoryID:  r.CategoryID,
+			Date:        r.Date,
+			Currency:    r.Currency,
+		})
 	}
 	return out, nil
 }

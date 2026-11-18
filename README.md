@@ -12,11 +12,11 @@ budgets, dashboards, and a mortgage what-if tool. Per-user encryption at rest.
 
     cp .env.example .env   # dev placeholders only
     make dev               # postgres:18 + backend + frontend + Keycloak + Mailpit
-    make e2e               # scripted API tour (lands in step 4.6)
+    scripts/verify.sh all  # scripted E2E: OIDC flow + AuthN checks
 
 ## Make targets
 
 `make help` lists everything: build / test / lint / fmt / migrate / dev /
-images / images-push / tf-validate / e2e.
+images / images-push / tf-validate.
 
 All toolchain work runs inside Docker — nothing is installed on the host.

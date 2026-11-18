@@ -21,6 +21,7 @@ import (
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
 	"finance-tracker/internal/fisync"
+	"finance-tracker/internal/fx"
 	"finance-tracker/internal/llm"
 	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
@@ -68,6 +69,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Shared FX rate client: display-only conversion for report
+	// dispatch plus the daily fx-rates fetch job.
+	fxClient := fx.New(pool)
+	fxClient.Log = logger
 
 	// The worker unwraps per-user DEKs, so the KEK is mandatory.
 	if cfg.KEK == "" {
@@ -164,6 +170,7 @@ func main() {
 			Tx:       schedule.NewTransactionAdapter(repo.NewTransactionStore(pool)),
 			Budget:   schedule.NewBudgetAdapter(repo.NewBudgetStore(pool)),
 			Category: schedule.NewCategoryAdapter(repo.NewCategoryStore(pool)),
+			Fx:       schedule.NewFxSourceAdapter(fxClient),
 		},
 		dekForUser,
 		mail.New(cfg.SMTP),
@@ -216,6 +223,7 @@ func main() {
 		{Name: "fi-sync", Spec: schedule.FiSyncSpec, Key: schedule.LockKeyFiSync, Run: fiHook.Run},
 		{Name: "offset-suggestions", Spec: schedule.OffsetSuggestSpec, Key: schedule.LockKeyOffsetSuggest, Run: offsetSuggester.Run},
 		{Name: "mortgage-self-heal", Spec: schedule.MortgageSelfHealSpec, Key: schedule.LockKeyMortgageSelfHeal, Run: mortgageHealer.Run},
+		{Name: "fx-rates", Spec: schedule.FxDailySpec, Key: schedule.LockKeyFxRates, Run: fxClient.RunDaily},
 	})
 	sched.Log = logger
 

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -46,16 +47,19 @@ type TransactionStore interface {
 // strings and unset DateExecuted/CategoryID/Notes/Raw are JSON null.
 // Amount is the canonical 2-decimal form.
 type transactionOut struct {
-	ID            string  `json:"id"`
-	AccountID     string  `json:"account_id"`
-	DateExecuted  *string `json:"date_executed"`
-	DatePosted    string  `json:"date_posted"`
-	Amount        string  `json:"amount"`
-	CategoryID    *string `json:"category_id"`
-	Description   string  `json:"description"`
-	Notes         *string `json:"notes"`
-	Raw           *string `json:"raw"`
-	ReviewPending bool    `json:"review_pending"`
+	ID                string  `json:"id"`
+	AccountID         string  `json:"account_id"`
+	DateExecuted      *string `json:"date_executed"`
+	DatePosted        string  `json:"date_posted"`
+	Amount            string  `json:"amount"`
+	Currency          string  `json:"currency"`
+	AmountConverted   string  `json:"amount_converted"`
+	ConvertedCurrency string  `json:"converted_currency"`
+	CategoryID        *string `json:"category_id"`
+	Description       string  `json:"description"`
+	Notes             *string `json:"notes"`
+	Raw               *string `json:"raw"`
+	ReviewPending     bool    `json:"review_pending"`
 }
 
 func toTransactionOut(tx repo.Transaction) transactionOut {
@@ -370,9 +374,47 @@ func (h *handler) transactionsList(w http.ResponseWriter, r *http.Request) {
 		h.transactionError(w, "list", err)
 		return
 	}
+
+	// Display-only FX (REVIEW-PLAN §4.4): each row is converted into
+	// the user's default currency at its posting date. The account
+	// currency map is one List per request (a repo-side join would
+	// ripple into the shared txSelect); any lookup failure degrades
+	// to showing the row in its own currency.
+	var fxCache *fxCache
+	base := ""
+	curByAcc := make(map[string]string)
+	if h.fx != nil && h.settings != nil {
+		if b, err := h.settings.DefaultCurrency(r.Context(), c.row.Sub); err != nil {
+			slog.Warn("default currency lookup failed; showing amounts unconverted", "error", err)
+		} else {
+			base = b
+			fxCache = newFXCache(h.fx, base)
+			if h.accounts != nil {
+				if accts, err := h.accounts.List(r.Context(), c.row.ID, c.dek); err != nil {
+					slog.Warn("account list failed; showing amounts unconverted", "error", err)
+				} else {
+					for _, a := range accts {
+						curByAcc[a.ID] = a.Currency
+					}
+				}
+			}
+		}
+	}
 	out := make([]transactionOut, 0, len(txs))
 	for _, tx := range txs {
-		out = append(out, toTransactionOut(tx))
+		o := toTransactionOut(tx)
+		cur := curByAcc[tx.AccountID]
+		if fxCache != nil {
+			cents, err := parseCents(tx.Amount)
+			if err != nil {
+				slog.Warn("transaction amount not convertible", "id", tx.ID, "error", err)
+			} else if factor, conv := fxCache.convert(r.Context(), tx.DatePosted, cur); conv {
+				o.Currency = cur
+				o.AmountConverted = formatCents(int64(math.Round(float64(cents) * factor)))
+				o.ConvertedCurrency = base
+			}
+		}
+		out = append(out, o)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -707,10 +707,10 @@ func TestTransactionAggregate(t *testing.T) {
 		t.Fatalf("aggregate: %v", err)
 	}
 	want := []CategorySpend{
-		{CategoryID: "", Spend: "1.23", Income: "9.00", Net: "7.77"},
-		{CategoryID: groc.ID, Spend: "60.00", Income: "10.00", Net: "-50.00"},
-		{CategoryID: coffee.ID, Spend: "3.50", Income: "0.00", Net: "-3.50"},
-		{CategoryID: zero.ID, Spend: "2.50", Income: "2.50", Net: "0.00"},
+		{CategoryID: "", Currency: "USD", Spend: "1.23", Income: "9.00", Net: "7.77"},
+		{CategoryID: groc.ID, Currency: "USD", Spend: "60.00", Income: "10.00", Net: "-50.00"},
+		{CategoryID: coffee.ID, Currency: "USD", Spend: "3.50", Income: "0.00", Net: "-3.50"},
+		{CategoryID: zero.ID, Currency: "USD", Spend: "2.50", Income: "2.50", Net: "0.00"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("want %d groups, got %d: %+v", len(want), len(got), got)
@@ -742,7 +742,7 @@ func TestTransactionAggregate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("aggregate user b: %v", err)
 	}
-	if len(other) != 1 || other[0] != (CategorySpend{CategoryID: "", Spend: "100.00", Income: "0.00", Net: "-100.00"}) {
+	if len(other) != 1 || other[0] != (CategorySpend{CategoryID: "", Currency: "USD", Spend: "100.00", Income: "0.00", Net: "-100.00"}) {
 		t.Errorf("user b aggregation wrong: %+v", other)
 	}
 
@@ -752,8 +752,8 @@ func TestTransactionAggregate(t *testing.T) {
 		t.Fatalf("aggregate account filter: %v", err)
 	}
 	wantSub := []CategorySpend{
-		{CategoryID: "", Spend: "0.00", Income: "4.00", Net: "4.00"},
-		{CategoryID: groc.ID, Spend: "9.00", Income: "0.00", Net: "-9.00"},
+		{CategoryID: "", Currency: "USD", Spend: "0.00", Income: "4.00", Net: "4.00"},
+		{CategoryID: groc.ID, Currency: "USD", Spend: "9.00", Income: "0.00", Net: "-9.00"},
 	}
 	if len(sub) != len(wantSub) {
 		t.Fatalf("account filter: want %d groups, got %d: %+v", len(wantSub), len(sub), sub)
@@ -963,7 +963,7 @@ func TestTransactionTrendAggregate(t *testing.T) {
 	if len(filtered) != 1 || !filtered[0].Bucket.Equal(dateOf("2026-08-01")) {
 		t.Fatalf("filtered buckets = %+v, want the single 2026-08-01 bucket", filtered)
 	}
-	wantF := []CategorySpend{{CategoryID: groc.ID, Spend: "5.00", Income: "0.00", Net: "-5.00"}}
+	wantF := []CategorySpend{{CategoryID: groc.ID, Currency: "USD", Spend: "5.00", Income: "0.00", Net: "-5.00"}}
 	if !reflect.DeepEqual(filtered[0].Groups, wantF) {
 		t.Errorf("filtered bucket groups = %+v, want %+v", filtered[0].Groups, wantF)
 	}
@@ -984,7 +984,7 @@ func TestTransactionTrendAggregate(t *testing.T) {
 	if len(theirs) != 1 || !theirs[0].Bucket.Equal(dateOf("2026-08-01")) {
 		t.Fatalf("user b buckets = %+v, want the single 2026-08-01 bucket", theirs)
 	}
-	wantB := []CategorySpend{{CategoryID: "", Spend: "100.00", Income: "0.00", Net: "-100.00"}}
+	wantB := []CategorySpend{{CategoryID: "", Currency: "USD", Spend: "100.00", Income: "0.00", Net: "-100.00"}}
 	if !reflect.DeepEqual(theirs[0].Groups, wantB) {
 		t.Errorf("user b bucket groups = %+v, want %+v", theirs[0].Groups, wantB)
 	}

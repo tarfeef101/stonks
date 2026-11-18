@@ -37,6 +37,10 @@ type User struct {
 	Monthly   bool
 	Quarterly bool
 	Annual    bool
+	// DefaultCurrency is the report's base currency (users.
+	// default_currency, ISO-4217, NOT NULL): rows in other account
+	// currencies are converted into it (empty = no conversion).
+	DefaultCurrency string
 }
 
 // UserLister lists the users a dispatch may touch (production: the
@@ -46,9 +50,10 @@ type UserLister interface {
 }
 
 // ReportCollector gathers one report's Data snapshot; the production
-// implementation is *report.Collector.
+// implementation is *report.Collector. base is the user's base
+// currency ("" = no conversion).
 type ReportCollector interface {
-	Collect(ctx context.Context, userID string, p report.Period, asOf time.Time, dek []byte) (report.Data, error)
+	CollectFor(ctx context.Context, userID string, p report.Period, asOf time.Time, dek []byte, base string) (report.Data, error)
 }
 
 // DekResolver resolves a user's unwrapped DEK (production: the worker's
@@ -245,7 +250,7 @@ func (d *Dispatcher) runUser(ctx context.Context, u User, p report.Period, asOf 
 	if err != nil {
 		return fmt.Errorf("schedule: dek: %w", err)
 	}
-	data, err := d.Collector.Collect(ctx, u.ID, p, asOf, dek)
+	data, err := d.Collector.CollectFor(ctx, u.ID, p, asOf, dek, u.DefaultCurrency)
 	if err != nil {
 		return fmt.Errorf("schedule: collect: %w", err)
 	}

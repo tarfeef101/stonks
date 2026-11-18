@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -36,12 +37,12 @@ const offsetScanWindowDays = 7
 type OffsetStore interface {
 	FindOffsetCandidates(ctx context.Context, userID string, dek []byte, from, to *time.Time, windowDays int) ([]repo.OffsetCandidate, error)
 	InsertOffsetSuggestions(ctx context.Context, userID string, cands []repo.OffsetCandidate) (int, error)
-	ListOffsetSuggestions(ctx context.Context, userID string, dek []byte) ([]repo.OffsetSuggestion, error)
+	ListOffsetSuggestions(ctx context.Context, userID string, dek []byte, limit, offset int) ([]repo.OffsetSuggestion, error)
 	AcceptOffsetSuggestion(ctx context.Context, userID, id string, dek []byte) (string, error)
 	DismissOffsetSuggestion(ctx context.Context, userID, id string) error
 	SetOffsetGroup(ctx context.Context, userID string, txIDs []string, dek []byte) (string, error)
 	ClearOffsetGroup(ctx context.Context, userID, id string) error
-	ListOffsetGroups(ctx context.Context, userID string, dek []byte) ([]repo.OffsetGroup, error)
+	ListOffsetGroups(ctx context.Context, userID string, dek []byte, limit, offset int) ([]repo.OffsetGroup, error)
 }
 
 // Wire DTOs. The legs reuse the transactions-list wire shape
@@ -181,8 +182,31 @@ func (h *handler) offsetsScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, offsetScanOut{Suggested: n})
 }
 
+// offsetPagingFromQuery parses the list query params: limit and
+// offset are integers >= 0 (the tx filter convention). Empty-string
+// params are treated as absent and the repo applies its default.
+func offsetPagingFromQuery(q url.Values) (int, int, error) {
+	var limit, offset int
+	if s := q.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return 0, 0, errors.New("limit must be an integer >= 0")
+		}
+		limit = n
+	}
+	if s := q.Get("offset"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			return 0, 0, errors.New("offset must be an integer >= 0")
+		}
+		offset = n
+	}
+	return limit, offset, nil
+}
+
 // offsetsSuggestionList serves GET /api/v1/offsets/suggestions: the
-// caller's pending suggestions, oldest first, both legs opened.
+// caller's pending suggestions, oldest first, both legs opened, paged
+// (limit defaults to 100, offset 0).
 func (h *handler) offsetsSuggestionList(w http.ResponseWriter, r *http.Request) {
 	if h.offsets == nil {
 		notConfigured(w)
@@ -192,7 +216,12 @@ func (h *handler) offsetsSuggestionList(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	sugs, err := h.offsets.ListOffsetSuggestions(r.Context(), c.row.ID, c.dek)
+	limit, offset, err := offsetPagingFromQuery(r.URL.Query())
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	sugs, err := h.offsets.ListOffsetSuggestions(r.Context(), c.row.ID, c.dek, limit, offset)
 	if err != nil {
 		h.offsetError(w, "list suggestions", err)
 		return
@@ -300,7 +329,8 @@ func (h *handler) offsetsGroupCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // offsetsGroupList serves GET /api/v1/offsets/groups: the caller's
-// active groups, members in (date_posted, id) order within a group.
+// active groups, members in (date_posted, id) order within a group,
+// paged by group id (limit defaults to 100, offset 0).
 func (h *handler) offsetsGroupList(w http.ResponseWriter, r *http.Request) {
 	if h.offsets == nil {
 		notConfigured(w)
@@ -310,7 +340,12 @@ func (h *handler) offsetsGroupList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	groups, err := h.offsets.ListOffsetGroups(r.Context(), c.row.ID, c.dek)
+	limit, offset, err := offsetPagingFromQuery(r.URL.Query())
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	groups, err := h.offsets.ListOffsetGroups(r.Context(), c.row.ID, c.dek, limit, offset)
 	if err != nil {
 		h.offsetError(w, "list groups", err)
 		return

@@ -679,13 +679,18 @@ func scanTxRows(rows pgx.Rows, dek []byte) ([]Transaction, error) {
 	return out, nil
 }
 
-// CategorySpend is one (category, period) row of Aggregate. Spend and
-// Income are non-negative magnitudes (spend = the absolute sum of the
-// negative amounts, income = the sum of the positive ones); Net is
-// income minus spend (negative when the spend wins). All three are
-// canonical 2-decimal strings. CategoryID "" = the uncategorized group.
+// CategorySpend is one (category, currency, period) row of Aggregate
+// (and one group of a TrendAggregate bucket). Currency is the account
+// currency the sum was taken in ("" when the account row carries
+// none); a category whose accounts span currencies gets one row per
+// currency, which the server re-accumulates. Spend and Income are
+// non-negative magnitudes (spend = the absolute sum of the negative
+// amounts, income = the sum of the positive ones); Net is income minus
+// spend (negative when the spend wins). All three are canonical
+// 2-decimal strings. CategoryID "" = the uncategorized group.
 type CategorySpend struct {
 	CategoryID string
+	Currency   string
 	Spend      string
 	Income     string
 	Net        string
@@ -701,32 +706,37 @@ type CategorySpend struct {
 // always matches the 2-decimal form the rest of the API speaks.
 func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]CategorySpend, error) {
 	// offset_group_id IS NULL: grouped rows net each other out and must
-	// not count toward the summary (see List).
-	where := []string{"user_id = $1", "offset_group_id IS NULL"}
+	// not count toward the summary (see List). The accounts join
+	// carries the row currency into the sum (display FX, REVIEW-PLAN
+	// §4.4); the inner join is row-safe — the account_id FK forbids
+	// orphans, like the offset-group queries' join.
+	where := []string{"t.user_id = $1", "t.offset_group_id IS NULL"}
 	args := []any{userID}
 	add := func(cond string, val any) {
 		args = append(args, val)
 		where = append(where, fmt.Sprintf("%s $%d", cond, len(args)))
 	}
-	add("date_posted >=", dateStr(from))
-	add("date_posted <=", dateStr(to))
+	add("t.date_posted >=", dateStr(from))
+	add("t.date_posted <=", dateStr(to))
 	if len(accountIDs) > 0 {
 		ph := make([]string, len(accountIDs))
 		for i, id := range accountIDs {
 			args = append(args, id)
 			ph[i] = "$" + strconv.Itoa(len(args))
 		}
-		where = append(where, "account_id IN ("+strings.Join(ph, ", ")+")")
+		where = append(where, "t.account_id IN ("+strings.Join(ph, ", ")+")")
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT COALESCE(category_id::text, ''),
-		       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount END), 0),
-		       COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0),
-		       COALESCE(SUM(amount), 0)
-		FROM transactions
+		SELECT COALESCE(t.category_id::text, ''),
+		       COALESCE(a.currency, ''),
+		       COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount END), 0),
+		       COALESCE(SUM(CASE WHEN t.amount > 0 THEN t.amount END), 0),
+		       COALESCE(SUM(t.amount), 0)
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
 		WHERE `+strings.Join(where, " AND ")+`
-		GROUP BY category_id
-		ORDER BY category_id NULLS FIRST`, args...)
+		GROUP BY t.category_id, a.currency
+		ORDER BY t.category_id NULLS FIRST, a.currency`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repo: aggregate transactions: %w", err)
 	}
@@ -739,7 +749,7 @@ func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, t
 			in  string
 			net string
 		)
-		if err := rows.Scan(&g.CategoryID, &sp, &in, &net); err != nil {
+		if err := rows.Scan(&g.CategoryID, &g.Currency, &sp, &in, &net); err != nil {
 			return nil, fmt.Errorf("repo: aggregate transactions: %w", err)
 		}
 		spend, err := canonicalAmount(sp)
@@ -1232,22 +1242,24 @@ func (s *TransactionStore) TrendAggregate(ctx context.Context, userID, period st
 	}
 
 	// offset_group_id IS NULL: grouped rows net each other out and must
-	// not count toward the summary (see List).
-	where := []string{"user_id = $1", "offset_group_id IS NULL"}
+	// not count toward the summary (see List). The accounts join
+	// carries the row currency into each bucket (display FX,
+	// REVIEW-PLAN §4.4).
+	where := []string{"t.user_id = $1", "t.offset_group_id IS NULL"}
 	args := []any{userID}
 	add := func(cond string, val any) {
 		args = append(args, val)
 		where = append(where, fmt.Sprintf("%s $%d", cond, len(args)))
 	}
-	add("date_posted >=", dateStr(from))
-	add("date_posted <=", dateStr(to))
+	add("t.date_posted >=", dateStr(from))
+	add("t.date_posted <=", dateStr(to))
 	if len(accountIDs) > 0 {
 		ph := make([]string, len(accountIDs))
 		for i, id := range accountIDs {
 			args = append(args, id)
 			ph[i] = "$" + strconv.Itoa(len(args))
 		}
-		where = append(where, "account_id IN ("+strings.Join(ph, ", ")+")")
+		where = append(where, "t.account_id IN ("+strings.Join(ph, ", ")+")")
 	}
 	// No AT TIME ZONE: date_posted is a plain date and the bucket must
 	// line up exactly with periodBounds' UTC period starts (a
@@ -1255,15 +1267,17 @@ func (s *TransactionStore) TrendAggregate(ctx context.Context, userID, period st
 	// timestamp-without-tz is pure calendar arithmetic; pgx decodes
 	// plain timestamps as UTC).
 	rows, err := s.pool.Query(ctx, `
-		SELECT date_trunc(`+unit+`, date_posted::timestamp),
-		       COALESCE(category_id::text, ''),
-		       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount END), 0),
-		       COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0),
-		       COALESCE(SUM(amount), 0)
-		FROM transactions
+		SELECT date_trunc(`+unit+`, t.date_posted::timestamp),
+		       COALESCE(t.category_id::text, ''),
+		       COALESCE(a.currency, ''),
+		       COALESCE(SUM(CASE WHEN t.amount < 0 THEN -t.amount END), 0),
+		       COALESCE(SUM(CASE WHEN t.amount > 0 THEN t.amount END), 0),
+		       COALESCE(SUM(t.amount), 0)
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
 		WHERE `+strings.Join(where, " AND ")+`
-		GROUP BY 1, category_id
-		ORDER BY 1, category_id NULLS FIRST`, args...)
+		GROUP BY 1, t.category_id, a.currency
+		ORDER BY 1, t.category_id NULLS FIRST, a.currency`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repo: trend aggregate transactions: %w", err)
 	}
@@ -1278,7 +1292,7 @@ func (s *TransactionStore) TrendAggregate(ctx context.Context, userID, period st
 			in     string
 			net    string
 		)
-		if err := rows.Scan(&bucket, &g.CategoryID, &sp, &in, &net); err != nil {
+		if err := rows.Scan(&bucket, &g.CategoryID, &g.Currency, &sp, &in, &net); err != nil {
 			return nil, fmt.Errorf("repo: trend aggregate transactions: %w", err)
 		}
 		spend, err := canonicalAmount(sp)
@@ -1304,6 +1318,90 @@ func (s *TransactionStore) TrendAggregate(ctx context.Context, userID, period st
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("repo: trend aggregate transactions: %w", err)
+	}
+	return out, nil
+}
+
+// ReportRow is the narrow report-dispatch row: exactly the five fields
+// schedule.TransactionAdapter copies into report.Row.
+type ReportRow struct {
+	Description string
+	Amount      string
+	CategoryID  string
+	Date        time.Time
+	Currency    string
+}
+
+// ListReportRows returns one page of the user's report rows for
+// [from, to] (inclusive, date precision) in List order (date_posted
+// DESC, id DESC). It selects only id, amount, category_id,
+// date_posted, description_encrypted plus accounts.currency (one
+// currency per account), decrypts ONLY the description (openTxField)
+// and re-canonicalizes amount exactly as tx.decrypt does. Limit pins
+// the repo hard cap (100, the collector page size); offset >= 0.
+func (s *TransactionStore) ListReportRows(ctx context.Context, userID string, from, to time.Time, limit, offset int, dek []byte) ([]ReportRow, error) {
+	if limit <= 0 {
+		limit = defaultTxLimit
+	}
+	if limit > maxTxLimit {
+		limit = maxTxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	// Same WHERE and order as List, narrowed to the report columns:
+	// user_id, offset_group_id IS NULL (see List), inclusive date
+	// bounds bound as strings (see dateStr). The account join brings
+	// the row's currency — accounts.currency's nullability is not
+	// guaranteed, so it scans through sql.NullString (NULL -> "").
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.id, t.amount, t.category_id, t.date_posted,
+		       t.description_encrypted, a.currency
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
+		WHERE t.user_id = $1
+		  AND t.offset_group_id IS NULL
+		  AND t.date_posted >= $2
+		  AND t.date_posted <= $3
+		ORDER BY t.date_posted DESC, t.id DESC
+		LIMIT $4 OFFSET $5`, userID, dateStr(from), dateStr(to), limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list report rows: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ReportRow, 0, limit)
+	for rows.Next() {
+		var (
+			r       ReportRow
+			id      string
+			amt     string
+			cat     sql.NullString
+			cur     sql.NullString
+			descEnc []byte
+		)
+		if err := rows.Scan(&id, &amt, &cat, &r.Date, &descEnc, &cur); err != nil {
+			return nil, fmt.Errorf("repo: scan report row: %w", err)
+		}
+		// Re-canonicalize the scanned amount: pgx's numeric -> string
+		// decode is not scale-preserving (see decrypt). The column is
+		// numeric(14,2), so this cannot fail; a failure means the row
+		// is corrupt.
+		can, err := canonicalAmount(amt)
+		if err != nil {
+			return nil, fmt.Errorf("repo: list report rows: amount %q not canonical: %w", amt, err)
+		}
+		r.Amount = can
+		r.CategoryID = cat.String
+		r.Currency = cur.String
+		desc, err := openTxField(id, descEnc, dek)
+		if err != nil {
+			return nil, err
+		}
+		r.Description = desc
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list report rows: %w", err)
 	}
 	return out, nil
 }

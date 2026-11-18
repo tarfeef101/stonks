@@ -13,7 +13,8 @@ const (
 	LockKeyReport int64 = 71001
 	// LockKeyFiSync guards the hourly FI-sync hook.
 	LockKeyFiSync int64 = 71002
-	// 71003 is reserved for the FX daily-fetch job (skipped).
+	// LockKeyFxRates guards the daily FX rate fetch.
+	LockKeyFxRates int64 = 71003
 	// LockKeyOffsetSuggest guards the offset-suggestion scan.
 	LockKeyOffsetSuggest int64 = 71004
 	// LockKeyMortgageSelfHeal guards the mortgage self-heal.

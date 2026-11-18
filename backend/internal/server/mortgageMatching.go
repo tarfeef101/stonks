@@ -252,8 +252,8 @@ type aberrantPrompt struct {
 
 // aberrantPrompts renders every still-unclassified item of the report
 // (round 33). The creation pass (ensureAberrantNotifications) and the
-// self-heal (syncAberrantNotifications) both key on these, so the
-// titles can never drift between the two writers.
+// worker self-heal (schedule.MortgageHealer) both key on these, so
+// the titles can never drift between the two writers.
 func aberrantPrompts(out matchingOut) []aberrantPrompt {
 	var prompts []aberrantPrompt
 	for _, e := range out.Extras {

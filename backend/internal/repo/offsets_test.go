@@ -159,7 +159,7 @@ func TestOffsetStore(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("inserted %d suggestions, want 1", n)
 		}
-		sugs, err := tx.ListOffsetSuggestions(ctx, aid, a.dek)
+		sugs, err := tx.ListOffsetSuggestions(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list suggestions: %v", err)
 		}
@@ -185,7 +185,7 @@ func TestOffsetStore(t *testing.T) {
 
 	var groupID string
 	t.Run("accept groups the legs and hides them", func(t *testing.T) {
-		sugs, err := tx.ListOffsetSuggestions(ctx, aid, a.dek)
+		sugs, err := tx.ListOffsetSuggestions(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list suggestions: %v", err)
 		}
@@ -204,14 +204,14 @@ func TestOffsetStore(t *testing.T) {
 			got[t5.ID] && got[t6.ID] && got[t7.ID] && got[t8.ID] && got[t9.ID] && got[t10.ID]) {
 			t.Fatalf("list after accept = %v (want t1/t2 hidden)", got)
 		}
-		groups, err := tx.ListOffsetGroups(ctx, aid, a.dek)
+		groups, err := tx.ListOffsetGroups(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list groups: %v", err)
 		}
 		if len(groups) != 1 || groups[0].ID != groupID || len(groups[0].Members) != 2 {
 			t.Fatalf("groups = %+v, want one group %s with 2 members", groups, groupID)
 		}
-		sugs2, err := tx.ListOffsetSuggestions(ctx, aid, a.dek)
+		sugs2, err := tx.ListOffsetSuggestions(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list suggestions: %v", err)
 		}
@@ -250,7 +250,7 @@ func TestOffsetStore(t *testing.T) {
 		if n, err := tx.InsertOffsetSuggestions(ctx, aid, cands); err != nil || n != 1 {
 			t.Fatalf("insert = %d, %v (want 1, nil)", n, err)
 		}
-		sugs, err := tx.ListOffsetSuggestions(ctx, aid, a.dek)
+		sugs, err := tx.ListOffsetSuggestions(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list suggestions: %v", err)
 		}
@@ -260,7 +260,7 @@ func TestOffsetStore(t *testing.T) {
 		if err := tx.DismissOffsetSuggestion(ctx, aid, sugs[0].ID); err != nil {
 			t.Fatalf("dismiss: %v", err)
 		}
-		sugs2, err := tx.ListOffsetSuggestions(ctx, aid, a.dek)
+		sugs2, err := tx.ListOffsetSuggestions(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list suggestions: %v", err)
 		}
@@ -284,7 +284,7 @@ func TestOffsetStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("set group: %v", err)
 		}
-		groups, err := tx.ListOffsetGroups(ctx, aid, a.dek)
+		groups, err := tx.ListOffsetGroups(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list groups: %v", err)
 		}
@@ -316,14 +316,14 @@ func TestOffsetStore(t *testing.T) {
 		if n, err := tx.InsertOffsetSuggestions(ctx, bid, cands); err != nil || n != 1 {
 			t.Fatalf("insert = %d, %v (want 1, nil)", n, err)
 		}
-		sugsA, err := tx.ListOffsetSuggestions(ctx, aid, a.dek)
+		sugsA, err := tx.ListOffsetSuggestions(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list A suggestions: %v", err)
 		}
 		if len(sugsA) != 0 {
 			t.Fatalf("A sees B's suggestion: %+v", sugsA)
 		}
-		sugsB, err := tx.ListOffsetSuggestions(ctx, bid, b.dek)
+		sugsB, err := tx.ListOffsetSuggestions(ctx, bid, b.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list B suggestions: %v", err)
 		}
@@ -333,7 +333,7 @@ func TestOffsetStore(t *testing.T) {
 		if _, err := tx.AcceptOffsetSuggestion(ctx, aid, sugsB[0].ID, a.dek); !errors.Is(err, ErrOffsetSuggestionNotFound) {
 			t.Fatalf("A accepts B's suggestion: err = %v, want ErrOffsetSuggestionNotFound", err)
 		}
-		groupsA, err := tx.ListOffsetGroups(ctx, aid, a.dek)
+		groupsA, err := tx.ListOffsetGroups(ctx, aid, a.dek, 0, 0)
 		if err != nil {
 			t.Fatalf("list A groups: %v", err)
 		}

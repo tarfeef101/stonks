@@ -8,12 +8,16 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// The four pinned schedules (UTC, 5-field cron, StandardParser).
+// The five pinned schedules (UTC, 5-field cron, StandardParser).
 const (
 	// ReportDispatchSpec is the daily report dispatch: 00:15 UTC.
 	ReportDispatchSpec = "15 0 * * *"
 	// FiSyncSpec is the hourly FI-sync hook: :05 past the hour.
 	FiSyncSpec = "5 * * * *"
+	// FxDailySpec is the daily FX rate fetch: 00:30 UTC. The 00:15 report
+	// dispatch may trigger on-demand backfills for the freshest day; the
+	// daily fetch then fills the table for the next period.
+	FxDailySpec = "30 0 * * *"
 	// OffsetSuggestSpec is the offset-suggestion scan: 30-minute cadence;
 	// the 2-hour scan overlap in offsets.go covers cadence drift.
 	OffsetSuggestSpec = "*/30 * * * *"

@@ -55,10 +55,11 @@ const (
 	maxResponseBytes = 10 << 20
 )
 
-// errNoRate is the internal "no stored rate on or before the date"
-// sentinel; Rate turns it into the caller-facing error after the
-// backfill retry.
-var errNoRate = errors.New("fx: no stored rate")
+// ErrNoRate is the "no stored rate on or before the date" sentinel;
+// Rate returns it after the backfill retry. A caller that treats a
+// missing rate as "no conversion" (e.g. display FX) checks it with
+// errors.Is and proceeds without converting.
+var ErrNoRate = errors.New("fx: no stored rate")
 
 // Rate is the result of one lookup. The caller converts with
 // amount*Factor; when Converted is false the amount was NOT converted
@@ -147,21 +148,21 @@ func (c *Client) Rate(ctx context.Context, date time.Time, from, to string) (Rat
 
 	fromDate, fromRateVal, fromErr := c.latestRate(ctx, day, from)
 	toDate, toRateVal, toErr := c.latestRate(ctx, day, to)
-	if errors.Is(fromErr, errNoRate) || errors.Is(toErr, errNoRate) {
+	if errors.Is(fromErr, ErrNoRate) || errors.Is(toErr, ErrNoRate) {
 		var missing []string
-		if errors.Is(fromErr, errNoRate) {
+		if errors.Is(fromErr, ErrNoRate) {
 			missing = append(missing, from)
 		}
-		if errors.Is(toErr, errNoRate) {
+		if errors.Is(toErr, ErrNoRate) {
 			missing = append(missing, to)
 		}
 		if berr := c.backfill(ctx, day, from, to, missing); berr != nil {
 			return Rate{}, berr
 		}
-		if errors.Is(fromErr, errNoRate) {
+		if errors.Is(fromErr, ErrNoRate) {
 			fromDate, fromRateVal, fromErr = c.latestRate(ctx, day, from)
 		}
-		if errors.Is(toErr, errNoRate) {
+		if errors.Is(toErr, ErrNoRate) {
 			toDate, toRateVal, toErr = c.latestRate(ctx, day, to)
 		}
 	}
@@ -201,7 +202,7 @@ func (c *Client) RunDaily(ctx context.Context) error {
 }
 
 // latestRate returns the stored rate for code on or before onOrBefore
-// (the nearest earlier date), or errNoRate when nothing is stored yet.
+// (the nearest earlier date), or ErrNoRate when nothing is stored yet.
 func (c *Client) latestRate(ctx context.Context, onOrBefore time.Time, code string) (time.Time, float64, error) {
 	var (
 		day  time.Time
@@ -215,7 +216,7 @@ func (c *Client) latestRate(ctx context.Context, onOrBefore time.Time, code stri
 		LIMIT 1`, onOrBefore.Format("2006-01-02"), code).Scan(&day, &rate)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return time.Time{}, 0, errNoRate
+			return time.Time{}, 0, ErrNoRate
 		}
 		return time.Time{}, 0, fmt.Errorf("fx: lookup %s on/before %s: %w",
 			code, onOrBefore.Format("2006-01-02"), err)

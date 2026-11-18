@@ -10,6 +10,14 @@
 // group carries null category_id and category_name; a target key no
 // category row answers (dangling) carries a null category_name too.
 //
+// Display-only FX (REVIEW-PLAN §4.4): when the server was given a rate
+// client and the user has a default currency, the aggregate amounts
+// (top-level groups, totals, and every trend point) are converted into
+// it before the response is assembled — the repo splits the sum by
+// (category, currency), the server converts each bucket and re-
+// accumulates. Any failure degrades to showing the amounts in the
+// account currencies as-is (see fxCache).
+//
 // Optional parameters (6.2): trend=N (integer 1..24) appends a "trend"
 // array of the last N period windows, oldest first, each carrying the
 // window's inclusive from/to bounds and spend / income / net; without
@@ -177,22 +185,6 @@ func formatCents(c int64) string {
 	return fmt.Sprintf("%s%d.%02d", sign, c/100, c%100)
 }
 
-// groupCents parses one aggregation group's three canonical amount
-// strings into int64 cents (the shared parse behind the top-level
-// Totals and each trend point).
-func groupCents(g repo.CategorySpend) (spend, income, net int64, err error) {
-	if spend, err = parseCents(g.Spend); err != nil {
-		return 0, 0, 0, err
-	}
-	if income, err = parseCents(g.Income); err != nil {
-		return 0, 0, 0, err
-	}
-	if net, err = parseCents(g.Net); err != nil {
-		return 0, 0, 0, err
-	}
-	return spend, income, net, nil
-}
-
 // groupKey is the (category id, category name) pair a group's order is
 // keyed on. The top-level summaryGroup list and each trend point's
 // trendGroup list both sort through it, so the two listings always
@@ -288,6 +280,19 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	// shift: the k=0 trend point must be exactly the top-level from/to.
 	now := time.Now()
 	from, to := periodBounds(period, now)
+
+	// Display-only FX (REVIEW-PLAN §4.4): resolve the user's default
+	// currency once per request. A nil client, a failed lookup, or an
+	// empty base leaves every amount in its own currency (the
+	// pre-change behavior) — conversion never fails a request.
+	var fxCache *fxCache
+	if h.fx != nil && h.settings != nil {
+		if base, err := h.settings.DefaultCurrency(r.Context(), c.row.Sub); err != nil {
+			slog.Warn("default currency lookup failed; showing amounts unconverted", "error", err)
+		} else {
+			fxCache = newFXCache(h.fx, base)
+		}
+	}
 	groups, err := h.transactions.Aggregate(r.Context(), c.row.ID, from, to, accountIDs)
 	if err != nil {
 		h.transactionError(w, "aggregate", err)
@@ -333,12 +338,17 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		names[cat.ID] = cat.Name
 	}
 
-	// Union of the aggregation groups and the target keys.
+	// Union of the aggregation groups and the target keys. The
+	// transaction amounts accumulate in base-currency int64 cents: the
+	// repo splits each sum by (category, currency), each bucket is
+	// converted at the period's end date (identity when conversion is
+	// off), and the re-accumulation keeps cents exact. The period
+	// totals are folded into the same pass.
+	var tSpend, tIncome int64
 	type acc struct {
-		spend, income, net string
-		hasTx              bool
-		target             float64
-		hasTarget          bool
+		spendC, incomeC  int64
+		hasTx, hasTarget bool
+		target           float64
 	}
 	byCat := make(map[string]*acc)
 	get := func(id string) *acc {
@@ -351,8 +361,15 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, g := range groups {
 		a := get(g.CategoryID)
-		a.spend, a.income, a.net = g.Spend, g.Income, g.Net
+		sp, inc, err := fxCache.convertRow(r.Context(), to, g)
+		if err != nil {
+			slog.Error("summary could not be computed", "error", err)
+			writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary could not be computed")
+			return
+		}
+		a.spendC, a.incomeC = a.spendC+sp, a.incomeC+inc
 		a.hasTx = true
+		tSpend, tIncome = tSpend+sp, tIncome+inc
 	}
 	for id, f := range targets {
 		a := get(id)
@@ -369,7 +386,7 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 			sg.CategoryName = &name
 		}
 		if a.hasTx {
-			sg.Spend, sg.Income, sg.Net = a.spend, a.income, a.net
+			sg.Spend, sg.Income, sg.Net = formatCents(a.spendC), formatCents(a.incomeC), formatCents(a.incomeC-a.spendC)
 		} else {
 			sg.Spend, sg.Income, sg.Net = "0.00", "0.00", "0.00"
 		}
@@ -385,18 +402,6 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	sortGroups(out, func(g summaryGroup) groupKey {
 		return groupKey{id: g.CategoryID, name: g.CategoryName}
 	})
-
-	// Totals in int64 cents over the transaction groups only.
-	var tSpend, tIncome, tNet int64
-	for _, g := range groups {
-		sp, inc, net, err := groupCents(g)
-		if err != nil {
-			slog.Error("summary totals could not be computed", "error", err)
-			writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary totals could not be computed")
-			return
-		}
-		tSpend, tIncome, tNet = tSpend+sp, tIncome+inc, tNet+net
-	}
 
 	// Trend: the last N windows, oldest first (k = N-1 down to 0).
 	// One bucketed TrendAggregate query over the whole trend span
@@ -426,22 +431,42 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		for k := trend - 1; k >= 0; k-- {
 			tf, tt := periodBounds(period, trendShift(period, now, k))
 			tg := byWindow[tf.Format("2006-01-02")]
-			var ptSpend, ptIncome, ptNet int64
-			tgs := make([]trendGroup, 0, len(tg))
+			// Per-window re-accumulation: the bucket rows are keyed
+			// (category, currency); each is converted at the window's
+			// end date and summed per category, so a category whose
+			// accounts span two currencies still yields one group row.
+			type windowAcc struct {
+				spendC, incomeC int64
+			}
+			wAcc := make(map[string]*windowAcc)
+			var ptSpend, ptIncome int64
 			for _, g := range tg {
-				sp, inc, net, err := groupCents(g)
+				sp, inc, err := fxCache.convertRow(r.Context(), tt, g)
 				if err != nil {
 					slog.Error("summary trend could not be computed", "error", err)
 					writeAPIError(w, http.StatusInternalServerError, codeInternal, "summary trend could not be computed")
 					return
 				}
-				ptSpend, ptIncome, ptNet = ptSpend+sp, ptIncome+inc, ptNet+net
-				grp := trendGroup{Spend: g.Spend, Income: g.Income, Net: g.Net}
-				if g.CategoryID != "" {
-					id := g.CategoryID
+				a := wAcc[g.CategoryID]
+				if a == nil {
+					a = &windowAcc{}
+					wAcc[g.CategoryID] = a
+				}
+				a.spendC, a.incomeC = a.spendC+sp, a.incomeC+inc
+				ptSpend, ptIncome = ptSpend+sp, ptIncome+inc
+			}
+			tgs := make([]trendGroup, 0, len(wAcc))
+			for id, a := range wAcc {
+				grp := trendGroup{
+					Spend:  formatCents(a.spendC),
+					Income: formatCents(a.incomeC),
+					Net:    formatCents(a.incomeC - a.spendC),
+				}
+				if id != "" {
+					id := id
 					grp.CategoryID = &id
 				}
-				if name, ok := names[g.CategoryID]; ok {
+				if name, ok := names[id]; ok {
 					n := name
 					grp.CategoryName = &n
 				}
@@ -455,7 +480,7 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 				To:     dateOnly(tt),
 				Spend:  formatCents(ptSpend),
 				Income: formatCents(ptIncome),
-				Net:    formatCents(ptNet),
+				Net:    formatCents(ptIncome - ptSpend),
 				Groups: tgs,
 			})
 		}
@@ -469,7 +494,7 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		Totals: summaryTotals{
 			Spend:  formatCents(tSpend),
 			Income: formatCents(tIncome),
-			Net:    formatCents(tNet),
+			Net:    formatCents(tIncome - tSpend),
 		},
 		Trend: trendPts,
 	}

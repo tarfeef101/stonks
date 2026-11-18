@@ -69,6 +69,11 @@ type SettingsStore interface {
 	// when unset (flag never flipped, or no row at all). Step 8.1 uses it
 	// to detect the first flip for the verification email.
 	OnboardedAt(ctx context.Context, sub string) (*time.Time, error)
+	// DefaultCurrency reports the user's display currency
+	// (users.default_currency, NOT NULL default 'USD'). It keys the
+	// display-only FX conversions the summary and transaction routes
+	// apply.
+	DefaultCurrency(ctx context.Context, sub string) (string, error)
 }
 
 // settingsOut is the settings response envelope: the Settings fields plus
@@ -114,6 +119,24 @@ func (s *pgSettingsStore) OnboardedAt(ctx context.Context, sub string) (*time.Ti
 		return nil, fmt.Errorf("server: fetch onboarded_at %q: %w", sub, err)
 	}
 	return at, nil
+}
+
+// DefaultCurrency reads the users.default_currency column (NOT NULL
+// with a 'USD' default — a plain string scan, no pointer). A missing
+// row answers ErrSettingsNotFound defensively; in practice requireUser
+// has bootstrapped the row by the time a handler runs.
+func (s *pgSettingsStore) DefaultCurrency(ctx context.Context, sub string) (string, error) {
+	var cur string
+	err := s.pool.QueryRow(ctx,
+		`SELECT default_currency FROM users WHERE auth0_sub = $1`, sub).
+		Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrSettingsNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("server: fetch default_currency %q: %w", sub, err)
+	}
+	return cur, nil
 }
 
 func (s *pgSettingsStore) Get(ctx context.Context, sub string) (Settings, error) {

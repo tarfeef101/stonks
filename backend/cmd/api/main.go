@@ -16,6 +16,7 @@ import (
 	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/config"
 	"finance-tracker/internal/crypto"
+	"finance-tracker/internal/fx"
 	"finance-tracker/internal/llm"
 	"finance-tracker/internal/mail"
 	"finance-tracker/internal/repo"
@@ -89,6 +90,7 @@ func main() {
 		dashboards    server.DashboardStore
 		widgets       server.DashboardWidgetStore
 		savedViews    server.SavedViewStore
+		fxClient      *fx.Client
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -146,6 +148,12 @@ func main() {
 			logger.Error("user bootstrap init failed", "error", err)
 			os.Exit(1)
 		}
+		// Display-only FX rates (REVIEW-PLAN §4.4): one shared client
+		// for the API; the summary and transaction routes resolve
+		// against it per request. The worker's daily RunDaily keeps
+		// the stored rates fresh (Rate also backfills on demand).
+		fxClient = fx.New(pool)
+		fxClient.Log = logger
 		// Dashboard cards backfill (round 6 rework): one-time startup
 		// migration moving 0008 dashboard_cards rows into the new
 		// dashboards/dashboard_widgets tables (one "Default" dashboard
@@ -237,7 +245,7 @@ func main() {
 		savedViews = repo.NewSavedViewStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, savedViews, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, savedViews, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions, fxClient)
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

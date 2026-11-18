@@ -123,6 +123,19 @@ func (m *memSettingsStore) OnboardedAt(_ context.Context, sub string) (*time.Tim
 	return st.OnboardedAt, nil
 }
 
+// DefaultCurrency reports the row's base currency. Unlike Get it does
+// not auto-create: a missing row is ErrSettingsNotFound, mirroring
+// the pg store.
+func (m *memSettingsStore) DefaultCurrency(_ context.Context, sub string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st, ok := m.rows[sub]
+	if !ok {
+		return "", ErrSettingsNotFound
+	}
+	return st.DefaultCurrency, nil
+}
+
 // newSettingsServer builds a router with a live token verifier, an
 // in-memory bootstrap (user store), and the given settings store (nil
 // allowed — the 503 path). Returns the handler and a minted access
@@ -142,7 +155,7 @@ func newSettingsServerWithMail(t *testing.T, sub string, store SettingsStore, ma
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, mailer, mailEnabled, nil, nil, nil)
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, mailer, mailEnabled, nil, nil, nil, nil)
 	return h, mintIdentityToken(t, key, sub, sub+"@localhost", sub, sub)
 }
 
@@ -412,7 +425,7 @@ func TestSettingsNotConfigured(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := mintKey(t)
-			h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), tc.bootstrap, tc.settings, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil)
+			h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), tc.bootstrap, tc.settings, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil)
 			token := mintIdentityToken(t, key, "nc-sub", "n@localhost", "N", "n")
 			code, body := doReq(t, h, http.MethodGet, "/api/v1/settings", "",
 				map[string]string{"Authorization": "Bearer " + token})
