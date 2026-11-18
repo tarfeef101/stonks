@@ -13,6 +13,11 @@ const (
 	LockKeyReport int64 = 71001
 	// LockKeyFiSync guards the hourly FI-sync hook.
 	LockKeyFiSync int64 = 71002
+	// 71003 is reserved for the FX daily-fetch job (skipped).
+	// LockKeyOffsetSuggest guards the offset-suggestion scan.
+	LockKeyOffsetSuggest int64 = 71004
+	// LockKeyMortgageSelfHeal guards the mortgage self-heal.
+	LockKeyMortgageSelfHeal int64 = 71005
 )
 
 // Leader is the multi-replica guard: at most one process holds a given

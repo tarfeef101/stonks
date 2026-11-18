@@ -8,12 +8,18 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-// The two pinned schedules (UTC, 5-field cron, StandardParser).
+// The four pinned schedules (UTC, 5-field cron, StandardParser).
 const (
 	// ReportDispatchSpec is the daily report dispatch: 00:15 UTC.
 	ReportDispatchSpec = "15 0 * * *"
 	// FiSyncSpec is the hourly FI-sync hook: :05 past the hour.
 	FiSyncSpec = "5 * * * *"
+	// OffsetSuggestSpec is the offset-suggestion scan: 30-minute cadence;
+	// the 2-hour scan overlap in offsets.go covers cadence drift.
+	OffsetSuggestSpec = "*/30 * * * *"
+	// MortgageSelfHealSpec is the mortgage self-heal: hourly at minute 23,
+	// deliberately off the :05 fi-sync and 00:15 report dispatch minutes.
+	MortgageSelfHealSpec = "23 * * * *"
 )
 
 // Entry is one scheduled job: a cron spec, its advisory lock key, and

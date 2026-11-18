@@ -15,12 +15,10 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"finance-tracker/internal/mortgage"
 	"finance-tracker/internal/repo"
@@ -590,111 +588,6 @@ func TestMortgageClassifyValidation(t *testing.T) {
 		}
 		if len(m.Spec.RateEvents) != 0 {
 			t.Errorf("spec.rate_events = %#v, want none (a one-off writes no rate event)", m.Spec.RateEvents)
-		}
-	})
-}
-
-// TestAberrantNotificationSelfHeal pins the round-33 self-heal that
-// runs before GET /notifications serves the list: a
-// "mortgage_aberrant" row is purged when its (mortgage, kind, date)
-// item no longer needs classifying — the report no longer lists it, or
-// the mortgage no longer exists — and rows whose ref does not parse (or
-// carries no mortgage id) are stale by construction. A live item keeps
-// its row. A transient mortgage-store error leaves every row in place;
-// the list still answers 200 (best-effort: a notification write must
-// never change the response).
-func TestAberrantNotificationSelfHeal(t *testing.T) {
-	userID := "id-mort-a"
-	const (
-		extraBody = "Mortgage extra of 100.00 on 2026-01-22 needs classification"
-		shortBody = "Mortgage shortfall of 26.18 on 2026-03-01 needs classification"
-	)
-
-	newCase := func(t *testing.T) (*memMortgageStore, *memTxStore, *memNotificationStore, http.Handler, map[string]string) {
-		t.Helper()
-		store := &memMortgageStore{}
-		txs := &memTxStore{}
-		notifs := &memNotificationStore{}
-		h, key := newClassifyServer(t, newMortgageAccounts(), store, txs, notifs)
-		hdr := authHdr(mintIdentityToken(t, key, "mort-a", "mort-a@localhost", "mort-a", "mort-a"))
-		return store, txs, notifs, h, hdr
-	}
-
-	// setup creates the mortgage, seeds the ExtrasAndShorts scenario,
-	// and runs the first matching GET (the lazy creation of the two
-	// notifications); it returns the mortgage id.
-	setup := func(t *testing.T, txs *memTxStore, h http.Handler, hdr map[string]string) string {
-		t.Helper()
-		id := createMatchMortgage(t, h, hdr)
-		seedExtrasAndShorts(t, txs)
-		code, out := doReq(t, h, http.MethodGet, "/api/v1/mortgages/"+id+"/matching", "", hdr)
-		if code != http.StatusOK {
-			t.Fatalf("get: status = %d, want 200 (body %s)", code, out)
-		}
-		return id
-	}
-
-	// staleRef seeds one stale "mortgage_aberrant" row (title == body,
-	// the single-sentence convention) with the given ref bytes.
-	staleRef := func(notifs *memNotificationStore, body, ref string, at time.Time) {
-		addNotif(notifs, userID, "mortgage_aberrant", body, body, []byte(ref), at, false)
-	}
-
-	t.Run("live rows stay, stale rows are purged", func(t *testing.T) {
-		_, txs, notifs, h, hdr := newCase(t)
-		id := setup(t, txs, h, hdr)
-		if len(notifs.rows) != 2 {
-			t.Fatalf("notifications = %d rows, want 2 (one per unclassified item)", len(notifs.rows))
-		}
-		base := time.Now().UTC().Add(-time.Hour)
-		// Stale: the pair is not in the current report.
-		staleRef(notifs, "Mortgage extra of 50.00 on 2026-09-09 needs classification",
-			`{"date":"2026-09-09","kind":"extra","mortgage_id":"`+id+`"}`, base)
-		// Stale: the ref does not parse (no report can own it).
-		staleRef(notifs, "broken ref", `{not json`, base.Add(time.Minute))
-		// Stale: the ref parses but carries no mortgage id.
-		staleRef(notifs, "no mortgage id", `{"date":"2026-01-22","kind":"extra"}`, base.Add(2*time.Minute))
-		// Stale: the mortgage no longer exists.
-		staleRef(notifs, "orphan", `{"date":"2026-01-22","kind":"extra","mortgage_id":"`+nextTestID()+`"}`, base.Add(3*time.Minute))
-
-		code, out := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", hdr)
-		if code != http.StatusOK {
-			t.Fatalf("notifications: status = %d, want 200 (body %s)", code, out)
-		}
-		var rows []map[string]any
-		if err := json.Unmarshal([]byte(out), &rows); err != nil {
-			t.Fatalf("body is not JSON: %v (%s)", err, out)
-		}
-		seen := map[string]bool{}
-		for _, r := range rows {
-			seen[r["body"].(string)] = true
-		}
-		if len(rows) != 2 || !seen[extraBody] || !seen[shortBody] {
-			t.Fatalf("rows = %v, want exactly the two live items", rows)
-		}
-		if len(notifs.rows) != 2 {
-			t.Fatalf("store rows = %d, want 2 (the stale ones purged): %+v", len(notifs.rows), notifs.rows)
-		}
-	})
-
-	t.Run("a transient store error leaves every row", func(t *testing.T) {
-		store, txs, notifs, h, hdr := newCase(t)
-		id := setup(t, txs, h, hdr)
-		// A stale pair with a PARSEABLE ref: purged if the Get
-		// succeeds, left alone if it fails.
-		staleRef(notifs, "Mortgage extra of 50.00 on 2026-09-09 needs classification",
-			`{"date":"2026-09-09","kind":"extra","mortgage_id":"`+id+`"}`, time.Now().UTC().Add(-time.Hour))
-
-		store.getErr = errors.New("boom")
-		code, out := doReq(t, h, http.MethodGet, "/api/v1/notifications", "", hdr)
-		if code != http.StatusOK {
-			t.Fatalf("notifications: status = %d, want 200 (body %s)", code, out)
-		}
-		if len(notifs.rows) != 3 {
-			t.Fatalf("store rows = %d, want 3 (the Get failed, nothing was purged): %+v", len(notifs.rows), notifs.rows)
-		}
-		if !strings.Contains(out, "2026-09-09") {
-			t.Fatalf("list = %s, want the stale row still listed", out)
 		}
 	})
 }

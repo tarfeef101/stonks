@@ -12,7 +12,6 @@
 package server
 
 import (
-	"errors"
 	"log/slog"
 	"math"
 	"net/http"
@@ -22,6 +21,7 @@ import (
 
 	"finance-tracker/internal/mortgage"
 	"finance-tracker/internal/repo"
+	"finance-tracker/internal/schedule"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -128,59 +128,12 @@ func toScheduleOut(sch mortgage.Schedule, spec mortgage.Spec) scheduleOut {
 }
 
 // specToEngine converts a stored repo.Mortgage into the engine's numeric
-// Spec. The stored spec was validated at create/patch (7.1), so a parse
-// failure here is an UNREACHABLE backstop: the error maps to 500 in the
-// handler, never to a 400. AnnualRate is the PERCENT (the engine's
-// convention); StartDate parses to UTC midnight (time.Parse shape).
+// Spec; the conversion lives in schedule.SpecToEngine, shared with the
+// worker's mortgage self-heal. Parse failures remain an UNREACHABLE
+// backstop (the stored spec was validated at create/patch, 7.1) that
+// maps to 500 here, never to a 400.
 func specToEngine(m repo.Mortgage) (mortgage.Spec, error) {
-	principal, err := strconv.ParseFloat(m.Spec.Principal, 64)
-	if err != nil {
-		return mortgage.Spec{}, errors.New("stored principal " + m.Spec.Principal + " does not parse: " + err.Error())
-	}
-	rate, err := strconv.ParseFloat(m.Spec.AnnualRate, 64)
-	if err != nil {
-		return mortgage.Spec{}, errors.New("stored annual_rate " + m.Spec.AnnualRate + " does not parse: " + err.Error())
-	}
-	extra, err := strconv.ParseFloat(m.Spec.ExtraPaymentAmount, 64)
-	if err != nil {
-		return mortgage.Spec{}, errors.New("stored extra_payment_amount " + m.Spec.ExtraPaymentAmount + " does not parse: " + err.Error())
-	}
-	start, err := time.Parse("2006-01-02", m.Spec.StartDate)
-	if err != nil {
-		return mortgage.Spec{}, errors.New("stored start_date " + m.Spec.StartDate + " does not parse: " + err.Error())
-	}
-	events := make([]mortgage.RateEvent, 0, len(m.Spec.RateEvents))
-	for i, e := range m.Spec.RateEvents {
-		d, err := time.Parse("2006-01-02", e.EffectiveDate)
-		if err != nil {
-			return mortgage.Spec{}, errors.New("stored rate event " + strconv.Itoa(i) +
-				" effective_date " + e.EffectiveDate + " does not parse: " + err.Error())
-		}
-		er, err := strconv.ParseFloat(e.AnnualRate, 64)
-		if err != nil {
-			return mortgage.Spec{}, errors.New("stored rate event " + strconv.Itoa(i) +
-				" annual_rate " + e.AnnualRate + " does not parse: " + err.Error())
-		}
-		events = append(events, mortgage.RateEvent{
-			Date:       d,
-			AnnualRate: er,
-			RateType:   e.RateType,
-			Action:     e.Action,
-		})
-	}
-	return mortgage.Spec{
-		Principal:             principal,
-		AnnualRate:            rate,
-		AmortizationYears:     m.Spec.AmortizationYears,
-		StartDate:             start,
-		PaymentFrequency:      m.Spec.PaymentFrequency,
-		ExtraPaymentAmount:    extra,
-		ExtraPaymentFrequency: m.Spec.ExtraPaymentFrequency,
-		ExtraPrepaymentType:   m.Spec.ExtraPrepaymentType,
-		TermYears:             m.Spec.TermYears,
-		RateType:              m.Spec.RateType,
-		RateEvents:            events,
-	}, nil
+	return schedule.SpecToEngine(m)
 }
 
 // whatIfProblems validates the PRESENT what-if fields, in wire order,

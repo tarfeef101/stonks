@@ -55,7 +55,13 @@ func main() {
 		os.Exit(1)
 	}
 	ctx0, cancel0 := context.WithTimeout(context.Background(), 5*time.Second)
-	pool, err := pgxpool.New(ctx0, cfg.DatabaseURL)
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		logger.Error("database pool config failed")
+		os.Exit(1)
+	}
+	poolCfg.MaxConns = 8 // pinned: the worker's steady-state ceiling — its jobs are serial
+	pool, err := pgxpool.NewWithConfig(ctx0, poolCfg)
 	cancel0()
 	if err != nil {
 		logger.Error("database pool create failed", "error", err)
@@ -186,9 +192,30 @@ func main() {
 	fiHook.Clock = schedClock
 	fiHook.RunFI = fiJob.RunOnce
 
+	// P1 schedule plane: the offset-suggestion scan and the mortgage
+	// self-heal. Both runs are stateless per fire, so the fresh repo
+	// constructors below just share the pool, matching the fiJob/
+	// dispatcher style above.
+	offsetSuggester := &schedule.OffsetSuggester{
+		Log:        logger,
+		Clock:      schedClock,
+		Txns:       repo.NewTransactionStore(pool),
+		DekForUser: dekForUser,
+	}
+	mortgageHealer := &schedule.MortgageHealer{
+		Log:        logger,
+		Users:      schedule.NewPoolUserIDLister(pool),
+		Notifs:     repo.NewNotificationStore(pool),
+		Mortgages:  repo.NewMortgageStore(pool),
+		Txns:       repo.NewTransactionStore(pool),
+		DekForUser: dekForUser,
+	}
+
 	sched := schedule.NewScheduler(schedClock, schedule.NewAdvisoryLock(leaderConn), []schedule.Entry{
 		{Name: "report-dispatch", Spec: schedule.ReportDispatchSpec, Key: schedule.LockKeyReport, Run: dispatcher.Dispatch},
 		{Name: "fi-sync", Spec: schedule.FiSyncSpec, Key: schedule.LockKeyFiSync, Run: fiHook.Run},
+		{Name: "offset-suggestions", Spec: schedule.OffsetSuggestSpec, Key: schedule.LockKeyOffsetSuggest, Run: offsetSuggester.Run},
+		{Name: "mortgage-self-heal", Spec: schedule.MortgageSelfHealSpec, Key: schedule.LockKeyMortgageSelfHeal, Run: mortgageHealer.Run},
 	})
 	sched.Log = logger
 

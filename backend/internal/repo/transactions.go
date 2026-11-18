@@ -1151,3 +1151,54 @@ func (s *TransactionStore) AcceptAll(ctx context.Context, userID, categoryID str
 	}
 	return int(cmdTag.RowsAffected()), nil
 }
+
+// DebitTxn is one debit row of an account, in the shape the mortgage
+// matching engine consumes: the posting date and the canonical amount.
+type DebitTxn struct {
+	Date   time.Time
+	Amount string
+}
+
+// AccountDebits returns every debit transaction (amount < 0) of one
+// account, ordered by posting date then id. Offset-group rows are
+// excluded: they are hidden from List, so the engine never matched on
+// them. The mortgage engine re-filters debits internally, so the
+// amount < 0 predicate is behavior-preserving; it only removes the
+// pagination round trips and the credit rows. The caller owns the
+// account — every existing caller has already verified the account
+// belongs to the acting user.
+func (s *TransactionStore) AccountDebits(ctx context.Context, accountID string) ([]DebitTxn, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT date_posted, amount
+		FROM transactions
+		WHERE account_id = $1
+			AND amount < 0
+			AND offset_group_id IS NULL
+		ORDER BY date_posted, id`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("repo: account debits: %w", err)
+	}
+	defer rows.Close()
+	out := make([]DebitTxn, 0)
+	for rows.Next() {
+		var d DebitTxn
+		var amt string
+		if err := rows.Scan(&d.Date, &amt); err != nil {
+			return nil, fmt.Errorf("repo: scan account debits: %w", err)
+		}
+		// Re-canonicalize the scanned amount: pgx's numeric -> string
+		// decode is not scale-preserving (see decrypt). The column is
+		// numeric(14,2), so this cannot fail; a failure means the row
+		// is corrupt.
+		can, err := canonicalAmount(amt)
+		if err != nil {
+			return nil, fmt.Errorf("repo: account debits: amount %q not canonical: %w", amt, err)
+		}
+		d.Amount = can
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: account debits: %w", err)
+	}
+	return out, nil
+}

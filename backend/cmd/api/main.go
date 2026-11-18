@@ -66,10 +66,10 @@ func main() {
 	mailer := mail.New(cfg.SMTP)
 	mailEnabled := cfg.SMTP.Host != ""
 
-	// Database pool. pgxpool.New does not connect immediately; readiness
-	// is surfaced through /readyz. An empty DATABASE_URL leaves the pool
-	// unset (the API still serves /healthz and /metrics; /api/v1/me then
-	// answers 503).
+	// Database pool. pgxpool.NewWithConfig does not connect immediately;
+	// readiness is surfaced through /readyz. An empty DATABASE_URL leaves
+	// the pool unset (the API still serves /healthz and /metrics;
+	// /api/v1/me then answers 503).
 	var (
 		ready         server.Readiness
 		pool          *pgxpool.Pool
@@ -92,7 +92,13 @@ func main() {
 	)
 	if cfg.DatabaseURL != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		pool, err = pgxpool.New(ctx, cfg.DatabaseURL)
+		poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+		if err != nil {
+			logger.Error("database pool config failed")
+			os.Exit(1)
+		}
+		poolCfg.MaxConns = 20 // pinned: the API's steady-state ceiling
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		cancel()
 		if err != nil {
 			logger.Error("database pool create failed", "error", err)

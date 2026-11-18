@@ -260,6 +260,49 @@ func (m *memTxStore) Delete(_ context.Context, userID, id string) error {
 	return nil
 }
 
+// AccountDebits mirrors the repo's narrow debit query: the account's
+// ungrouped debit rows, in (date_posted, id) order. Like the repo it
+// does NOT filter by user — the caller owns the account (the handlers
+// only ever pass the acting user's linked account). listErr is honored
+// so the handler's error mapping is testable.
+func (m *memTxStore) AccountDebits(_ context.Context, accountID string) ([]repo.DebitTxn, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	// DebitTxn carries no id, but the (date_posted, id) tie-break needs
+	// it, so the sort runs over (id, DebitTxn) pairs.
+	type debitHit struct {
+		id string
+		d  repo.DebitTxn
+	}
+	var hits []debitHit
+	for _, r := range m.rows {
+		if r.tx.AccountID != accountID || r.tx.OffsetGroupID != nil {
+			continue
+		}
+		c, err := parseCents(r.tx.Amount)
+		if err != nil {
+			return nil, err
+		}
+		if c >= 0 {
+			continue
+		}
+		hits = append(hits, debitHit{id: r.tx.ID, d: repo.DebitTxn{Date: r.tx.DatePosted, Amount: r.tx.Amount}})
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		di, dj := dateOnly(hits[i].d.Date), dateOnly(hits[j].d.Date)
+		if di != dj {
+			return di < dj
+		}
+		return hits[i].id < hits[j].id
+	})
+	out := make([]repo.DebitTxn, 0, len(hits))
+	for _, hit := range hits {
+		out = append(out, hit.d)
+	}
+	return out, nil
+}
+
 func (m *memTxStore) List(_ context.Context, userID string, f repo.TransactionFilter, _ []byte) ([]repo.Transaction, error) {
 	if m.listErr != nil {
 		return nil, m.listErr

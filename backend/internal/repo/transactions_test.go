@@ -1170,3 +1170,89 @@ func TestTransactionReviewQueue(t *testing.T) {
 		}
 	})
 }
+
+// TestTransactionAccountDebits exercises AccountDebits (the mortgage
+// matching narrowing): one account seeded with a mix — a plain debit,
+// a debit seeded non-canonical ("-5.5", re-canonicalized to "-5.50"),
+// a same-date pair with PINNED ids (the ORDER BY id tie-break;
+// gen_random_uuid() ids are random v4, so the pins make the order
+// deterministic), a credit, a zero row, and a grouped debit
+// (offset_group_id set — hidden from List, so never matched).
+// AccountDebits returns exactly the ungrouped debits, in (date_posted,
+// id) order, amounts canonicalized. One fresh testcontainer (the
+// per-Test-fn convention; the shared-env subtests above would pollute
+// the exact-set assertion).
+func TestTransactionAccountDebits(t *testing.T) {
+	env := newTestEnv(t, "debits-a")
+	tx := NewTransactionStore(env.pool)
+	acct := NewAccountStore(env.pool)
+	u := env.user(t, "debits-a")
+	ctx := env.ctx
+
+	acctRow, err := acct.Create(ctx, u.row.ID, AccountIn{Name: "Debits Bank", Type: "bank", Currency: "USD"}, u.dek)
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	seed := func(posted, amount, desc string) string {
+		t.Helper()
+		got, err := tx.Create(ctx, u.row.ID, TransactionIn{
+			AccountID:   acctRow.ID,
+			DatePosted:  dateOf(posted),
+			Amount:      amount,
+			Description: desc,
+		}, u.dek)
+		if err != nil {
+			t.Fatalf("seed %s %s: %v", posted, amount, err)
+		}
+		return got.ID
+	}
+
+	seed("2026-01-05", "-10.00", "debit early")
+	seed("2026-01-10", "-5.5", "debit noncanonical")
+	idA := seed("2026-01-15", "-2.00", "debit pair A")
+	idB := seed("2026-01-15", "-3.00", "debit pair B")
+	seed("2026-01-20", "+25.00", "credit")
+	seed("2026-01-25", "0.00", "zero")
+	groupedID := seed("2026-01-03", "-7.77", "grouped debit")
+
+	// Group the debit (the offset flow's tie): hidden from List and
+	// from AccountDebits.
+	if _, err := env.pool.Exec(ctx, `
+		UPDATE transactions SET offset_group_id = gen_random_uuid()
+		WHERE id = $1`, groupedID); err != nil {
+		t.Fatalf("group the debit: %v", err)
+	}
+	// Pin the pair's ids so the (date_posted, id) tie-break order is
+	// deterministic (a random v4 would make it a coin flip).
+	if _, err := env.pool.Exec(ctx, `
+		UPDATE transactions SET id = 'aaaaaaaa-1111-4111-8111-000000000001'
+		WHERE id = $1`, idA); err != nil {
+		t.Fatalf("pin id A: %v", err)
+	}
+	if _, err := env.pool.Exec(ctx, `
+		UPDATE transactions SET id = 'bbbbbbbb-2222-4222-8222-000000000002'
+		WHERE id = $1`, idB); err != nil {
+		t.Fatalf("pin id B: %v", err)
+	}
+
+	got, err := tx.AccountDebits(ctx, acctRow.ID)
+	if err != nil {
+		t.Fatalf("account debits: %v", err)
+	}
+	want := []DebitTxn{
+		{Date: dateOf("2026-01-05"), Amount: "-10.00"},
+		{Date: dateOf("2026-01-10"), Amount: "-5.50"},
+		{Date: dateOf("2026-01-15"), Amount: "-2.00"},
+		{Date: dateOf("2026-01-15"), Amount: "-3.00"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("want %d debits, got %d: %+v", len(want), len(got), got)
+	}
+	for i := range want {
+		if !got[i].Date.Equal(want[i].Date) || got[i].Amount != want[i].Amount {
+			t.Errorf("row %d = {date %s amount %s}, want {date %s amount %s}",
+				i, got[i].Date.Format("2006-01-02"), got[i].Amount,
+				want[i].Date.Format("2006-01-02"), want[i].Amount)
+		}
+	}
+}

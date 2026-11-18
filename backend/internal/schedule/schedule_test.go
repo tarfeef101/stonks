@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ type fakeClock struct{ now time.Time }
 func (c fakeClock) Now() time.Time { return c.now }
 
 type fakeMailSink struct {
+	mu     sync.Mutex // guards msgs (Send runs concurrently)
 	msgs   []mail.Message
 	errFor func(to string) error
 }
@@ -32,7 +35,9 @@ func (m *fakeMailSink) Send(ctx context.Context, msg mail.Message) error {
 			return err
 		}
 	}
+	m.mu.Lock()
 	m.msgs = append(m.msgs, msg)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -50,14 +55,32 @@ func (f *fakeUsers) List(ctx context.Context) ([]User, error) {
 // fakeCollector returns a minimal valid Data (one category row with
 // canonical money, a category name; nil Merchants/PriorCategorySpend —
 // Generate and both renderers accept it, and Generate's output always
-// passes checkReport).
+// passes checkReport). Collect runs concurrently under the dispatcher's
+// bounded fan-out: calls is mutex-guarded, and inflight/maxFlight are
+// atomics the bounded-concurrency test asserts on (incr before the
+// work, max-observe, decr after).
 type fakeCollector struct {
-	errFor  func(userID string, p report.Period) error
-	calls   []string
-	blocked chan struct{}
+	mu        sync.Mutex // guards calls
+	errFor    func(userID string, p report.Period) error
+	calls     []string
+	blocked   chan struct{}
+	inflight  int64 // atomic: Collects currently in flight
+	maxFlight int64 // atomic: observed max concurrent Collects
 }
 
 func (c *fakeCollector) Collect(ctx context.Context, userID string, p report.Period, asOf time.Time, dek []byte) (report.Data, error) {
+	n := atomic.AddInt64(&c.inflight, 1)
+	for {
+		cur := atomic.LoadInt64(&c.maxFlight)
+		if n <= cur {
+			break
+		}
+		if atomic.CompareAndSwapInt64(&c.maxFlight, cur, n) {
+			break
+		}
+	}
+	defer atomic.AddInt64(&c.inflight, -1)
+
 	if c.blocked != nil {
 		select {
 		case <-ctx.Done():
@@ -65,7 +88,9 @@ func (c *fakeCollector) Collect(ctx context.Context, userID string, p report.Per
 		case <-c.blocked:
 		}
 	}
+	c.mu.Lock()
 	c.calls = append(c.calls, userID+"/"+string(p))
+	c.mu.Unlock()
 	if c.errFor != nil {
 		if err := c.errFor(userID, p); err != nil {
 			return report.Data{}, err
@@ -80,6 +105,7 @@ func (c *fakeCollector) Collect(ctx context.Context, userID string, p report.Per
 }
 
 type fakeNotify struct {
+	mu      sync.Mutex // guards entries/users (Notify runs concurrently)
 	entries []NotificationIn
 	users   []string
 	err     error
@@ -89,8 +115,10 @@ func (f *fakeNotify) Notify(ctx context.Context, userID string, in NotificationI
 	if f.err != nil {
 		return f.err
 	}
+	f.mu.Lock()
 	f.entries = append(f.entries, in)
 	f.users = append(f.users, userID)
+	f.mu.Unlock()
 	return nil
 }
 
@@ -248,15 +276,32 @@ func TestDispatchQuarterBoundary(t *testing.T) {
 	if err := d.Dispatch(context.Background()); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
+	// The bounded fan-out makes completion order nondeterministic:
+	// compare as sorted sets, not positions.
 	want := []string{
 		"Personal Finance Tracker: March 2026 report",
 		"Personal Finance Tracker: Q1 2026 report",
 	}
-	if got := subjectsOf(sink.msgs); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+	got := subjectsOf(sink.msgs)
+	if len(got) != len(want) {
 		t.Fatalf("subjects = %v, want %v", got, want)
 	}
-	if len(coll.calls) != 2 || coll.calls[0] != "u1/monthly" || coll.calls[1] != "u1/quarterly" {
-		t.Errorf("collector calls = %v", coll.calls)
+	sort.Strings(got)
+	sort.Strings(want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("subjects = %v, want %v", got, want)
+		}
+	}
+	wantCalls := []string{"u1/monthly", "u1/quarterly"}
+	if len(coll.calls) != len(wantCalls) {
+		t.Fatalf("collector calls = %v, want %v", coll.calls, wantCalls)
+	}
+	sort.Strings(coll.calls)
+	for i := range wantCalls {
+		if coll.calls[i] != wantCalls[i] {
+			t.Errorf("collector calls = %v, want %v", coll.calls, wantCalls)
+		}
 	}
 	if len(notif.entries) != 0 {
 		t.Errorf("want 0 notifications, got %d", len(notif.entries))
@@ -277,13 +322,23 @@ func TestDispatchJanuaryFirst(t *testing.T) {
 	if err := d.Dispatch(context.Background()); err != nil {
 		t.Fatalf("Dispatch: %v", err)
 	}
+	// The bounded fan-out makes completion order nondeterministic:
+	// compare as sorted sets, not positions.
 	want := []string{
 		"Personal Finance Tracker: December 2026 report",
 		"Personal Finance Tracker: Q4 2026 report",
 		"Personal Finance Tracker: 2026 report",
 	}
-	if got := subjectsOf(sink.msgs); len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+	got := subjectsOf(sink.msgs)
+	if len(got) != len(want) {
 		t.Fatalf("subjects = %v, want %v", got, want)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("subjects = %v, want %v", got, want)
+		}
 	}
 }
 
@@ -489,6 +544,64 @@ func TestFiSyncHourly(t *testing.T) {
 	}
 	if len(heldNow) != 0 {
 		t.Errorf("lock must be released: still held %v", heldNow)
+	}
+}
+
+// 9. All pairs dispatched: 3 users each wanting all three kinds, on
+// Jan 1 -> the collector sees all 9 (user, period) dispatches. The
+// fan-out order is nondeterministic, so compare by set + length.
+func TestDispatchAllPairs(t *testing.T) {
+	now := time.Date(2027, 1, 1, 0, 15, 0, 0, time.UTC)
+	users := &fakeUsers{users: []User{
+		{ID: "u1", Email: "a@example.com", Onboarded: true, Monthly: true, Quarterly: true, Annual: true},
+		{ID: "u2", Email: "b@example.com", Onboarded: true, Monthly: true, Quarterly: true, Annual: true},
+		{ID: "u3", Email: "c@example.com", Onboarded: true, Monthly: true, Quarterly: true, Annual: true},
+	}}
+	coll := &fakeCollector{}
+	sink := &fakeMailSink{}
+	d := newTestDispatcher(t, now, users, coll, sink, &fakeNotify{})
+
+	if err := d.Dispatch(context.Background()); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	wantCalls := map[string]bool{}
+	for _, uid := range []string{"u1", "u2", "u3"} {
+		for _, p := range []report.Period{report.PeriodMonthly, report.PeriodQuarterly, report.PeriodAnnual} {
+			wantCalls[uid+"/"+string(p)] = true
+		}
+	}
+	if len(coll.calls) != 9 {
+		t.Fatalf("collector calls = %v, want all 9 (user, period) pairs", coll.calls)
+	}
+	for _, c := range coll.calls {
+		if !wantCalls[c] {
+			t.Fatalf("unexpected collector call %q in %v", c, coll.calls)
+		}
+	}
+	if len(sink.msgs) != 9 {
+		t.Fatalf("want 9 mails, got %d: %v", len(sink.msgs), subjectsOf(sink.msgs))
+	}
+}
+
+// 10. Bounded concurrency: with 9 pairs due, the fake collector's
+// atomic in-flight counter must never observe more than
+// dispatchConcurrency concurrent Collects.
+func TestDispatchBoundedConcurrency(t *testing.T) {
+	now := time.Date(2027, 1, 1, 0, 15, 0, 0, time.UTC)
+	users := &fakeUsers{users: []User{
+		{ID: "u1", Email: "a@example.com", Onboarded: true, Monthly: true, Quarterly: true, Annual: true},
+		{ID: "u2", Email: "b@example.com", Onboarded: true, Monthly: true, Quarterly: true, Annual: true},
+		{ID: "u3", Email: "c@example.com", Onboarded: true, Monthly: true, Quarterly: true, Annual: true},
+	}}
+	coll := &fakeCollector{}
+	sink := &fakeMailSink{}
+	d := newTestDispatcher(t, now, users, coll, sink, &fakeNotify{})
+
+	if err := d.Dispatch(context.Background()); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if max := atomic.LoadInt64(&coll.maxFlight); max > dispatchConcurrency {
+		t.Fatalf("observed max in-flight Collects = %d, want <= %d", max, dispatchConcurrency)
 	}
 }
 

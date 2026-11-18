@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sync/errgroup"
 
 	"finance-tracker/internal/mail"
 	"finance-tracker/internal/report"
@@ -145,10 +148,27 @@ func userWants(u User, p report.Period) bool {
 	return false
 }
 
+// dispatchConcurrency bounds the (user, period) goroutines Dispatch
+// fans out. The mail provider's burst ceiling is the sizing rationale:
+// several users × up to 3 periods must not burst past it.
+const dispatchConcurrency = 4
+
+// dispatchUserPair is one (user, due period) dispatch unit — the
+// fan-out work item.
+type dispatchUserPair struct {
+	user   User
+	period report.Period
+}
+
 // Dispatch runs one dispatch at the clock instant. Nothing due (any
 // non-1st day) returns before listing users. A user-list failure is
 // returned — the batch cannot run; per-user failures are recorded and
-// the batch continues.
+// the batch continues. The (user, period) pairs fan out over a bounded
+// errgroup pool (dispatchConcurrency): the original ctx is passed
+// through untouched and every worker returns nil, so one failed
+// dispatch neither cancels nor aborts its siblings — dispatchUser
+// reports its failure via its bool and the "report_failed"
+// notification.
 func (d *Dispatcher) Dispatch(ctx context.Context) error {
 	now := d.Clock.Now()
 	periods := DuePeriods(now)
@@ -162,7 +182,10 @@ func (d *Dispatcher) Dispatch(ctx context.Context) error {
 		return fmt.Errorf("schedule: list users: %w", err)
 	}
 
-	sent, failed := 0, 0
+	// Collect every (user, period) pair first — the filters are the
+	// pinned ones, unchanged: onboarded users only, and only the
+	// periods the user opted into.
+	var pairs []dispatchUserPair
 	for _, u := range users {
 		if !u.Onboarded {
 			continue // the production query already excludes them; belt and braces
@@ -171,13 +194,32 @@ func (d *Dispatcher) Dispatch(ctx context.Context) error {
 			if !userWants(u, p) {
 				continue
 			}
-			if d.dispatchUser(ctx, u, p, now) {
+			pairs = append(pairs, dispatchUserPair{user: u, period: p})
+		}
+	}
+
+	var (
+		g      errgroup.Group
+		mu     sync.Mutex
+		sent   int
+		failed int
+	)
+	g.SetLimit(dispatchConcurrency)
+	for _, pr := range pairs {
+		pr := pr
+		g.Go(func() error {
+			ok := d.dispatchUser(ctx, pr.user, pr.period, now)
+			mu.Lock()
+			if ok {
 				sent++
 			} else {
 				failed++
 			}
-		}
+			mu.Unlock()
+			return nil // dispatchUser reports failure via its bool; never fatal
+		})
 	}
+	_ = g.Wait()
 	d.Log.InfoContext(ctx, "report dispatch finished",
 		"sent", sent, "failed", failed, "periods", len(periods))
 	return nil

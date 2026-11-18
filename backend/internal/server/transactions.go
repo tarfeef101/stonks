@@ -31,6 +31,7 @@ import (
 // iff ins[i] landed, false when its dedup identity already existed).
 type TransactionStore interface {
 	List(ctx context.Context, userID string, f repo.TransactionFilter, dek []byte) ([]repo.Transaction, error)
+	AccountDebits(ctx context.Context, accountID string) ([]repo.DebitTxn, error)
 	Create(ctx context.Context, userID string, in repo.TransactionIn, dek []byte) (repo.Transaction, error)
 	Upsert(ctx context.Context, userID string, in repo.TransactionIn, dek []byte) (repo.Transaction, bool, error)
 	UpsertBatch(ctx context.Context, userID string, ins []repo.TransactionIn, dek []byte) ([]bool, error)

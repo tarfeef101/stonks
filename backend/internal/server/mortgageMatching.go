@@ -16,10 +16,10 @@
 // POST /classifications.
 //
 // Round 33 closes the loop: classifying an item DELETES its
-// notification (mortgageClassify.go), and the notifications list
-// endpoint purges rows whose item is no longer unclassified (or whose
-// mortgage no longer exists) — only still-relevant notifications
-// survive.
+// notification (mortgageClassify.go). Stale-row reconciliation (a row
+// whose item is no longer unclassified, or whose mortgage no longer
+// exists) now runs in the worker plane — schedule.MortgageHealer —
+// instead of on the notifications GET.
 package server
 
 import (
@@ -33,6 +33,7 @@ import (
 
 	"finance-tracker/internal/mortgage"
 	"finance-tracker/internal/repo"
+	"finance-tracker/internal/schedule"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -197,38 +198,28 @@ func annotateMatchingOut(out matchingOut, cls []repo.PaymentClassification) matc
 // the stored schedule and returns the engine's result. The mortgage is
 // passed in ALREADY FETCHED; errors are returned unmapped — the callers
 // (the GET and classify handlers) log and answer 500 themselves.
-func (h *handler) loadMatching(ctx context.Context, c caller, m repo.Mortgage) (mortgage.MatchResult, error) {
+func (h *handler) loadMatching(ctx context.Context, m repo.Mortgage) (mortgage.MatchResult, error) {
 	spec, err := specToEngine(m)
 	if err != nil {
 		return mortgage.MatchResult{}, err
 	}
-	// Pull the linked account's transactions in full. The matcher needs
-	// every debit (a 25-year mortgage has hundreds of payments), so page
-	// past the repo's 100-row clamp until a short page.
+	// One narrow query: the linked account's debits only. The matcher
+	// needs every debit (a 25-year mortgage has hundreds of payments)
+	// and re-filters debits internally, so the credits and the 100-row
+	// pagination round trips were pure overhead.
+	debits, lerr := h.transactions.AccountDebits(ctx, m.AccountID)
+	if lerr != nil {
+		return mortgage.MatchResult{}, lerr
+	}
 	var txns []mortgage.Txn
-	offset := 0
-	for {
-		page, lerr := h.transactions.List(ctx, c.row.ID, repo.TransactionFilter{
-			AccountIDs: []string{m.AccountID},
-			Limit:      100,
-			Offset:     offset,
-		}, c.dek)
-		if lerr != nil {
-			return mortgage.MatchResult{}, lerr
+	for _, d := range debits {
+		amt, perr := strconv.ParseFloat(d.Amount, 64)
+		if perr != nil {
+			// The repo re-canonicalizes amounts on scan, so a parse
+			// failure is an unreachable backstop.
+			return mortgage.MatchResult{}, perr
 		}
-		for _, t := range page {
-			amt, perr := strconv.ParseFloat(t.Amount, 64)
-			if perr != nil {
-				// The repo re-canonicalizes amounts on scan, so a parse
-				// failure is an unreachable backstop.
-				return mortgage.MatchResult{}, perr
-			}
-			txns = append(txns, mortgage.Txn{Date: t.DatePosted, Amount: amt})
-		}
-		if len(page) < 100 {
-			break
-		}
-		offset += len(page)
+		txns = append(txns, mortgage.Txn{Date: d.Date, Amount: amt})
 	}
 	return mortgage.Match(spec, txns)
 }
@@ -236,11 +227,7 @@ func (h *handler) loadMatching(ctx context.Context, c caller, m repo.Mortgage) (
 // aberrantRefDoc is the jsonb ref of an aberrant-payment notification:
 // the (mortgage, kind, date) pointer the (kind, ref) dedup keys on
 // (round 32) and the self-heal parses back (round 33).
-type aberrantRefDoc struct {
-	MortgageID string `json:"mortgage_id"`
-	Kind       string `json:"kind"`
-	Date       string `json:"date"`
-}
+type aberrantRefDoc = schedule.AberrantRefDoc
 
 // aberrantRef builds the ref bytes. encoding/json sorts map keys, so
 // the bytes are deterministic and the (kind, ref) dedup is stable —
@@ -322,100 +309,15 @@ func (h *handler) ensureAberrantNotifications(ctx context.Context, c caller, m r
 	}
 }
 
-// aberrantLiveSet computes the "kind\x00date" keys of the items the
-// report for one (already fetched) mortgage still lists as
-// unclassified (round 33). ok=false when the report could not be
-// computed — the caller must leave that mortgage's rows untouched;
-// ErrMortgageNotFound is NOT an error here: the mortgage is verified
-// gone, so its live set is empty and its rows are all stale.
-func (h *handler) aberrantLiveSet(ctx context.Context, c caller, m repo.Mortgage) (map[string]bool, bool) {
-	res, err := h.loadMatching(ctx, c, m)
-	if err != nil {
-		return nil, false
-	}
-	keys := make(map[string]bool)
-	for _, p := range aberrantPrompts(annotateMatchingOut(toMatchingOut(res), m.Spec.PaymentClassifications)) {
-		keys[p.kind+"\x00"+p.date] = true
-	}
-	return keys, true
-}
-
-// syncAberrantNotifications purges aberrant-payment notifications whose
-// item no longer needs one (round 33, best-effort): a row is stale when
-// its (mortgage, kind, date) item is no longer unclassified — the user
-// answered it (the classify endpoint deletes the row directly), the
-// report no longer reports it, or the mortgage no longer exists. Rows
-// whose ref does not parse are stale by construction (no report can
-// ever own them). Delete-only: creation stays on GET /matching. Every
-// failure is logged only — a notification write must never affect the
-// list response.
-func (h *handler) syncAberrantNotifications(ctx context.Context, c caller) {
-	if h.notifications == nil || h.mortgages == nil || h.transactions == nil {
-		return
-	}
-	rows, err := h.notifications.ListByKind(ctx, c.row.ID, aberrantNotifKind)
-	if err != nil {
-		slog.Error("aberrant notification reconcile failed", "op", "list", "error", err)
-		return
-	}
-	if len(rows) == 0 {
-		return
-	}
-	delete := func(id string) {
-		if derr := h.notifications.Delete(ctx, c.row.ID, id); derr != nil && !errors.Is(derr, repo.ErrNotificationNotFound) {
-			slog.Error("aberrant notification reconcile failed", "op", "delete", "notification", id, "error", derr)
-		}
-	}
-	// Group the parseable rows by mortgage; a row with an unparseable
-	// ref is deleted outright.
-	type parsedRow struct {
-		n   repo.Notification
-		ref aberrantRefDoc
-	}
-	byMortgage := make(map[string][]parsedRow)
-	for _, n := range rows {
-		var ref aberrantRefDoc
-		if err := json.Unmarshal(n.Ref, &ref); err != nil || ref.MortgageID == "" || ref.Kind == "" || ref.Date == "" {
-			delete(n.ID)
-			continue
-		}
-		byMortgage[ref.MortgageID] = append(byMortgage[ref.MortgageID], parsedRow{n: n, ref: ref})
-	}
-	for mid, group := range byMortgage {
-		m, err := h.mortgages.Get(ctx, c.row.ID, mid, c.dek)
-		switch {
-		case err == nil:
-			// computed below
-		case errors.Is(err, repo.ErrMortgageNotFound):
-			for _, pr := range group {
-				delete(pr.n.ID) // verified: the mortgage is gone
-			}
-			continue
-		default:
-			slog.Error("aberrant notification reconcile failed", "op", "get-mortgage", "mortgage", mid, "error", err)
-			continue // unknown: leave this mortgage's rows
-		}
-		live, ok := h.aberrantLiveSet(ctx, c, m)
-		if !ok {
-			continue // unknown: leave this mortgage's rows
-		}
-		for _, pr := range group {
-			if !live[pr.ref.Kind+"\x00"+pr.ref.Date] {
-				delete(pr.n.ID)
-			}
-		}
-	}
-}
-
 // mortgageMatchingGet serves GET /api/v1/mortgages/{id}/matching. House
 // order as the amortization handler: nil store -> 503, auth, malformed
 // id -> 404 BEFORE the store, store error mapping, specToEngine (500
 // backstop — a stored spec always validates), then the linked account's
-// transactions pulled in full (the repo clamps Limit to 100; page until
-// a short page) and the engine. The engine never errors on well-formed
-// input, so Match failure is also a 500 backstop. The stored
-// classifications are stamped onto the report, and one notification per
-// still-unclassified item is lazily created (round 32).
+// debit transactions pulled with one narrow query and the engine. The
+// engine never errors on well-formed input, so Match failure is also a
+// 500 backstop. The stored classifications are stamped onto the report,
+// and one notification per still-unclassified item is lazily created
+// (round 32).
 func (h *handler) mortgageMatchingGet(w http.ResponseWriter, r *http.Request) {
 	if h.mortgages == nil || h.transactions == nil {
 		notConfigured(w)
@@ -439,7 +341,7 @@ func (h *handler) mortgageMatchingGet(w http.ResponseWriter, r *http.Request) {
 		slog.Error("mortgage operation failed", "op", "matching", "error", err)
 		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
 	}
-	res, err := h.loadMatching(r.Context(), c, m)
+	res, err := h.loadMatching(r.Context(), m)
 	if err != nil {
 		fail(err)
 		return

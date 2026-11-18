@@ -6,9 +6,10 @@
 // every store call is scoped to the caller's users.id.
 //
 // Round 33 adds the self-heals: the list endpoint first reconciles the
-// lazy rows to the live state (the review queue count, and the live
-// aberrant items per mortgage) so only still-relevant notifications are
-// served; the review mutations reconcile on the way out (review.go).
+// lazy rows to the live state (the review queue count) so only
+// still-relevant notifications are served, and the review mutations
+// reconcile on the way out (review.go). The aberrant self-heal runs
+// hourly in the worker (schedule.MortgageHealer), not on this list path.
 package server
 
 import (
@@ -195,9 +196,11 @@ func (h *handler) syncReviewNotification(ctx context.Context, c caller) {
 }
 
 // notificationsList serves GET /api/v1/notifications: a page of the
-// caller's notifications, newest first (repo contract). The round-33
-// self-heals run BEFORE the list so the response never serves a stale
-// row.
+// caller's notifications, newest first (repo contract). The review
+// notification is reconciled BEFORE the list; the round-33 aberrant
+// self-heal now runs hourly in the worker (schedule.MortgageHealer), so
+// a stale aberrant row may be served until the next tick — the create
+// path (ensureAberrantNotifications) still runs per request.
 func (h *handler) notificationsList(w http.ResponseWriter, r *http.Request) {
 	if h.notifications == nil {
 		notConfigured(w)
@@ -208,7 +211,6 @@ func (h *handler) notificationsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.syncReviewNotification(r.Context(), c)
-	h.syncAberrantNotifications(r.Context(), c)
 	f, err := notificationFilterFromQuery(r.URL.Query())
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())

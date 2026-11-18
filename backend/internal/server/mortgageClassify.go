@@ -212,7 +212,7 @@ func (h *handler) mortgageClassifyPost(w http.ResponseWriter, r *http.Request) {
 		slog.Error("mortgage operation failed", "op", "classify", "error", err)
 		writeAPIError(w, http.StatusInternalServerError, codeInternal, "mortgage operation failed")
 	}
-	res, err := h.loadMatching(r.Context(), c, m)
+	res, err := h.loadMatching(r.Context(), m)
 	if err != nil {
 		fail(err)
 		return

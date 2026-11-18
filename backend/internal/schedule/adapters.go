@@ -58,6 +58,39 @@ func (l *PoolUserLister) List(ctx context.Context) ([]User, error) {
 	return out, nil
 }
 
+// PoolUserIDLister is a UserIDLister backed by *pgxpool.Pool. The
+// self-heal walks every user, so this is the plain id listing (no
+// notification preferences, no onboarding filter).
+type PoolUserIDLister struct {
+	pool *pgxpool.Pool
+}
+
+// NewPoolUserIDLister wraps a pool for schedule.UserIDLister.
+func NewPoolUserIDLister(pool *pgxpool.Pool) *PoolUserIDLister {
+	return &PoolUserIDLister{pool: pool}
+}
+
+// ListUserIDs returns every user id, ordered for determinism.
+func (l *PoolUserIDLister) ListUserIDs(ctx context.Context) ([]string, error) {
+	rows, err := l.pool.Query(ctx, `SELECT id FROM users ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("schedule: list user ids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("schedule: scan user id: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("schedule: iterate user ids: %w", err)
+	}
+	return out, nil
+}
+
 // txPageLimit pins repo.TransactionStore.List to its hard cap: the
 // collector pages at report.txPageSize (100) and terminates on a short
 // page; the store's own default is 50, which would underfill the pages.
