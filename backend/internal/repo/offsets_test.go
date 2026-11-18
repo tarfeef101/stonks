@@ -1,14 +1,16 @@
 // Offset store tests (migration 0012): one shared postgres:18
 // testcontainer (newTestEnv) with sequential subtests covering the
 // matcher (mirror amounts, date window, same currency, from/to range,
-// idempotence), the suggestion lifecycle (list, accept, dismiss),
-// hand groups (balanced three-row set, unbalanced, already grouped,
-// missing id), clear/re-scan, and per-user scoping.
+// created_at watermark, idempotence), the suggestion lifecycle (list,
+// accept, dismiss), hand groups (balanced three-row set, unbalanced,
+// already grouped, missing id), clear/re-scan, per-user scoping, and
+// the worker-tick helpers (UsersWithTxSince).
 package repo
 
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -337,6 +339,93 @@ func TestOffsetStore(t *testing.T) {
 		}
 		if len(groupsA) != 1 || len(groupsA[0].Members) != 3 {
 			t.Fatalf("A's groups = %+v, want only the three-row group", groupsA)
+		}
+	})
+
+	// Late-import fixture: two legs whose posting dates are ~40 days
+	// old but whose rows were created just now — the case the
+	// created_at watermark scan exists for (a backfill of old dates).
+	lateA := seed(aid, a.dek, cheq.ID, "2026-10-08", "-200.00", "late out")
+	lateB := seed(aid, a.dek, cc.ID, "2026-10-10", "200.00", "late in")
+
+	t.Run("late-import pair: found by the created_at scan, not the date range", func(t *testing.T) {
+		since := time.Now().Add(-time.Hour)
+		cands, err := tx.FindOffsetCandidatesSince(ctx, aid, a.dek, 7, since)
+		if err != nil {
+			t.Fatalf("find since: %v", err)
+		}
+		// Exactly the late pair: t1/t2 carries a dismissed
+		// suggestion (earlier subtest), t3/t4 is 19 days apart
+		// (outside window 7), t5/t6 are different currencies, and
+		// t8/t9/t10 are grouped.
+		want := map[string]bool{pairKey(lateA, lateB): true}
+		if got := pairSet(cands); len(got) != len(want) || !samePairSet(got, want) {
+			t.Fatalf("created_at scan found %v, want %v", got, want)
+		}
+		from := time.Now().Add(-24 * time.Hour)
+		to := time.Now()
+		ranged, err := tx.FindOffsetCandidates(ctx, aid, a.dek, &from, &to, 7)
+		if err != nil {
+			t.Fatalf("find ranged: %v", err)
+		}
+		if got := pairSet(ranged); got[pairKey(lateA, lateB)] {
+			t.Fatalf("date-range scan found the late pair it must miss: %v", got)
+		}
+	})
+
+	t.Run("pair created before the watermark is not found", func(t *testing.T) {
+		// t3/t4 is 19 days apart (window 30 admits it) and has no
+		// suggestion row, but it was created before now — the strict
+		// created_at > since watermark excludes it.
+		cands, err := tx.FindOffsetCandidatesSince(ctx, aid, a.dek, 30, time.Now())
+		if err != nil {
+			t.Fatalf("find since: %v", err)
+		}
+		if len(cands) != 0 {
+			t.Fatalf("watermark scan found candidates created before the watermark: %v", cands)
+		}
+	})
+
+	t.Run("late pair is idempotent once suggested", func(t *testing.T) {
+		cands, err := tx.FindOffsetCandidatesSince(ctx, aid, a.dek, 7, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("find since: %v", err)
+		}
+		n, err := tx.InsertOffsetSuggestions(ctx, aid, cands)
+		if err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("inserted %d suggestions, want 1", n)
+		}
+		cands2, err := tx.FindOffsetCandidatesSince(ctx, aid, a.dek, 7, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("re-find since: %v", err)
+		}
+		if len(cands2) != 0 {
+			t.Fatalf("re-scan found %d candidates, want 0 (the late pair is already suggested)", len(cands2))
+		}
+	})
+
+	t.Run("UsersWithTxSince lists exactly the users with new rows", func(t *testing.T) {
+		users, err := tx.UsersWithTxSince(ctx, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("users with new tx: %v", err)
+		}
+		// Both seeded users have rows created in this test run; no
+		// other user exists in the container.
+		if len(users) != 2 {
+			t.Fatalf("users = %v, want exactly two", users)
+		}
+		got := map[string]bool{}
+		for _, u := range users {
+			got[u] = true
+		}
+		if !got[aid] || !got[bid] {
+			t.Fatalf("users = %v, want %v and %v", users, aid, bid)
+		}
+		if users[0] > users[1] {
+			t.Fatalf("users not ascending: %v", users)
 		}
 	})
 }

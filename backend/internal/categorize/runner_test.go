@@ -688,7 +688,8 @@ func TestRunJobBatchedApplyMixed(t *testing.T) {
 	// Reviews: exactly the expected rows are flagged, and the queue
 	// predicate (review_pending AND category_id IS NULL) proves the
 	// review rows kept category_id NULL.
-	pending, err := r.Txns.ReviewPending(ctx, uid, u.dek)
+	// The whole queue fits one page (4 rows < the 100-row default).
+	pending, err := r.Txns.ReviewPending(ctx, uid, u.dek, 100, 0)
 	if err != nil {
 		t.Fatalf("review pending: %v", err)
 	}

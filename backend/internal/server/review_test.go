@@ -86,7 +86,7 @@ func (s *memReviewStore) pending(userID, id string) (repo.Transaction, bool) {
 	return repo.Transaction{}, false
 }
 
-func (s *memReviewStore) ReviewPending(_ context.Context, userID string, _ []byte) ([]repo.Transaction, error) {
+func (s *memReviewStore) ReviewPending(_ context.Context, userID string, _ []byte, limit, offset int) ([]repo.Transaction, error) {
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
@@ -97,7 +97,17 @@ func (s *memReviewStore) ReviewPending(_ context.Context, userID string, _ []byt
 			out = append(out, r.tx)
 		}
 	}
+	// The repo pages AFTER the full id-ordered sort (SQL LIMIT/OFFSET):
+	// skip offset rows, then take at most limit.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if offset >= len(out) {
+		return []repo.Transaction{}, nil
+	}
+	if end := offset + limit; end < len(out) {
+		out = out[offset:end]
+	} else {
+		out = out[offset:]
+	}
 	return out, nil
 }
 
@@ -342,6 +352,140 @@ func TestReviewList(t *testing.T) {
 	if !strings.Contains(body, "theirs") || strings.Contains(body, "alpha") {
 		t.Fatalf("bob's list = %s", body)
 	}
+
+	t.Run("default page", func(t *testing.T) {
+		// 102 pending rows (more than the page size): with no params
+		// the answer is the first 100 rows in id order (limit defaults
+		// to 100, offset to 0).
+		const sub = "carol"
+		userID := "id-" + sub
+		acct := nextTestID()
+		store := &memReviewStore{}
+		ids := make([]string, 0, 102)
+		for i := 0; i < 102; i++ {
+			id := nextTestID()
+			ids = append(ids, id)
+			store.rows = append(store.rows,
+				pendingTx(userID, id, acct, "2026-11-01", "1.00", fmt.Sprintf("bulk %d", i)))
+		}
+		h2, key2 := newReviewServer(t, store, nil)
+
+		code, body := doReq(t, h2, http.MethodGet, "/api/v1/review", "", reviewHdr(t, key2, sub))
+		if code != http.StatusOK {
+			t.Fatalf("GET /review status = %d, want 200 (body %s)", code, body)
+		}
+		var out []map[string]any
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("decode list: %v (body %s)", err, body)
+		}
+		if len(out) != 100 {
+			t.Fatalf("rows = %d, want the default page of 100 (body %s)", len(out), body)
+		}
+		if out[0]["id"] != ids[0] || out[99]["id"] != ids[99] {
+			t.Fatalf("page = %v..%v, want the first 100 ids in id order", out[0]["id"], out[99]["id"])
+		}
+		// An explicit limit above the cap is CLAMPED to it: still 200,
+		// still 100 rows — never the full queue, never an error.
+		code, body = doReq(t, h2, http.MethodGet, "/api/v1/review?limit=1000", "", reviewHdr(t, key2, sub))
+		if code != http.StatusOK {
+			t.Fatalf("clamped limit status = %d, want 200 (body %s)", code, body)
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("decode list: %v (body %s)", err, body)
+		}
+		if len(out) != 100 || out[0]["id"] != ids[0] {
+			t.Fatalf("clamped page = %d rows starting %v, want 100 starting %s", len(out), out[0]["id"], ids[0])
+		}
+	})
+
+	t.Run("limit and offset pass through", func(t *testing.T) {
+		const sub = "dave"
+		userID := "id-" + sub
+		acct := nextTestID()
+		store := &memReviewStore{}
+		ids := make([]string, 0, 5)
+		for i := 0; i < 5; i++ {
+			id := nextTestID()
+			ids = append(ids, id)
+			store.rows = append(store.rows,
+				pendingTx(userID, id, acct, "2026-11-01", "1.00", fmt.Sprintf("tx %d", i)))
+		}
+		h2, key2 := newReviewServer(t, store, nil)
+
+		// offset 1, limit 2: the middle two rows, id order.
+		code, body := doReq(t, h2, http.MethodGet, "/api/v1/review?limit=2&offset=1", "", reviewHdr(t, key2, sub))
+		if code != http.StatusOK {
+			t.Fatalf("GET /review?limit=2&offset=1 status = %d, want 200 (body %s)", code, body)
+		}
+		var out []map[string]any
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("decode list: %v (body %s)", err, body)
+		}
+		if len(out) != 2 || out[0]["id"] != ids[1] || out[1]["id"] != ids[2] {
+			t.Fatalf("page = %v, want ids[1] then ids[2] (body %s)", out, body)
+		}
+		// The limit never runs past the end of the queue.
+		code, body = doReq(t, h2, http.MethodGet, "/api/v1/review?limit=2&offset=4", "", reviewHdr(t, key2, sub))
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", code, body)
+		}
+		if err := json.Unmarshal([]byte(body), &out); err != nil {
+			t.Fatalf("decode list: %v (body %s)", err, body)
+		}
+		if len(out) != 1 || out[0]["id"] != ids[4] {
+			t.Fatalf("tail page = %v, want only ids[4] (body %s)", out, body)
+		}
+		// An offset past the end of the queue is an empty page, not an
+		// error.
+		code, body = doReq(t, h2, http.MethodGet, "/api/v1/review?limit=2&offset=9", "", reviewHdr(t, key2, sub))
+		if code != http.StatusOK || strings.TrimSpace(body) != "[]" {
+			t.Fatalf("offset past end = %q (status %d), want []", body, code)
+		}
+	})
+
+	t.Run("negative limit or offset is 400", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			query string
+			msg   string
+		}{
+			{"negative limit", "?limit=-1", "limit must be an integer >= 0"},
+			{"negative offset", "?offset=-1", "offset must be an integer >= 0"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				code, body := doReq(t, h, http.MethodGet, "/api/v1/review"+tc.query, "", reviewHdr(t, key, sub))
+				if code != http.StatusBadRequest {
+					t.Fatalf("%s: status = %d, want 400 (body %s)", tc.name, code, body)
+				}
+				if c, m := apiErr(t, body); c != "invalid_request" || m != tc.msg {
+					t.Fatalf("%s: err = %s/%s", tc.name, c, m)
+				}
+			})
+		}
+	})
+
+	t.Run("non-integer limit or offset is 400", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			query string
+			msg   string
+		}{
+			{"non-integer limit", "?limit=abc", "limit must be an integer >= 0"},
+			{"non-integer offset", "?offset=2.5", "offset must be an integer >= 0"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				code, body := doReq(t, h, http.MethodGet, "/api/v1/review"+tc.query, "", reviewHdr(t, key, sub))
+				if code != http.StatusBadRequest {
+					t.Fatalf("%s: status = %d, want 400 (body %s)", tc.name, code, body)
+				}
+				if c, m := apiErr(t, body); c != "invalid_request" || m != tc.msg {
+					t.Fatalf("%s: err = %s/%s", tc.name, c, m)
+				}
+			})
+		}
+	})
 
 	t.Run("nil store", func(t *testing.T) {
 		h2, key2 := newReviewServer(t, nil, nil)

@@ -956,10 +956,10 @@ func TestTransactionCategoriseWorker(t *testing.T) {
 }
 
 // TestTransactionReviewQueue covers the step 5.5 review-queue methods:
-// ReviewPending (scoping, queue predicate, id ordering, decryption),
-// GetReviewPending (queue predicate by id), AcceptReview (success,
-// scoped re-accept, cross-user, foreign category), and AcceptAll
-// (bulk count, empty queue, foreign category).
+// ReviewPending (scoping, queue predicate, id ordering, pagination,
+// decryption), GetReviewPending (queue predicate by id), AcceptReview
+// (success, scoped re-accept, cross-user, foreign category), and
+// AcceptAll (bulk count, empty queue, foreign category).
 func TestTransactionReviewQueue(t *testing.T) {
 	env := newTestEnv(t, "rv-a", "rv-b")
 	tx := NewTransactionStore(env.pool)
@@ -1020,7 +1020,8 @@ func TestTransactionReviewQueue(t *testing.T) {
 	}
 
 	t.Run("list", func(t *testing.T) {
-		got, err := tx.ReviewPending(ctx, aid, a.dek)
+		// 100/0: a page big enough for the whole queue (2 rows).
+		got, err := tx.ReviewPending(ctx, aid, a.dek, 100, 0)
 		if err != nil {
 			t.Fatalf("review pending: %v", err)
 		}
@@ -1043,12 +1044,31 @@ func TestTransactionReviewQueue(t *testing.T) {
 			t.Fatalf("p1 decrypted row: %+v", row)
 		}
 		// b's queue holds only b's own row (no cross-user leak).
-		gotB, err := tx.ReviewPending(ctx, bid, b.dek)
+		gotB, err := tx.ReviewPending(ctx, bid, b.dek, 100, 0)
 		if err != nil {
 			t.Fatalf("review pending b: %v", err)
 		}
 		if len(gotB) != 1 || gotB[0].ID != bp.ID || gotB[0].Description != "B Pending" {
 			t.Fatalf("b queue: %+v", gotB)
+		}
+
+		// Pagination: limit/offset apply to the id-ordered queue
+		// (the pinned ORDER BY id LIMIT $2 OFFSET $3) — one row at
+		// offset 1 is the second row in id order.
+		page, err := tx.ReviewPending(ctx, aid, a.dek, 1, 1)
+		if err != nil {
+			t.Fatalf("review pending page: %v", err)
+		}
+		if len(page) != 1 || page[0].ID != want[1] {
+			t.Fatalf("page = %+v, want only the second id-ordered row", page)
+		}
+		// An offset past the end of the queue is an empty page.
+		empty, err := tx.ReviewPending(ctx, aid, a.dek, 10, 5)
+		if err != nil {
+			t.Fatalf("review pending empty: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Fatalf("empty page = %+v, want none", empty)
 		}
 	})
 

@@ -132,21 +132,21 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
 // version 17 (all nineteen tables present, fx_rates from 0017 on top of
-// saved_views from 0015 on top of dashboard_widgets.row_span from 0014 on
-// top of dashboards +
-// dashboard_widgets from 0013 on top of
-// offset_suggestions + transactions.offset_group_id from 0012 on top of
-// users.theme from 0011 on top of fi_institutions + fi_credentials from
-// 0010 on top of mortgages from 0009 + dashboard_cards from 0008 +
-// categorise_jobs from 0007 + import_jobs' 0006 mapping column), a second
-// `up` is a no-op, and `down` rolls back exactly one step (0017 drops
-// fx_rates; saved_views keeps 0015, dashboard_widgets keeps 0014's row_span,
-// the dashboards +
-// dashboard_widgets tables keep 0013, offset_suggestions keeps 0012's
-// transactions.offset_group_id, users keeps its 0011 theme, and the fi
-// tables, mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006
-// mapping column and 0001+0002+0003+0004 stay in place, users keeps its
-// 0004 onboarded_at column).
+// 0016's three partial transaction indexes on top of saved_views from
+// 0015 on top of dashboard_widgets.row_span from 0014 on top of dashboards
+// + dashboard_widgets from 0013 on top of offset_suggestions +
+// transactions.offset_group_id from 0012 on top of users.theme from 0011 on
+// top of fi_institutions + fi_credentials from 0010 on top of mortgages
+// from 0009 + dashboard_cards from 0008 + categorise_jobs from 0007 +
+// import_jobs' 0006 mapping column), a second `up` is a no-op, and `down`
+// rolls back exactly one step (0017 drops fx_rates; 0016's three partial
+// indexes stay, saved_views keeps 0015, dashboard_widgets keeps 0014's
+// row_span, the dashboards + dashboard_widgets tables keep 0013,
+// offset_suggestions keeps 0012's transactions.offset_group_id, users
+// keeps its 0011 theme, and the fi tables, mortgages, dashboard_cards,
+// categorise_jobs, import_jobs' 0006 mapping column and
+// 0001+0002+0003+0004 stay in place, users keeps its 0004 onboarded_at
+// column).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -200,7 +200,8 @@ func TestGooseLifecycle(t *testing.T) {
 	}
 
 	// One-step down: goose rolls back the latest migration (0017) only —
-	// fx_rates goes; 0015 stays (saved_views), 0014 stays
+	// fx_rates goes; 0016 stays (its three partial indexes), 0015 stays
+	// (saved_views), 0014 stays
 	// (dashboard_widgets.row_span), 0013
 	// stays (dashboards + dashboard_widgets), 0012 stays (offset_suggestions
 	// plus transactions.offset_group_id), users keeps its 0011 theme, and
@@ -210,8 +211,8 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 15 {
-		t.Fatalf("version after down = %d (err %v), want 15", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 16 {
+		t.Fatalf("version after down = %d (err %v), want 16", ver, err)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables

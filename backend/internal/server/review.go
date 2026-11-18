@@ -18,6 +18,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 
 	"finance-tracker/internal/categorize"
 	"finance-tracker/internal/llm"
@@ -31,7 +33,7 @@ import (
 // methods are unused here); route tests use an in-memory
 // implementation.
 type ReviewStore interface {
-	ReviewPending(ctx context.Context, userID string, dek []byte) ([]repo.Transaction, error)
+	ReviewPending(ctx context.Context, userID string, dek []byte, limit, offset int) ([]repo.Transaction, error)
 	GetReviewPending(ctx context.Context, userID, id string, dek []byte) (repo.Transaction, error)
 	AcceptReview(ctx context.Context, userID, txnID, categoryID string) error
 	AcceptAll(ctx context.Context, userID, categoryID string) (int, error)
@@ -189,9 +191,40 @@ func (h *handler) reviewError(w http.ResponseWriter, op string, err error) {
 	}
 }
 
-// reviewList serves GET /api/v1/review: the review queue — every row
-// the categorise worker flagged that still has no category, oldest
-// id first.
+// reviewPageLimit pins the review-queue page size: the default when
+// ?limit is absent and the cap for explicit values (values above it
+// are clamped, not rejected — the client's PAGE_SIZE is 100).
+const reviewPageLimit = 100
+
+// reviewPageFromQuery parses the review-queue pagination params: limit
+// defaults to reviewPageLimit, offset to 0; non-integer or negative
+// values are request errors (the tx-filter convention).
+func reviewPageFromQuery(q url.Values) (limit, offset int, err error) {
+	limit, offset = reviewPageLimit, 0
+	if s := q.Get("limit"); s != "" {
+		n, aerr := strconv.Atoi(s)
+		if aerr != nil || n < 0 {
+			return 0, 0, errors.New("limit must be an integer >= 0")
+		}
+		limit = n
+	}
+	if s := q.Get("offset"); s != "" {
+		n, aerr := strconv.Atoi(s)
+		if aerr != nil || n < 0 {
+			return 0, 0, errors.New("offset must be an integer >= 0")
+		}
+		offset = n
+	}
+	if limit > reviewPageLimit {
+		limit = reviewPageLimit
+	}
+	return limit, offset, nil
+}
+
+// reviewList serves GET /api/v1/review: ONE page of the review queue
+// — rows the categorise worker flagged that still have no category,
+// oldest id first — with ?limit (default/cap reviewPageLimit) and
+// ?offset (default 0) pagination.
 func (h *handler) reviewList(w http.ResponseWriter, r *http.Request) {
 	if h.review == nil {
 		notConfigured(w)
@@ -201,7 +234,12 @@ func (h *handler) reviewList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	txs, err := h.review.ReviewPending(r.Context(), c.row.ID, c.dek)
+	limit, offset, err := reviewPageFromQuery(r.URL.Query())
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	txs, err := h.review.ReviewPending(r.Context(), c.row.ID, c.dek, limit, offset)
 	if err != nil {
 		h.reviewError(w, "list", err)
 		return

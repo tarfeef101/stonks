@@ -77,7 +77,7 @@ func (s *TransactionStore) FindOffsetCandidates(ctx context.Context, userID stri
 	if to != nil {
 		toArg = dateStr(*to)
 	}
-	rows, err := s.pool.Query(ctx, `
+	query := `
 		SELECT a.id, b.id
 		FROM transactions a
 		JOIN transactions b
@@ -99,7 +99,18 @@ func (s *TransactionStore) FindOffsetCandidates(ctx context.Context, userID stri
 		        AND s.tx_a = a.id AND s.tx_b = b.id
 		  )
 		ORDER BY a.date_posted, a.id
-		LIMIT `+strconv.Itoa(offsetMatchLimit), userID, windowDays, fromArg, toArg)
+		LIMIT ` + strconv.Itoa(offsetMatchLimit)
+	return s.findOffsetPairs(ctx, userID, query, dek, userID, windowDays, fromArg, toArg)
+}
+
+// findOffsetPairs runs one offset-match query and opens the matched
+// legs: the deduplicated leg ids are batch-loaded with txsByIDs, and a
+// leg that vanished mid-scan is skipped. It is the shared core of
+// FindOffsetCandidates and FindOffsetCandidatesSince — the query
+// string is their only difference. It returns a non-nil empty slice
+// when no pairs match.
+func (s *TransactionStore) findOffsetPairs(ctx context.Context, userID string, query string, dek []byte, args ...any) ([]OffsetCandidate, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("repo: find offset candidates: %w", err)
 	}
@@ -141,6 +152,70 @@ func (s *TransactionStore) FindOffsetCandidates(ctx context.Context, userID stri
 			continue // a leg vanished mid-scan — skip it
 		}
 		out = append(out, OffsetCandidate{A: a, B: b})
+	}
+	return out, nil
+}
+
+// FindOffsetCandidatesSince is FindOffsetCandidates keyed on
+// created_at instead of date_posted: a pair qualifies when at least
+// one leg was CREATED after since. That is what makes a backfill or
+// late import of old posting dates scannable — the date-range scan
+// misses it, because the imported dates land nowhere near "now" while
+// the rows themselves are brand new. The windowDays constraint and the
+// suggestion-skip semantics (no pair already proposed in ANY status)
+// are unchanged.
+func (s *TransactionStore) FindOffsetCandidatesSince(ctx context.Context, userID string, dek []byte, windowDays int, since time.Time) ([]OffsetCandidate, error) {
+	query := `
+		SELECT a.id, b.id
+		FROM transactions a
+		JOIN transactions b
+		    ON b.user_id = a.user_id
+		   AND b.amount = -a.amount
+		   AND a.id < b.id
+		   AND a.offset_group_id IS NULL
+		   AND b.offset_group_id IS NULL
+		   AND ABS(a.date_posted - b.date_posted) <= $2
+		JOIN accounts aa ON aa.id = a.account_id
+		JOIN accounts ba ON ba.id = b.account_id
+		WHERE a.user_id = $1
+		  AND aa.currency = ba.currency
+		  AND (a.created_at > $3::timestamptz OR b.created_at > $3::timestamptz)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM offset_suggestions s
+		      WHERE s.user_id = a.user_id
+		        AND s.tx_a = a.id AND s.tx_b = b.id
+		  )
+		ORDER BY a.date_posted, a.id
+		LIMIT ` + strconv.Itoa(offsetMatchLimit)
+	return s.findOffsetPairs(ctx, userID, query, dek, userID, windowDays, since)
+}
+
+// UsersWithTxSince returns the ids of the users that have at least one
+// transaction created after since, ascending. The offset worker tick
+// uses it to scan only users whose rows can actually be new — a user
+// without a new row cannot gain a candidate pair, so a full scan of it
+// is wasted work.
+func (s *TransactionStore) UsersWithTxSince(ctx context.Context, since time.Time) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT user_id
+		FROM transactions
+		WHERE created_at > $1::timestamptz
+		GROUP BY user_id
+		ORDER BY user_id`, since)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list users with new tx: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			return nil, fmt.Errorf("repo: scan user with new tx: %w", err)
+		}
+		out = append(out, uid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: iterate users with new tx: %w", err)
 	}
 	return out, nil
 }

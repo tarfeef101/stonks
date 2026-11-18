@@ -1011,14 +1011,16 @@ func (s *TransactionStore) ApplySuggestion(ctx context.Context, userID, txnID, c
 	return nil
 }
 
-// ReviewPending returns the user's review queue (step 5.5): every row
-// the categorise worker flagged (review_pending) that still has no
-// category, oldest id first. A row that somehow gained a category
-// while flagged (manual edit) is already resolved and is excluded.
-// Descriptions are decrypted under dek.
-func (s *TransactionStore) ReviewPending(ctx context.Context, userID string, dek []byte) ([]Transaction, error) {
+// ReviewPending returns ONE page of the user's review queue (step
+// 5.5): rows the categorise worker flagged (review_pending) that still
+// have no category, oldest id first, limited to limit rows starting at
+// offset. A row that somehow gained a category while flagged (manual
+// edit) is already resolved and is excluded. Descriptions are decrypted
+// under dek.
+func (s *TransactionStore) ReviewPending(ctx context.Context, userID string, dek []byte, limit, offset int) ([]Transaction, error) {
 	rows, err := s.pool.Query(ctx,
-		txSelect+" WHERE user_id = $1 AND review_pending = true AND category_id IS NULL\n\t\tORDER BY id", userID)
+		txSelect+" WHERE user_id = $1 AND review_pending = true AND category_id IS NULL\n\t\tORDER BY id LIMIT $2 OFFSET $3",
+		userID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("repo: list review pending: %w", err)
 	}
