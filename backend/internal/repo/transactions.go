@@ -1202,3 +1202,108 @@ func (s *TransactionStore) AccountDebits(ctx context.Context, accountID string) 
 	}
 	return out, nil
 }
+
+// TrendBucket is one date_trunc bucket of a trend scan: the bucket
+// start plus the per-category spend aggregates that fell in it.
+type TrendBucket struct {
+	Bucket time.Time
+	Groups []CategorySpend
+}
+
+// TrendAggregate is Aggregate with one extra grouping column: it sums
+// the caller's transactions with date_posted in [from, to]
+// (inclusive, date precision) grouped by (date_trunc(period,
+// date_posted), category). It is the single-query replacement for
+// issuing one Aggregate per trend window. The period unit (month |
+// quarter | year) is a fixed Go-side switch — never user input.
+func (s *TransactionStore) TrendAggregate(ctx context.Context, userID, period string, from, to time.Time, accountIDs []string) ([]TrendBucket, error) {
+	// date_trunc's unit is interpolated into the SQL as a fixed
+	// string literal selected by this switch — never user input.
+	var unit string
+	switch period {
+	case "month":
+		unit = `'month'`
+	case "quarter":
+		unit = `'quarter'`
+	case "year":
+		unit = `'year'`
+	default:
+		return nil, fmt.Errorf("repo: trend aggregate: unknown period %q", period)
+	}
+
+	// offset_group_id IS NULL: grouped rows net each other out and must
+	// not count toward the summary (see List).
+	where := []string{"user_id = $1", "offset_group_id IS NULL"}
+	args := []any{userID}
+	add := func(cond string, val any) {
+		args = append(args, val)
+		where = append(where, fmt.Sprintf("%s $%d", cond, len(args)))
+	}
+	add("date_posted >=", dateStr(from))
+	add("date_posted <=", dateStr(to))
+	if len(accountIDs) > 0 {
+		ph := make([]string, len(accountIDs))
+		for i, id := range accountIDs {
+			args = append(args, id)
+			ph[i] = "$" + strconv.Itoa(len(args))
+		}
+		where = append(where, "account_id IN ("+strings.Join(ph, ", ")+")")
+	}
+	// No AT TIME ZONE: date_posted is a plain date and the bucket must
+	// line up exactly with periodBounds' UTC period starts (a
+	// date→timestamp cast is wall-clock only; date_trunc on a
+	// timestamp-without-tz is pure calendar arithmetic; pgx decodes
+	// plain timestamps as UTC).
+	rows, err := s.pool.Query(ctx, `
+		SELECT date_trunc(`+unit+`, date_posted::timestamp),
+		       COALESCE(category_id::text, ''),
+		       COALESCE(SUM(CASE WHEN amount < 0 THEN -amount END), 0),
+		       COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0),
+		       COALESCE(SUM(amount), 0)
+		FROM transactions
+		WHERE `+strings.Join(where, " AND ")+`
+		GROUP BY 1, category_id
+		ORDER BY 1, category_id NULLS FIRST`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("repo: trend aggregate transactions: %w", err)
+	}
+	defer rows.Close()
+	var out []TrendBucket
+	var cur *TrendBucket
+	for rows.Next() {
+		var (
+			bucket time.Time
+			g      CategorySpend
+			sp     string
+			in     string
+			net    string
+		)
+		if err := rows.Scan(&bucket, &g.CategoryID, &sp, &in, &net); err != nil {
+			return nil, fmt.Errorf("repo: trend aggregate transactions: %w", err)
+		}
+		spend, err := canonicalAmount(sp)
+		if err != nil {
+			return nil, err
+		}
+		income, err := canonicalAmount(in)
+		if err != nil {
+			return nil, err
+		}
+		total, err := canonicalAmount(net)
+		if err != nil {
+			return nil, err
+		}
+		g.Spend, g.Income, g.Net = spend, income, total
+		// Rows are ordered by bucket, so new buckets start a new
+		// group; consecutive rows within a bucket append to it.
+		if cur == nil || !cur.Bucket.Equal(bucket) {
+			out = append(out, TrendBucket{Bucket: bucket})
+			cur = &out[len(out)-1]
+		}
+		cur.Groups = append(cur.Groups, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: trend aggregate transactions: %w", err)
+	}
+	return out, nil
+}

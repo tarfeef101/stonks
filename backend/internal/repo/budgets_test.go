@@ -321,6 +321,147 @@ func TestBudgetStore(t *testing.T) {
 	})
 }
 
+// TestBudgetActiveTargets covers the summary's narrow select: only the
+// ACTIVE budgets of the requested period come back, names are never
+// decrypted (not selected at all), targets are decrypted, order is
+// created_at, id, and foreign users' rows never leak. One fresh
+// testcontainer (the per-Test-fn convention).
+func TestBudgetActiveTargets(t *testing.T) {
+	env := newTestEnv(t, "budx-a", "budx-b")
+	cat := NewCategoryStore(env.pool)
+	bud := NewBudgetStore(env.pool)
+	a := env.user(t, "budx-a")
+	b := env.user(t, "budx-b")
+	ctx := env.ctx
+	aid, bid := a.row.ID, b.row.ID
+
+	fa, err := cat.Create(ctx, aid, CategoryIn{Name: "Food"}, a.dek)
+	if err != nil {
+		t.Fatalf("create category: %v", err)
+	}
+	fb, err := cat.Create(ctx, bid, CategoryIn{Name: "Food"}, b.dek)
+	if err != nil {
+		t.Fatalf("create other user's category: %v", err)
+	}
+	targets := func(vals map[string]any) json.RawMessage {
+		t.Helper()
+		out, err := json.Marshal(vals)
+		if err != nil {
+			t.Fatalf("marshal targets: %v", err)
+		}
+		return out
+	}
+
+	monthA, err := bud.Create(ctx, aid, BudgetIn{Name: "Month A", Period: "month", Targets: targets(map[string]any{fa.ID: 10})}, a.dek)
+	if err != nil {
+		t.Fatalf("create month A: %v", err)
+	}
+	monthA2, err := bud.Create(ctx, aid, BudgetIn{Name: "Month A2", Period: "month", Targets: targets(map[string]any{fa.ID: 5})}, a.dek)
+	if err != nil {
+		t.Fatalf("create month A2: %v", err)
+	}
+	off := false
+	monthOff, err := bud.Create(ctx, aid, BudgetIn{Name: "Month Off", Period: "month", Active: &off, Targets: targets(map[string]any{fa.ID: 1})}, a.dek)
+	if err != nil {
+		t.Fatalf("create month off: %v", err)
+	}
+	quarterA, err := bud.Create(ctx, aid, BudgetIn{Name: "Quarter A", Period: "quarter", Targets: targets(map[string]any{fa.ID: 7})}, a.dek)
+	if err != nil {
+		t.Fatalf("create quarter A: %v", err)
+	}
+	yearA, err := bud.Create(ctx, aid, BudgetIn{Name: "Year A", Period: "year", Targets: targets(map[string]any{fa.ID: 3})}, a.dek)
+	if err != nil {
+		t.Fatalf("create year A: %v", err)
+	}
+	monthB, err := bud.Create(ctx, bid, BudgetIn{Name: "Month B", Period: "month", Targets: targets(map[string]any{fb.ID: 9})}, b.dek)
+	if err != nil {
+		t.Fatalf("create month B: %v", err)
+	}
+	cleanup := func(u, id string) {
+		t.Helper()
+		if err := bud.Delete(ctx, u, id); err != nil {
+			t.Fatalf("cleanup delete %s: %v", id, err)
+		}
+	}
+
+	// Month: the two active month budgets, in created_at, id order;
+	// the inactive one, the other periods, and user b's row are all
+	// filtered out in SQL.
+	got, err := bud.ActiveTargets(ctx, aid, "month", a.dek)
+	if err != nil {
+		t.Fatalf("active targets month: %v", err)
+	}
+	wantIDs := []string{monthA.ID, monthA2.ID}
+	if len(got) != len(wantIDs) {
+		t.Fatalf("month: got %d rows %+v, want %d", len(got), got, len(wantIDs))
+	}
+	for i, id := range wantIDs {
+		if got[i].ID != id {
+			t.Fatalf("month row %d = %s, want %s", i, got[i].ID, id)
+		}
+	}
+	if !jsonDocsEqual(got[0].Targets, monthA.Targets) || !jsonDocsEqual(got[1].Targets, monthA2.Targets) {
+		t.Fatalf("month targets: got %+v", got)
+	}
+
+	// Quarter: only the quarter row.
+	got, err = bud.ActiveTargets(ctx, aid, "quarter", a.dek)
+	if err != nil {
+		t.Fatalf("active targets quarter: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != quarterA.ID {
+		t.Fatalf("quarter: got %+v, want the single %s", got, quarterA.ID)
+	}
+	if !jsonDocsEqual(got[0].Targets, quarterA.Targets) {
+		t.Fatalf("quarter targets: got %s, want %s", got[0].Targets, quarterA.Targets)
+	}
+
+	// Year: only the year row.
+	got, err = bud.ActiveTargets(ctx, aid, "year", a.dek)
+	if err != nil {
+		t.Fatalf("active targets year: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != yearA.ID {
+		t.Fatalf("year: got %+v, want the single %s", got, yearA.ID)
+	}
+
+	// User b's own month budget: isolated from user a's set.
+	got, err = bud.ActiveTargets(ctx, bid, "month", b.dek)
+	if err != nil {
+		t.Fatalf("active targets user b: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != monthB.ID {
+		t.Fatalf("user b month: got %+v, want the single %s", got, monthB.ID)
+	}
+
+	// Deactivating the row removes it from the set (the filter is SQL,
+	// not Go).
+	if _, err := bud.Update(ctx, aid, monthA2.ID, BudgetPatch{Active: &off}, a.dek); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	got, err = bud.ActiveTargets(ctx, aid, "month", a.dek)
+	if err != nil {
+		t.Fatalf("active targets after deactivate: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != monthA.ID {
+		t.Fatalf("after deactivate: got %+v, want the single %s", got, monthA.ID)
+	}
+
+	cleanup(aid, monthA.ID)
+	got, err = bud.ActiveTargets(ctx, aid, "month", a.dek)
+	if err != nil {
+		t.Fatalf("active targets empty: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty: got %+v, want none", got)
+	}
+	cleanup(aid, monthA2.ID)
+	cleanup(aid, monthOff.ID)
+	cleanup(aid, quarterA.ID)
+	cleanup(aid, yearA.ID)
+	cleanup(bid, monthB.ID)
+}
+
 func TestBudgetValidateTargetsPure(t *testing.T) {
 	// The shape rules (no DB): uuid keys, numeric non-negative values.
 	// The keys are syntactically valid uuids — ownership (whether the

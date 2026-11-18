@@ -343,6 +343,37 @@ func (s *DashboardWidgetStore) List(ctx context.Context, userID, dashboardID str
 	return out, nil
 }
 
+// WidgetIDs returns the ids of the dashboard's widgets without
+// decrypting any widget config. The set-order endpoint only needs the
+// id set for validation; the full List (which decrypts every widget)
+// was pure overhead here.
+func (s *DashboardWidgetStore) WidgetIDs(ctx context.Context, userID, dashboardID string) ([]string, error) {
+	if err := s.checkDashboard(ctx, userID, dashboardID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id
+		FROM dashboard_widgets
+		WHERE user_id = $1 AND dashboard_id = $2
+		ORDER BY sort_order, id`, userID, dashboardID)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list dashboard widget ids: %w", err)
+	}
+	defer rows.Close()
+	out := make([]string, 0, 4)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("repo: scan dashboard widget: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list dashboard widget ids: %w", err)
+	}
+	return out, nil
+}
+
 // Get returns one widget of the user's dashboard, or
 // ErrDashboardWidgetNotFound when the id is not in that dashboard (this
 // covers unknown dashboards too — the row simply does not exist for the

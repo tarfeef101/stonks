@@ -192,6 +192,26 @@ func (s *memWidgetStore) List(_ context.Context, userID, dashboardID string, _ [
 	return out, nil
 }
 
+// WidgetIDs lists the dashboard's widget ids without touching widget
+// payloads, honoring failList parity with List.
+func (s *memWidgetStore) WidgetIDs(_ context.Context, userID, dashboardID string) ([]string, error) {
+	if s.failList != nil {
+		return nil, s.failList
+	}
+	// A dashboard id that is not the user's behaves as absent (the repo
+	// checks dashboard ownership first).
+	if !s.world.hasDashboard(userID, dashboardID) {
+		return nil, repo.ErrDashboardNotFound
+	}
+	ids := make([]string, 0, len(s.world.widgets))
+	for _, r := range s.world.widgets {
+		if r.userID == userID && r.dashboardID == dashboardID {
+			ids = append(ids, r.w.ID)
+		}
+	}
+	return ids, nil
+}
+
 func (s *memWidgetStore) Get(_ context.Context, userID, dashboardID, widgetID string, _ []byte) (repo.DashboardWidget, error) {
 	if s.failGet != nil {
 		return repo.DashboardWidget{}, s.failGet

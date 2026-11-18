@@ -38,6 +38,7 @@ type TransactionStore interface {
 	Update(ctx context.Context, userID, id string, p repo.TransactionPatch, dek []byte) (repo.Transaction, error)
 	Delete(ctx context.Context, userID, id string) error
 	Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]repo.CategorySpend, error)
+	TrendAggregate(ctx context.Context, userID, period string, from, to time.Time, accountIDs []string) ([]repo.TrendBucket, error)
 }
 
 // Wire DTOs. transactionOut excludes DedupHash (re-import identity) and

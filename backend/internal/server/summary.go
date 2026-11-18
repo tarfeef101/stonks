@@ -1,9 +1,10 @@
 // GET /api/v1/summary (plan step 3.2): the per-period rollup the
 // frontend dashboard renders. It aggregates the caller's transactions
 // for the period (repo Aggregate: per-category spend / income / net),
-// merges the active budget targets of the period (decrypted in-app by
-// the repo List, summed per category — more than one active budget may
-// name the same category), and joins category names. Groups are the
+// merges the active budget targets of the period (the repo's
+// ActiveTargets, narrowed in SQL to the period's active rows, is
+// decrypted in-app and summed per category — more than one active
+// budget may name the same category), and joins category names. Groups are the
 // UNION of the aggregation and the target keys, so a category with a
 // target but no transactions still shows up (0.00s). The uncategorized
 // group carries null category_id and category_name; a target key no
@@ -292,7 +293,7 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 		h.transactionError(w, "aggregate", err)
 		return
 	}
-	budgets, err := h.budgets.List(r.Context(), c.row.ID, c.dek)
+	budgets, err := h.budgets.ActiveTargets(r.Context(), c.row.ID, period, c.dek)
 	if err != nil {
 		slog.Error("budget operation failed", "op", "list", "error", err)
 		writeAPIError(w, http.StatusInternalServerError, codeInternal, "budget operation failed")
@@ -311,9 +312,6 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	// pretend exactness.
 	targets := make(map[string]float64)
 	for _, b := range budgets {
-		if !b.Active || b.Period != period {
-			continue
-		}
 		var m map[string]json.Number
 		if err := json.Unmarshal(b.Targets, &m); err != nil {
 			slog.Error("budget targets could not be decoded", "budget", b.ID, "error", err)
@@ -401,22 +399,33 @@ func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Trend: the last N windows, oldest first (k = N-1 down to 0).
-	// Same account filter as the top-level window; totals computed the
-	// same way. Each point also carries its window's per-category
-	// breakdown (6.3): the same Aggregate rows the totals were summed
-	// from, names joined from the shared names map and sorted with the
-	// shared group comparator. A nil Trend stays nil and drops out of
-	// the JSON.
+	// One bucketed TrendAggregate query over the whole trend span
+	// replaces the per-window Aggregate calls; the buckets are keyed
+	// by their UTC-midnight start, which is exactly each window's
+	// periodBounds from date. Same account filter as the top-level
+	// window; totals computed the same way. Each point also carries
+	// its window's per-category breakdown (6.3): the same bucket rows
+	// the totals were summed from, names joined from the shared names
+	// map and sorted with the shared group comparator. A nil Trend
+	// stays nil and drops out of the JSON.
 	var trendPts []trendPoint
 	if trend > 0 {
+		wf0, _ := periodBounds(period, trendShift(period, now, trend-1))
+		_, wtN := periodBounds(period, now)
+		buckets, err := h.transactions.TrendAggregate(r.Context(), c.row.ID, period, wf0, wtN, accountIDs)
+		if err != nil {
+			h.transactionError(w, "aggregate", err)
+			return
+		}
+		byWindow := make(map[string][]repo.CategorySpend, len(buckets))
+		for _, b := range buckets {
+			key := b.Bucket.Format("2006-01-02")
+			byWindow[key] = append(byWindow[key], b.Groups...)
+		}
 		trendPts = make([]trendPoint, 0, trend)
 		for k := trend - 1; k >= 0; k-- {
 			tf, tt := periodBounds(period, trendShift(period, now, k))
-			tg, err := h.transactions.Aggregate(r.Context(), c.row.ID, tf, tt, accountIDs)
-			if err != nil {
-				h.transactionError(w, "aggregate", err)
-				return
-			}
+			tg := byWindow[tf.Format("2006-01-02")]
 			var ptSpend, ptIncome, ptNet int64
 			tgs := make([]trendGroup, 0, len(tg))
 			for _, g := range tg {

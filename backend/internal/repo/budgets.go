@@ -253,6 +253,51 @@ func (s *BudgetStore) List(ctx context.Context, userID string, dek []byte) ([]Bu
 	return out, nil
 }
 
+// ActiveBudget is one active budget's targets, decrypted. The name is
+// deliberately not selected: the summary response only needs the
+// targets, and skipping the name column keeps the response surface
+// minimal.
+type ActiveBudget struct {
+	ID      string
+	Targets json.RawMessage
+}
+
+// ActiveTargets returns the decrypted targets of every ACTIVE budget of
+// the user's for one period. The period and active filters run in SQL
+// (both columns are plaintext) so the wide, fully-encrypted List
+// result set is never materialized for the summary.
+func (s *BudgetStore) ActiveTargets(ctx context.Context, userID, period string, dek []byte) ([]ActiveBudget, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, targets_encrypted
+		FROM budgets
+		WHERE user_id = $1 AND period = $2 AND active = true
+		ORDER BY created_at, id`, userID, period)
+	if err != nil {
+		return nil, fmt.Errorf("repo: list active budgets: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ActiveBudget, 0, 4)
+	for rows.Next() {
+		var (
+			b       ActiveBudget
+			tgtPack []byte
+		)
+		if err := rows.Scan(&b.ID, &tgtPack); err != nil {
+			return nil, fmt.Errorf("repo: scan budget: %w", err)
+		}
+		tgt, err := crypto.Open(dek, tgtPack)
+		if err != nil {
+			return nil, fmt.Errorf("repo: decrypt budget %s targets: %w", b.ID, err)
+		}
+		b.Targets = json.RawMessage(tgt)
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: list active budgets: %w", err)
+	}
+	return out, nil
+}
+
 // Get returns one of the user's budgets, or ErrBudgetNotFound when the
 // id is not the user's (existence is not disclosed across users).
 func (s *BudgetStore) Get(ctx context.Context, userID, id string, dek []byte) (Budget, error) {

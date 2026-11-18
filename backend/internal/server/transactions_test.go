@@ -50,9 +50,9 @@ type memTxRow struct {
 // min/max amounts, the 1000-row search candidate window, the
 // date_posted DESC / id DESC ordering), and the
 // per-user period aggregation (same account filter as List; every call
-// is recorded in aggregateCalls so tests can assert the handler's
-// window math). The per-op error fields exercise the handler's error
-// mapping (real failures need a DB).
+// is recorded in aggregateCalls / trendCalls so tests can assert the
+// handler's window math). The per-op error fields exercise the
+// handler's error mapping (real failures need a DB).
 type memTxStore struct {
 	rows           []memTxRow
 	accounts       map[string]map[string]bool // userID -> owned account ids
@@ -63,11 +63,21 @@ type memTxStore struct {
 	deleteErr      error
 	aggregateErr   error
 	aggregateCalls []aggregateCall
+	trendCalls     []trendCall
 }
 
 // aggregateCall is one recorded Aggregate invocation (bounds UTC-normalized
 // as passed; accountIDs copied so later mutation cannot rewrite history).
 type aggregateCall struct {
+	from       time.Time
+	to         time.Time
+	accountIDs []string
+}
+
+// trendCall is one recorded TrendAggregate invocation (bounds
+// UTC-normalized as passed; accountIDs copied so later mutation cannot
+// rewrite history).
+type trendCall struct {
 	from       time.Time
 	to         time.Time
 	accountIDs []string
@@ -497,6 +507,96 @@ func (m *memTxStore) Aggregate(_ context.Context, userID string, from, to time.T
 	}
 	// Same order as the SQL: category id asc, "" (uncategorized) first.
 	sort.Slice(out, func(i, j int) bool { return out[i].CategoryID < out[j].CategoryID })
+	return out, nil
+}
+
+// TrendAggregate is the fake's single-query trend scan: the same
+// in-memory aggregation as Aggregate, bucketed by each row's own
+// period window (periodBounds of its posting date). Bucket starts are
+// the UTC-midnight window starts, asc; within a bucket the groups are
+// category id asc, "" (uncategorized) first — the same order as the
+// SQL.
+func (m *memTxStore) TrendAggregate(_ context.Context, userID, period string, from, to time.Time, accountIDs []string) ([]repo.TrendBucket, error) {
+	m.trendCalls = append(m.trendCalls, trendCall{
+		from:       from,
+		to:         to,
+		accountIDs: append([]string(nil), accountIDs...),
+	})
+	if m.aggregateErr != nil {
+		return nil, m.aggregateErr
+	}
+	type acc struct {
+		spend, income, net int64
+	}
+	byWindow := make(map[string]map[string]*acc)
+	var windows []string
+	for _, r := range m.rows {
+		if r.userID != userID {
+			continue
+		}
+		if len(accountIDs) > 0 {
+			in := false
+			for _, a := range accountIDs {
+				if r.tx.AccountID == a {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
+			}
+		}
+		d := dateOnly(r.tx.DatePosted)
+		if d < dateOnly(from) || d > dateOnly(to) {
+			continue
+		}
+		c, err := parseCents(r.tx.Amount)
+		if err != nil {
+			return nil, err
+		}
+		wf, _ := periodBounds(period, r.tx.DatePosted)
+		key := wf.Format("2006-01-02")
+		if byWindow[key] == nil {
+			byWindow[key] = make(map[string]*acc)
+			windows = append(windows, key)
+		}
+		a := byWindow[key][r.tx.CategoryID]
+		if a == nil {
+			a = &acc{}
+			byWindow[key][r.tx.CategoryID] = a
+		}
+		if c < 0 {
+			a.spend -= c
+		} else if c > 0 {
+			a.income += c
+		}
+		a.net += c
+	}
+	sort.Strings(windows)
+	out := make([]repo.TrendBucket, 0, len(windows))
+	for _, key := range windows {
+		byCat := byWindow[key]
+		ids := make([]string, 0, len(byCat))
+		for id := range byCat {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		groups := make([]repo.CategorySpend, 0, len(ids))
+		for _, id := range ids {
+			a := byCat[id]
+			groups = append(groups, repo.CategorySpend{
+				CategoryID: id,
+				Spend:      formatCents(a.spend),
+				Income:     formatCents(a.income),
+				Net:        formatCents(a.net),
+			})
+		}
+		bucket, err := time.Parse("2006-01-02", key)
+		if err != nil {
+			panic(err)
+		}
+		out = append(out, repo.TrendBucket{Bucket: bucket, Groups: groups})
+	}
 	return out, nil
 }
 

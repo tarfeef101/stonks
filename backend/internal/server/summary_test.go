@@ -266,24 +266,25 @@ func TestSummaryTrend(t *testing.T) {
 	if resp.Totals != (summaryTotals{Spend: "10.00", Income: "4.00", Net: "-6.00"}) {
 		t.Errorf("totals = %+v, want spend 10.00 / income 4.00 / net -6.00", resp.Totals)
 	}
-	// The store saw four calls, in request order (the top-level window,
-	// then the trend points oldest first: k=2, k=1, k=0). The handler
-	// recomputes the k=0 window rather than reusing the top-level
-	// result, so the last call's bounds equal the top-level's.
-	if len(store.aggregateCalls) != 4 {
-		t.Fatalf("aggregate calls = %d, want 4: %+v", len(store.aggregateCalls), store.aggregateCalls)
+	// The store saw one top-level Aggregate plus one bucketed
+	// TrendAggregate over the whole trend span — the oldest window's
+	// start to the current window's end — in place of one Aggregate
+	// per trend point.
+	if len(store.aggregateCalls) != 1 {
+		t.Fatalf("aggregate calls = %d, want 1: %+v", len(store.aggregateCalls), store.aggregateCalls)
 	}
 	top := store.aggregateCalls[0]
 	if dateOnly(top.from) != resp.From || dateOnly(top.to) != resp.To {
 		t.Errorf("first call bounds = %s..%s, want %s..%s", dateOnly(top.from), dateOnly(top.to), resp.From, resp.To)
 	}
-	for i, k := range []int{2, 1, 0} {
-		c := store.aggregateCalls[1+i]
-		pf, ptEnd := periodBounds("month", trendShift("month", now, k))
-		if dateOnly(c.from) != dateOnly(pf) || dateOnly(c.to) != dateOnly(ptEnd) {
-			t.Errorf("call %d (k=%d) bounds = %s..%s, want %s..%s", 1+i, k,
-				dateOnly(c.from), dateOnly(c.to), dateOnly(pf), dateOnly(ptEnd))
-		}
+	if len(store.trendCalls) != 1 {
+		t.Fatalf("trend calls = %d, want 1: %+v", len(store.trendCalls), store.trendCalls)
+	}
+	tc := store.trendCalls[0]
+	wf, _ := periodBounds("month", trendShift("month", now, 2))
+	_, wt := periodBounds("month", now)
+	if dateOnly(tc.from) != dateOnly(wf) || dateOnly(tc.to) != dateOnly(wt) {
+		t.Errorf("trend call bounds = %s..%s, want %s..%s", dateOnly(tc.from), dateOnly(tc.to), dateOnly(wf), dateOnly(wt))
 	}
 
 	// With an account filter the totals narrow and every call carries
@@ -305,16 +306,25 @@ func TestSummaryTrend(t *testing.T) {
 	if filtered.Trend[0].Spend != "7.00" || filtered.Trend[1].Spend != "10.00" {
 		t.Errorf("filtered trend spend = %s, %s, want 7.00, 10.00", filtered.Trend[0].Spend, filtered.Trend[1].Spend)
 	}
-	// The second request adds three calls (top-level plus the two trend
-	// points), so the store saw seven in total; every call from index 4
-	// on carries the account filter.
-	if len(store.aggregateCalls) != 7 {
-		t.Fatalf("aggregate calls = %d, want 7: %+v", len(store.aggregateCalls), store.aggregateCalls)
+	// The second request adds one Aggregate and one TrendAggregate,
+	// so the store saw two of each in total; the calls from index 1 on
+	// carry the account filter.
+	if len(store.aggregateCalls) != 2 {
+		t.Fatalf("aggregate calls = %d, want 2: %+v", len(store.aggregateCalls), store.aggregateCalls)
 	}
-	for i := 4; i < len(store.aggregateCalls); i++ {
+	if len(store.trendCalls) != 2 {
+		t.Fatalf("trend calls = %d, want 2: %+v", len(store.trendCalls), store.trendCalls)
+	}
+	for i := 1; i < len(store.aggregateCalls); i++ {
 		c := store.aggregateCalls[i]
 		if len(c.accountIDs) != 1 || c.accountIDs[0] != accA {
-			t.Errorf("call %d accountIDs = %+v, want [%s]", i, c.accountIDs, accA)
+			t.Errorf("aggregate call %d accountIDs = %+v, want [%s]", i, c.accountIDs, accA)
+		}
+	}
+	for i := 1; i < len(store.trendCalls); i++ {
+		c := store.trendCalls[i]
+		if len(c.accountIDs) != 1 || c.accountIDs[0] != accA {
+			t.Errorf("trend call %d accountIDs = %+v, want [%s]", i, c.accountIDs, accA)
 		}
 	}
 

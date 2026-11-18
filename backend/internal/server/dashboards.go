@@ -47,6 +47,7 @@ type DashboardStore interface {
 // in-memory implementation.
 type DashboardWidgetStore interface {
 	List(ctx context.Context, userID, dashboardID string, dek []byte) ([]repo.DashboardWidget, error)
+	WidgetIDs(ctx context.Context, userID, dashboardID string) ([]string, error)
 	Get(ctx context.Context, userID, dashboardID, widgetID string, dek []byte) (repo.DashboardWidget, error)
 	Create(ctx context.Context, userID, dashboardID string, in repo.DashboardWidgetIn, dek []byte) (repo.DashboardWidget, error)
 	Update(ctx context.Context, userID, dashboardID, widgetID string, p repo.DashboardWidgetPatch, dek []byte) (repo.DashboardWidget, error)
@@ -575,8 +576,8 @@ func (h *handler) widgetsDelete(w http.ResponseWriter, r *http.Request) {
 //     (json.NewDecoder directly — decodeBody is for objects);
 //  3. any element not uuidShapeOK → 400 "order must contain only
 //     widget ids";
-//  4. List (a dashboard id that is not the caller's → 404 "dashboard
-//     not found" via the sentinel);
+//  4. WidgetIDs (a dashboard id that is not the caller's → 404
+//     "dashboard not found" via the sentinel);
 //  5. any id not among the dashboard's widgets → 404 "dashboard widget
 //     not found" (existence is not disclosed, so the id is NOT echoed);
 //  6. count mismatch or duplicate → 400 "order must list every widget
@@ -608,14 +609,14 @@ func (h *handler) widgetsSetOrder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	widgets, err := h.widgets.List(r.Context(), c.row.ID, dashID, c.dek)
+	ownedIDs, err := h.widgets.WidgetIDs(r.Context(), c.row.ID, dashID)
 	if err != nil {
 		h.dashboardError(w, "list widgets", err)
 		return
 	}
-	owned := make(map[string]bool, len(widgets))
-	for _, w := range widgets {
-		owned[w.ID] = true
+	owned := make(map[string]bool, len(ownedIDs))
+	for _, id := range ownedIDs {
+		owned[id] = true
 	}
 	for _, id := range ids {
 		if !owned[id] {
@@ -623,7 +624,7 @@ func (h *handler) widgetsSetOrder(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if len(ids) != len(widgets) {
+	if len(ids) != len(ownedIDs) {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "order must list every widget exactly once")
 		return
 	}

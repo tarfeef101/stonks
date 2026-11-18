@@ -20,11 +20,12 @@ import (
 )
 
 // BudgetStore is the persistence surface the budget handlers need (the
-// summary handler, step 3.2, only uses List; the CRUD routes use the
-// rest). *repo.BudgetStore satisfies it (its extra Get is unused here);
-// route tests use an in-memory implementation.
+// summary handler, step 3.2, only uses ActiveTargets; the CRUD routes
+// use the rest). *repo.BudgetStore satisfies it (its extra Get is
+// unused here); route tests use an in-memory implementation.
 type BudgetStore interface {
 	List(ctx context.Context, userID string, dek []byte) ([]repo.Budget, error)
+	ActiveTargets(ctx context.Context, userID, period string, dek []byte) ([]repo.ActiveBudget, error)
 	Create(ctx context.Context, userID string, in repo.BudgetIn, dek []byte) (repo.Budget, error)
 	Update(ctx context.Context, userID, id string, p repo.BudgetPatch, dek []byte) (repo.Budget, error)
 	Delete(ctx context.Context, userID, id string) error

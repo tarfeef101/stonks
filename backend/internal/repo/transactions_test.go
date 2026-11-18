@@ -10,6 +10,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -770,6 +771,227 @@ func TestTransactionAggregate(t *testing.T) {
 	}
 	if len(unk) != 0 {
 		t.Errorf("unknown account id must contribute no groups, got %+v", unk)
+	}
+}
+
+// TestTransactionTrendAggregate exercises the single-query trend scan
+// (the T-P1-7 replacement for one Aggregate per trend window):
+// months straddling a quarter boundary (July–October 2026), one row
+// per category per month plus an uncategorized row, a second
+// account's in-period rows (visible only to the account-filtered
+// aggregation), rows just outside the span, and a foreign user's row.
+// Each bucket's groups must equal a standalone Aggregate of the same
+// window (k=0 equivalence), buckets are UTC midnights, and the
+// bucket's Spend sum equals the standalone sum. One fresh
+// testcontainer (the per-Test-fn convention).
+func TestTransactionTrendAggregate(t *testing.T) {
+	env := newTestEnv(t, "tr-a", "tr-b")
+	tx := NewTransactionStore(env.pool)
+	acct := NewAccountStore(env.pool)
+	cat := NewCategoryStore(env.pool)
+	a := env.user(t, "tr-a")
+	b := env.user(t, "tr-b")
+	ctx := env.ctx
+	aid, bid := a.row.ID, b.row.ID
+
+	aAcct, err := acct.Create(ctx, aid, AccountIn{Name: "Tr Bank", Type: "bank", Currency: "USD"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a account: %v", err)
+	}
+	aAcct2, err := acct.Create(ctx, aid, AccountIn{Name: "Tr Bank 2", Type: "bank", Currency: "USD"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a account 2: %v", err)
+	}
+	bAcct, err := acct.Create(ctx, bid, AccountIn{Name: "Tr Bank B", Type: "bank", Currency: "USD"}, b.dek)
+	if err != nil {
+		t.Fatalf("create b account: %v", err)
+	}
+	groc, err := cat.Create(ctx, aid, CategoryIn{Name: "Tr Groceries"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a groceries: %v", err)
+	}
+	coffee, err := cat.Create(ctx, aid, CategoryIn{Name: "Tr Coffee"}, a.dek)
+	if err != nil {
+		t.Fatalf("create a coffee: %v", err)
+	}
+	seed := func(acctID string, dek []byte, posted, amount string, category *string, desc string) {
+		t.Helper()
+		in := TransactionIn{
+			AccountID:   acctID,
+			DatePosted:  dateOf(posted),
+			Amount:      amount,
+			CategoryID:  category,
+			Description: desc,
+		}
+		if _, err := tx.Create(ctx, aid, in, dek); err != nil {
+			t.Fatalf("seed %s %s: %v", posted, amount, err)
+		}
+	}
+	seedCat := func(id string, amount, posted, desc string) { seed(aAcct.ID, a.dek, posted, amount, &id, desc) }
+	seedNone := func(amount, posted, desc string) { seed(aAcct.ID, a.dek, posted, amount, nil, desc) }
+
+	// July–October 2026: one row per category per month plus an
+	// uncategorized row (the span straddles the Q3/Q4 boundary in
+	// September).
+	seedCat(groc.ID, "-10.00", "2026-07-02", "groc jul")
+	seedCat(coffee.ID, "+3.00", "2026-07-05", "coffee jul")
+	seedNone("-1.25", "2026-07-10", "unfiled jul")
+	seedCat(groc.ID, "-20.50", "2026-08-02", "groc aug")
+	seedCat(coffee.ID, "-4.75", "2026-08-09", "coffee aug")
+	seedNone("+2.00", "2026-08-15", "unfiled aug")
+	seedCat(groc.ID, "-30.00", "2026-09-01", "groc sep")
+	seedCat(coffee.ID, "+5.50", "2026-09-20", "coffee sep")
+	seedNone("-0.50", "2026-09-28", "unfiled sep")
+	seedCat(groc.ID, "-40.25", "2026-10-03", "groc oct")
+	seedCat(coffee.ID, "-1.00", "2026-10-11", "coffee oct")
+	seedNone("+8.00", "2026-10-19", "unfiled oct")
+	// User a's second account: an in-period row only the account
+	// filter should expose.
+	seed(aAcct2.ID, a.dek, "2026-08-20", "-5.00", &groc.ID, "groc aug 2")
+	// Just outside the span, in a group that would move if the date
+	// bounds leaked.
+	seedCat(groc.ID, "-6.00", "2026-06-30", "groc before")
+	seedCat(groc.ID, "+7.00", "2026-11-01", "groc after")
+	// User b, in-period but out of scope for user a's trend.
+	if _, err := tx.Create(ctx, bid, TransactionIn{
+		AccountID:   bAcct.ID,
+		DatePosted:  dateOf("2026-08-15"),
+		Amount:      "-100.00",
+		Description: "b only",
+	}, b.dek); err != nil {
+		t.Fatalf("seed b row: %v", err)
+	}
+
+	// cents parses a canonical 2-decimal string to int64 cents.
+	cents := func(s string) int64 {
+		t.Helper()
+		neg := strings.HasPrefix(s, "-")
+		if neg {
+			s = s[1:]
+		}
+		i, f := s, ""
+		if j := strings.IndexByte(s, '.'); j >= 0 {
+			i, f = s[:j], s[j+1:]
+		}
+		v, err := strconv.ParseInt(i+f, 10, 64)
+		if err != nil {
+			t.Fatalf("cents %q: %v", s, err)
+		}
+		if neg {
+			v = -v
+		}
+		return v
+	}
+	spendSum := func(gs []CategorySpend) int64 {
+		var n int64
+		for _, g := range gs {
+			n += cents(g.Spend)
+		}
+		return n
+	}
+	// checkBuckets pins the bucket count, the ascending order, and
+	// that each bucket start is the given UTC midnight.
+	checkBuckets := func(got []TrendBucket, wantStarts []string) {
+		t.Helper()
+		if len(got) != len(wantStarts) {
+			t.Fatalf("want %d buckets, got %d: %+v", len(wantStarts), len(got), got)
+		}
+		for i, ws := range wantStarts {
+			if !got[i].Bucket.Equal(dateOf(ws)) || got[i].Bucket.Format("2006-01-02 15:04:05") != ws+" 00:00:00" {
+				t.Fatalf("bucket %d start = %v, want %s (UTC midnight)", i, got[i].Bucket, ws)
+			}
+		}
+	}
+	// checkWindow pins the k=0 equivalence: the bucket's groups equal
+	// a standalone Aggregate of [bucket start, window end], and the
+	// bucket's Spend sum equals the standalone sum.
+	checkWindow := func(bk TrendBucket, to time.Time, accountIDs []string) {
+		t.Helper()
+		want, err := tx.Aggregate(ctx, aid, bk.Bucket, to, accountIDs)
+		if err != nil {
+			t.Fatalf("aggregate window %s: %v", bk.Bucket, err)
+		}
+		if !reflect.DeepEqual(bk.Groups, want) {
+			t.Errorf("bucket %s groups = %+v, want the standalone %+v", bk.Bucket, bk.Groups, want)
+		}
+		if got, wantSum := spendSum(bk.Groups), spendSum(want); got != wantSum {
+			t.Errorf("bucket %s spend sum = %d, want %d", bk.Bucket, got, wantSum)
+		}
+	}
+
+	// Months: one bucket per month across the span.
+	spanFrom, spanTo := dateOf("2026-07-01"), dateOf("2026-10-31")
+	months, err := tx.TrendAggregate(ctx, aid, "month", spanFrom, spanTo, nil)
+	if err != nil {
+		t.Fatalf("trend aggregate month: %v", err)
+	}
+	checkBuckets(months, []string{"2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01"})
+	for _, bk := range months {
+		checkWindow(bk, bk.Bucket.AddDate(0, 1, -1), nil)
+	}
+
+	// Quarters: the July–October span is two buckets, Q3 and Q4; Q4
+	// itself runs to 2026-12-31, so its bucket is truncated by the
+	// span end and the standalone window is capped there.
+	quarters, err := tx.TrendAggregate(ctx, aid, "quarter", spanFrom, spanTo, nil)
+	if err != nil {
+		t.Fatalf("trend aggregate quarter: %v", err)
+	}
+	checkBuckets(quarters, []string{"2026-07-01", "2026-10-01"})
+	for _, bk := range quarters {
+		to := bk.Bucket.AddDate(0, 3, -1)
+		if to.After(spanTo) {
+			to = spanTo
+		}
+		checkWindow(bk, to, nil)
+	}
+
+	// Year: all four months collapse into one bucket.
+	years, err := tx.TrendAggregate(ctx, aid, "year", dateOf("2026-01-01"), dateOf("2026-12-31"), nil)
+	if err != nil {
+		t.Fatalf("trend aggregate year: %v", err)
+	}
+	checkBuckets(years, []string{"2026-01-01"})
+	checkWindow(years[0], dateOf("2026-12-31"), nil)
+
+	// Account filter: only the second account's August row survives,
+	// in its own bucket.
+	filtered, err := tx.TrendAggregate(ctx, aid, "month", spanFrom, spanTo, []string{aAcct2.ID})
+	if err != nil {
+		t.Fatalf("trend aggregate account filter: %v", err)
+	}
+	if len(filtered) != 1 || !filtered[0].Bucket.Equal(dateOf("2026-08-01")) {
+		t.Fatalf("filtered buckets = %+v, want the single 2026-08-01 bucket", filtered)
+	}
+	wantF := []CategorySpend{{CategoryID: groc.ID, Spend: "5.00", Income: "0.00", Net: "-5.00"}}
+	if !reflect.DeepEqual(filtered[0].Groups, wantF) {
+		t.Errorf("filtered bucket groups = %+v, want %+v", filtered[0].Groups, wantF)
+	}
+
+	// An empty span yields zero buckets; a foreign user's trend keeps
+	// their own rows only.
+	empty, err := tx.TrendAggregate(ctx, aid, "month", dateOf("2026-01-01"), dateOf("2026-01-31"), nil)
+	if err != nil {
+		t.Fatalf("trend aggregate empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("empty span must have no buckets, got %+v", empty)
+	}
+	theirs, err := tx.TrendAggregate(ctx, bid, "month", spanFrom, spanTo, nil)
+	if err != nil {
+		t.Fatalf("trend aggregate user b: %v", err)
+	}
+	if len(theirs) != 1 || !theirs[0].Bucket.Equal(dateOf("2026-08-01")) {
+		t.Fatalf("user b buckets = %+v, want the single 2026-08-01 bucket", theirs)
+	}
+	wantB := []CategorySpend{{CategoryID: "", Spend: "100.00", Income: "0.00", Net: "-100.00"}}
+	if !reflect.DeepEqual(theirs[0].Groups, wantB) {
+		t.Errorf("user b bucket groups = %+v, want %+v", theirs[0].Groups, wantB)
+	}
+
+	// An unknown period is an error (the unit switch is closed).
+	if _, err := tx.TrendAggregate(ctx, aid, "week", spanFrom, spanTo, nil); err == nil {
+		t.Error("unknown period must be an error")
 	}
 }
 

@@ -85,6 +85,22 @@ func (m *memBudgetStore) List(_ context.Context, userID string, _ []byte) ([]rep
 	return out, nil
 }
 
+// ActiveTargets stands in for the repo's SQL-side period/active filter
+// (the summary handler no longer filters in Go); like List it honors
+// listErr and the rows' insertion order.
+func (m *memBudgetStore) ActiveTargets(_ context.Context, userID, period string, _ []byte) ([]repo.ActiveBudget, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	out := []repo.ActiveBudget{}
+	for _, r := range m.rows {
+		if r.userID == userID && r.b.Active && r.b.Period == period {
+			out = append(out, repo.ActiveBudget{ID: r.b.ID, Targets: r.b.Targets})
+		}
+	}
+	return out, nil
+}
+
 func (m *memBudgetStore) Create(_ context.Context, userID string, in repo.BudgetIn, _ []byte) (repo.Budget, error) {
 	if m.createErr != nil {
 		return repo.Budget{}, m.createErr
