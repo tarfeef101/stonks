@@ -261,14 +261,14 @@
 	// deliberately no read-back effect: right after a selector click the
 	// param still names the previous mortgage, and a read effect would
 	// fire in the same flush and silently revert the click. (Back/forward
-	// needs none either — the write uses replaceState, so the app never
+	// needs none either — the write replaces the history entry, so the app never
 	// pushes ?m= history entries of its own.)
 
 	$effect(() => {
 		const id = selectedId;
 		const param = page.url.searchParams.get('m');
 		if (id !== '' && param !== id) {
-			void goto(resolve(`/mortgage?m=${encodeURIComponent(id)}`), { replaceState: true });
+			void goto(resolve(`/mortgage?m=${encodeURIComponent(id)}`), { replace: true });
 		}
 	});
 

@@ -127,7 +127,19 @@
 			group: explore.group
 		});
 		const path = window.location.pathname;
-		window.history.replaceState(window.history.state, '', qs !== '' ? `${path}?${qs}` : path);
+		const search = qs !== '' ? `?${qs}` : '';
+		// goto, not a raw history.replaceState: the raw call trips
+		// SvelteKit's history_api_conflict warning and desyncs the
+		// router's view of the URL. shallow skips navigation entirely
+		// (no load reruns, no component remount — this component's
+		// state inits once on mount) and, with replace, rewrites the
+		// history entry in place through the router itself: the old
+		// semantics (no history spam, no scroll jump or focus loss —
+		// a shallow update leaves scroll and focus alone). The guard
+		// skips the call when the URL is already canonical.
+		if (window.location.search !== search) {
+			void goto(`${path}${search}`, { replace: true, shallow: true });
+		}
 		// Remember the full last settings (the canonical string of ALL
 		// fields; '' reopens the defaults). A write failure (private
 		// mode) is a silent no-op — the URL stays the shareable source

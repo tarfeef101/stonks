@@ -49,7 +49,7 @@
 			const target = (st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')) as
 				Exclude<RouteId, '/dashboards/[id]'>;
 			clearReturnTo();
-			goto(resolve(target), { replaceState: true });
+			goto(resolve(target), { replace: true });
 		} catch (e) {
 			// e.g. visiting /auth/callback directly with no pending state,
 			// or a state mismatch (double-clicked sign-in): the stale user
