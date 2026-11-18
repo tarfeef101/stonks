@@ -5,6 +5,7 @@
 	import { onMount } from 'svelte';
 	import { _ } from 'svelte-i18n';
 	import { displayName, login, user } from '#lib/auth/client';
+	import { seedCategories } from '#lib/api/categories';
 	import { ApiError } from '#lib/api/client';
 	import {
 		CURRENCIES,
@@ -22,10 +23,12 @@
 	// profile claim, the same value the backend seeded at bootstrap.
 	//
 	// Fields: email confirm/edit, default currency, notification cadence,
-	// and a read-only preview of the default categories (step 2.5 seeds
-	// them from DEFAULT_CATEGORY_NAMES). The endpoint also supports
-	// display_name and default_period — deliberately not in this form;
-	// they belong to a settings screen, not the first-run gate.
+	// and the default-category choice (D-031): the DEFAULT_CATEGORY_NAMES
+	// list as checkboxes (all checked) plus an add-your-own field; on
+	// submit the checked names are seeded via POST /v1/categories/seed
+	// (idempotent) before the onboarding stamp is set. The endpoint also
+	// supports display_name and default_period — deliberately not in this
+	// form; they belong to a settings screen, not the first-run gate.
 
 	// Fields initialize once, from whatever is available at mount: the
 	// settings store (loaded by the callback page / layout effect) with
@@ -41,6 +44,38 @@
 	let notifyMonthly = $state($settings?.notify_monthly ?? true);
 	let notifyQuarterly = $state($settings?.notify_quarterly ?? false);
 	let notifyAnnual = $state($settings?.notify_annual ?? false);
+
+	// The category choice (D-031): the defaults are all checked; the
+	// user unchecks the ones they don't want and can add their own.
+	// The backend's uniqueness key is exact-case, so the UI dedupes
+	// case-insensitively (first entry wins) — "Food" and "food" are one
+	// choice to the user.
+	const MAX_CATEGORY_NAME = 255; // backend user_categories.name limit
+	let checked = $state<Record<string, boolean>>(
+		Object.fromEntries(DEFAULT_CATEGORY_NAMES.map((n) => [n, true]))
+	);
+	let custom = $state<{ name: string; checked: boolean }[]>([]);
+	let customInput = $state('');
+
+	function addCustom(): void {
+		const name = customInput.trim();
+		if (name === '') return;
+		const dup =
+			DEFAULT_CATEGORY_NAMES.some((n) => n.toLowerCase() === name.toLowerCase()) ||
+			custom.some((c) => c.name.toLowerCase() === name.toLowerCase());
+		if (dup) return;
+		custom = [...custom, { name, checked: true }];
+		customInput = '';
+	}
+
+	/** The names seeded on submit: checked defaults, then checked
+	 * custom entries in add order. */
+	function selectedCategories(): string[] {
+		const out: string[] = [];
+		for (const n of DEFAULT_CATEGORY_NAMES) if (checked[n]) out.push(n);
+		for (const c of custom) if (c.checked) out.push(c.name);
+		return out;
+	}
 
 	let submitting = $state(false);
 	let error = $state<string | null>(null);
@@ -78,9 +113,15 @@
 		submitting = true;
 		error = null;
 		try {
-			// updateSettings stores the full response the backend returns,
-			// so the UserChip prompt disappears the moment we navigate —
-			// no second GET needed.
+			// Seed the chosen vocabulary FIRST, then stamp onboarding
+			// complete. The seed is idempotent, so a retry after a
+			// settings-PATCH failure re-sends the same set (created 0).
+			// A seed failure leaves onboarding incomplete — the user
+			// stays on the page with the error line and can resubmit.
+			await seedCategories(selectedCategories());
+			// updateSettings stores the full response the backend
+			// returns, so the UserChip prompt disappears the moment we
+			// navigate — no second GET needed.
 			await updateSettings({
 				email: email.trim(),
 				default_currency: currency,
@@ -161,13 +202,37 @@
 
 			<div class="text-sm">
 				<p class="mb-1 font-medium">{$_('onboarding.categories_heading')}</p>
-				<ul class="flex flex-wrap gap-1.5">
+				<div class="grid grid-cols-2 gap-1.5">
 					{#each DEFAULT_CATEGORY_NAMES as name (name)}
-						<li class="rounded-full bg-zinc-100 dark:bg-zinc-800 px-2.5 py-0.5 text-xs text-zinc-700 dark:text-zinc-300">
+						<label class="flex items-center gap-2">
+							<input bind:checked={checked[name]} type="checkbox" />
 							{name}
-						</li>
+						</label>
 					{/each}
-				</ul>
+					{#each custom as c (c.name)}
+						<label class="flex items-center gap-2">
+							<input bind:checked={c.checked} type="checkbox" />
+							{c.name}
+						</label>
+					{/each}
+				</div>
+				<div class="mt-2 flex gap-2">
+					<input
+						bind:value={customInput}
+						class="flex-1 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						maxlength={MAX_CATEGORY_NAME}
+						placeholder={$_('onboarding.categories_add_placeholder')}
+						type="text"
+					/>
+					<button
+						class="rounded-md border border-zinc-300 px-3 py-1.5 dark:border-zinc-700"
+						disabled={customInput.trim() === ''}
+						onclick={addCustom}
+						type="button"
+					>
+						{$_('onboarding.categories_add')}
+					</button>
+				</div>
 				<p class="mt-1.5 text-xs text-zinc-500 dark:text-zinc-400">{$_('onboarding.categories_note')}</p>
 			</div>
 

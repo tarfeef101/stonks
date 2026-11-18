@@ -126,11 +126,12 @@ export const CURRENCIES: string[] = [
 ];
 
 /**
- * The default transaction categories previewed on the onboarding page
- * ("adjust later" — DESIGN.md: sensible defaults that are able to be
- * toggled off). Step 2.5 seeds each user's user_categories from this same
- * list, so it stays the single source of the defaults (no drift between
- * the preview and what gets seeded).
+ * The default transaction categories offered on the onboarding page
+ * (D-031): the user sees them as checkboxes (all checked) plus an
+ * add-your-own field, and on submit the app seeds EXACTLY the checked
+ * names via POST /v1/categories/seed (idempotent). The backend's
+ * repo.DefaultCategoryNames mirrors this list; TestDefaultsMatchFrontend
+ * pins the two against drift.
  */
 export const DEFAULT_CATEGORY_NAMES: string[] = [
 	'Housing',

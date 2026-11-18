@@ -51,3 +51,11 @@ export function patchCategory(id: string, patch: CategoryPatch): Promise<Categor
 export function deleteCategory(id: string): Promise<void> {
 	return api<void>(`/v1/categories/${id}`, { method: 'DELETE' });
 }
+
+/** Seeds the caller's category vocabulary in one shot (onboarding,
+ * D-031). Names the caller already has (exact-case) are skipped, so the
+ * call is idempotent — a retry re-sends the same set harmlessly.
+ * 200 → {created: n}. */
+export function seedCategories(names: string[]): Promise<{ created: number }> {
+	return api<{ created: number }>('/v1/categories/seed', { method: 'POST', body: { names } });
+}

@@ -9,6 +9,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -27,6 +28,10 @@ type CategoryStore interface {
 	Create(ctx context.Context, userID string, in repo.CategoryIn, dek []byte) (repo.Category, error)
 	Update(ctx context.Context, userID, id string, p repo.CategoryPatch, dek []byte) (repo.Category, error)
 	Delete(ctx context.Context, userID, id string) error
+	// SeedDefaults creates the names the user does not already have
+	// (exact-case name_hash match) as active roots and returns the
+	// number of rows inserted (0 for a fully seeded user — idempotent).
+	SeedDefaults(ctx context.Context, userID string, names []string, dek []byte) (int, error)
 }
 
 // Wire DTOs: the repo type carries "" for an unset parent, but the API
@@ -234,4 +239,65 @@ func (h *handler) categoriesDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxSeedNames caps the onboarding seed body (D-031): the defaults list
+// is 12 names; 30 leaves room for add-your-own entries while bounding
+// the one-shot INSERT workload.
+const maxSeedNames = 30
+
+// categorySeedIn is the POST /v1/categories/seed body (D-031): the
+// category names the user selected on the first-run page.
+type categorySeedIn struct {
+	Names []string `json:"names"`
+}
+
+// categoriesSeed serves POST /api/v1/categories/seed (onboarding,
+// D-031): it creates exactly the names the user selected, idempotently.
+// A name the user already has (exact-case name_hash match) is skipped
+// and not counted. Duplicates within the body are folded
+// case-insensitively, first occurrence winning — the uniqueness key is
+// case-sensitive, so without the fold "Food" and "food" would become
+// two rows where the UI sees one choice. An empty list is a no-op.
+// Answers 200 {"created": n}.
+func (h *handler) categoriesSeed(w http.ResponseWriter, r *http.Request) {
+	if h.categories == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var in categorySeedIn
+	if err := decodeBody(r, &in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "body must be a JSON object: "+err.Error())
+		return
+	}
+	if len(in.Names) > maxSeedNames {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest,
+			fmt.Sprintf("at most %d names may be seeded at once", maxSeedNames))
+		return
+	}
+	names := make([]string, 0, len(in.Names))
+	seen := make(map[string]bool, len(in.Names))
+	for _, raw := range in.Names {
+		name := strings.TrimSpace(raw)
+		// checkName on the trimmed value: that is what gets stored.
+		if err := checkName(name); err != nil {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+			return
+		}
+		if seen[strings.ToLower(name)] {
+			continue
+		}
+		seen[strings.ToLower(name)] = true
+		names = append(names, name)
+	}
+	n, err := h.categories.SeedDefaults(r.Context(), c.row.ID, names, c.dek)
+	if err != nil {
+		h.categoryError(w, "seed", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"created": n})
 }

@@ -256,6 +256,11 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Post("/v1/categories", h.categoriesCreate)
 		r.Patch("/v1/categories/{id}", h.categoriesUpdate)
 		r.Delete("/v1/categories/{id}", h.categoriesDelete)
+		// Onboarding seeding (D-031): creates exactly the category
+		// names the user checked on the first-run page, idempotently.
+		// No POST /v1/categories/{id} route exists, so /seed is
+		// unambiguous.
+		r.Post("/v1/categories/seed", h.categoriesSeed)
 		// Transactions (step 3.2). POST is manual entry (the 4.7
 		// importer shares the repo's Create); a dedup collision is a
 		// 409. No single-GET route, for the same reason as accounts.

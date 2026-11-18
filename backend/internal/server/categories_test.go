@@ -55,6 +55,7 @@ type memCategoryStore struct {
 	createErr error
 	updateErr error
 	deleteErr error
+	seedErr   error
 }
 
 func (m *memCategoryStore) exists(userID, id string) bool {
@@ -179,6 +180,46 @@ func (m *memCategoryStore) Delete(_ context.Context, userID, id string) error {
 		}
 	}
 	return repo.ErrCategoryNotFound
+}
+
+// hasName reports whether the user already has a row with exactly this
+// (trimmed, exact-case) name.
+func (m *memCategoryStore) hasName(userID, name string) bool {
+	for _, r := range m.rows {
+		if r.userID == userID && r.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// SeedDefaults mirrors the repo: skips names the user already has
+// (exact-case, trimmed), appends the rest as active roots with
+// sort_order continuing after the user's current maximum (position i
+// gets base+i), and returns the number of rows inserted.
+func (m *memCategoryStore) SeedDefaults(_ context.Context, userID string, names []string, _ []byte) (int, error) {
+	if m.seedErr != nil {
+		return 0, m.seedErr
+	}
+	base := 0
+	for _, r := range m.rows {
+		if r.userID == userID && r.sort+1 > base {
+			base = r.sort + 1
+		}
+	}
+	inserted := 0
+	for i, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" || m.hasName(userID, name) {
+			continue
+		}
+		m.rows = append(m.rows, memCategoryRow{
+			userID: userID, id: nextTestID(), name: name,
+			parent: "", active: true, sort: base + i, // repo appends after max
+		})
+		inserted++
+	}
+	return inserted, nil
 }
 
 func TestCategoriesCRUD(t *testing.T) {
@@ -621,4 +662,167 @@ func TestCategoriesPerUserScoping(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("POST (b, same name) status = %d, want 201 (body %s)", code, body)
 	}
+}
+
+func TestCategorySeed(t *testing.T) {
+	store := &memCategoryStore{}
+	h, key := newCrudServer(t, nil, store)
+	token := mintIdentityToken(t, key, "cseed-sub", "cseed@localhost", "CSeed", "cseed")
+
+	seed := func(t *testing.T, token, payload string) (int, map[string]any, string) {
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/categories/seed", payload, authHdr(token))
+		var out map[string]any
+		_ = json.Unmarshal([]byte(body), &out)
+		return code, out, body
+	}
+
+	// Setup: one pre-existing row (sort_order 0).
+	code, body := doReq(t, h, http.MethodPost, "/api/v1/categories",
+		`{"name":"Groceries"}`, authHdr(token))
+	if code != http.StatusCreated {
+		t.Fatalf("setup POST status = %d, want 201 (body %s)", code, body)
+	}
+
+	// Happy path: names are trimmed; a pre-existing exact-case name is
+	// skipped; the rest are created as active roots with sort_order
+	// continuing after the current maximum.
+	code, out, body := seed(t, token,
+		`{"names":[" Housing ","Utilities","Groceries","Food & drink"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST seed status = %d, want 200 (body %s)", code, body)
+	}
+	if out["created"] != float64(3) {
+		t.Errorf("created = %v, want 3 (Groceries pre-exists)", out["created"])
+	}
+	code, body = doReq(t, h, http.MethodGet, "/api/v1/categories", "", authHdr(token))
+	if code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200 (body %s)", code, body)
+	}
+	var list []map[string]any
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		t.Fatalf("decode list: %v (body %s)", err, body)
+	}
+	if len(list) != 4 {
+		t.Fatalf("list = %s, want 4 rows", body)
+	}
+	// The repo assigns base+position, position being the name's index in
+	// the request body (base = max sort + 1 = 1 here); a skipped
+	// pre-existing name ("Groceries", position 2) still consumes its
+	// position, so the created sorts are 1, 2, 4 — a harmless gap (List
+	// orders by sort_order; density is not part of the contract).
+	bodyPos := []float64{0, 1, 3}
+	for i, want := range []string{"Housing", "Utilities", "Food & drink"} {
+		row := list[i+1]
+		if row["name"] != want || row["active"] != true || row["parent_id"] != nil {
+			t.Errorf("list[%d] = %v, want active root %q appended", i+1, row, want)
+		}
+		if row["sort_order"] != 1+bodyPos[i] {
+			t.Errorf("list[%d] sort_order = %v, want %v (base 1 + body position %v)",
+				i+1, row["sort_order"], 1+bodyPos[i], bodyPos[i])
+		}
+	}
+
+	// Idempotent re-seed of the same set: nothing new is created.
+	code, out, body = seed(t, token,
+		`{"names":["Housing","Utilities","Groceries","Food & drink"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("re-seed status = %d, want 200 (body %s)", code, body)
+	}
+	if out["created"] != float64(0) {
+		t.Errorf("re-seed created = %v, want 0", out["created"])
+	}
+
+	// Duplicates within the body fold case-insensitively (first wins):
+	// "HOUSING" is dropped as a duplicate of "housing", but "housing"
+	// itself is a NEW exact-case name next to the pre-existing "Housing"
+	// (the uniqueness key is case-sensitive, by design).
+	code, out, body = seed(t, token, `{"names":["housing","HOUSING","New one"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST seed status = %d, want 200 (body %s)", code, body)
+	}
+	if out["created"] != float64(2) {
+		t.Errorf("created = %v, want 2 (housing + New one; HOUSING folded)", out["created"])
+	}
+
+	// An empty list is a no-op.
+	code, out, body = seed(t, token, `{"names":[]}`)
+	if code != http.StatusOK {
+		t.Fatalf("POST seed empty status = %d, want 200 (body %s)", code, body)
+	}
+	if out["created"] != float64(0) {
+		t.Errorf("empty seed created = %v, want 0", out["created"])
+	}
+
+	// Validation failures are 400 invalid_request.
+	over := make([]string, 31)
+	for i := range over {
+		over[i] = fmt.Sprintf("\"name %d\"", i)
+	}
+	cases := []struct {
+		name string
+		body string
+		want string // substring of the message
+	}{
+		{"empty name", `{"names":["   "]}`, "name must not be empty"},
+		{"long name", `{"names":["` + strings.Repeat("n", 256) + `"]}`,
+			"name must be at most 255 characters"},
+		{"over cap", `{"names":[` + strings.Join(over, ",") + `]}`,
+			"at most 30 names may be seeded at once"},
+		{"non-JSON body", `not json`, "body must be a JSON object"},
+		{"names wrong type", `{"names":"Groceries"}`, "body must be a JSON object"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := doReq(t, h, http.MethodPost, "/api/v1/categories/seed",
+				tc.body, authHdr(token))
+			if code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", code, body)
+			}
+			c, msg := apiErr(t, body)
+			if c != "invalid_request" {
+				t.Errorf("code = %s, want invalid_request", c)
+			}
+			if !strings.Contains(msg, tc.want) {
+				t.Errorf("message %q does not contain %q", msg, tc.want)
+			}
+		})
+	}
+
+	// No token: 401 from the auth middleware before the handler runs.
+	code, _ = doReq(t, h, http.MethodPost, "/api/v1/categories/seed",
+		`{"names":["X"]}`, nil)
+	if code != http.StatusUnauthorized {
+		t.Errorf("seed without token: status = %d, want 401", code)
+	}
+
+	// A store failure maps to 500 internal like the other category ops.
+	t.Run("store error", func(t *testing.T) {
+		store := &memCategoryStore{seedErr: errors.New("boom")}
+		h, key := newCrudServer(t, nil, store)
+		token := mintIdentityToken(t, key, "cseed-err", "cseederr@localhost", "CSE", "cseed")
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/categories/seed",
+			`{"names":["X"]}`, authHdr(token))
+		if code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500 (body %s)", code, body)
+		}
+		c, msg := apiErr(t, body)
+		if c != "internal" || msg != "category operation failed" {
+			t.Errorf("envelope = %s/%s, want internal/category operation failed", c, msg)
+		}
+	})
+
+	// Nil store: 503 database not configured, before requireUser.
+	t.Run("nil store", func(t *testing.T) {
+		h, key := newCrudServer(t, nil, nil)
+		token := mintIdentityToken(t, key, "cseed-nc", "cseednc@localhost", "CNC", "cseed")
+		code, body := doReq(t, h, http.MethodPost, "/api/v1/categories/seed",
+			`{"names":["X"]}`, authHdr(token))
+		if code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 (body %s)", code, body)
+		}
+		c, msg := apiErr(t, body)
+		if c != "internal" || msg != "database not configured" {
+			t.Errorf("envelope = %s/%s, want internal/database not configured", c, msg)
+		}
+	})
 }

@@ -355,8 +355,10 @@
 		"notify_monthly": "Monthly summary",
 		"notify_quarterly": "Quarterly summary",
 		"notify_annual": "Annual summary",
-		"categories_heading": "Your default categories",
-		"categories_note": "Preview of the categories applied to your transactions — you can toggle, edit, or add categories later.",
+		"categories_heading": "Default categories",
+		"categories_note": "Unchecked categories are not created. You can add, edit, or delete categories any time in settings.",
+		"categories_add_placeholder": "Add a category (e.g. Pet care)",
+		"categories_add": "Add",
 		"submit": "Save and continue",
 		"submitting": "Saving…",
 		"back_to_summary": "Back to summary"
