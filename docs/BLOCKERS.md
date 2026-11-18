@@ -39,7 +39,7 @@ issuer-agnostic, PKCE S256 code flow, session persistence via
 env-only change: Auth0 serves the same `.well-known` discovery document
 and the same flow.
 
-**Verification:** `scripts/verify-oidc.sh` (scripted PKCE S256 E2E —
+**Verification:** `scripts/verify.sh oidc` (scripted PKCE S256 E2E —
 discovery, authorize, login form, state round-trip, token exchange,
 `id_token`/`access_token` claim assertions; all 16 checks passing) plus
 the manual browser E2E steps in `docs/DEVELOPMENT.md`.

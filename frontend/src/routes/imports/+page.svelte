@@ -21,6 +21,7 @@
 		type PreviewResult
 	} from '#lib/api/imports';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
+	import { notifyDataChanged } from '#lib/explore/cache';
 
 	// Import mapping (step 4.5): upload a statement file, analyze it
 	// (the backend matches a preset from the filename/headers and
@@ -247,6 +248,7 @@
 		try {
 			job = await setImportMapping(job.id, mapping);
 			confirmed = true;
+			notifyDataChanged();
 		} catch (e) {
 			error = envelopeMessage(e);
 		} finally {

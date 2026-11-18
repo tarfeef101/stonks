@@ -8,7 +8,7 @@
 // non-2xx responses are the 3.1 envelope {error: {code, message}} and
 // surface as ApiError (see client.ts).
 
-import { api } from './client';
+import { api, pagingQuery } from './client';
 import type { Transaction } from './transactions';
 
 /** A proposed offset pair (backend offsetSuggestionOut): two rows with
@@ -44,9 +44,10 @@ export function scanOffsets(from?: string, to?: string, windowDays?: number): Pr
 }
 
 /** The pending suggestions (GET /v1/offsets/suggestions), oldest
- * first, both legs opened. */
-export function listOffsetSuggestions(): Promise<OffsetSuggestion[]> {
-	return api<OffsetSuggestion[]>('/v1/offsets/suggestions');
+ * first, both legs opened. Optional limit/offset (backend defaults
+ * 100/0). */
+export function listOffsetSuggestions(limit?: number, offset?: number): Promise<OffsetSuggestion[]> {
+	return api<OffsetSuggestion[]>(`/v1/offsets/suggestions${pagingQuery(limit, offset)}`);
 }
 
 /** Turns one pending suggestion into a group (POST
@@ -73,9 +74,10 @@ export function createOffsetGroup(transactionIds: string[]): Promise<{ group_id:
 	});
 }
 
-/** The active groups (GET /v1/offsets/groups). */
-export function listOffsetGroups(): Promise<OffsetGroup[]> {
-	return api<OffsetGroup[]>('/v1/offsets/groups');
+/** The active groups (GET /v1/offsets/groups). Optional limit/offset
+ * (backend defaults 100/0). */
+export function listOffsetGroups(limit?: number, offset?: number): Promise<OffsetGroup[]> {
+	return api<OffsetGroup[]>(`/v1/offsets/groups${pagingQuery(limit, offset)}`);
 }
 
 /** Dissolves one group (DELETE /v1/offsets/groups/{id} — 204, no

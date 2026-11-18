@@ -6,7 +6,7 @@
 // non-2xx responses are the 3.1 envelope {error: {code, message}} and
 // surface as ApiError (see client.ts).
 
-import { api } from './client';
+import { api, pagingQuery } from './client';
 import type { Transaction } from './transactions';
 
 /** A review queue row (backend reviewOut): kept minimal — the category
@@ -32,9 +32,10 @@ export interface RepromptResult {
 }
 
 /** The review queue (GET /v1/review): every flagged row that still has
- * no category, oldest id first. */
-export function listReviewQueue(): Promise<ReviewQueueRow[]> {
-	return api<ReviewQueueRow[]>('/v1/review');
+ * no category, oldest id first. Optional limit/offset (backend
+ * defaults 100/0). */
+export function listReviewQueue(limit?: number, offset?: number): Promise<ReviewQueueRow[]> {
+	return api<ReviewQueueRow[]>(`/v1/review${pagingQuery(limit, offset)}`);
 }
 
 /** Resolves one row with one of the caller's categories (POST

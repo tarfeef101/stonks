@@ -14,7 +14,7 @@ already exists are rejected with 409 and counted as skips.
 Run (dev stack must be up — `make dev`):
     scripts/seed-dev-data.py
 
-Env (same conventions as scripts/verify-authn.sh):
+Env (same conventions as scripts/verify.sh authn):
     FTRK_API_URL              default http://localhost:18080
     FTRK_KC_URL               default http://localhost:18081
     FTRK_REALM                default finance

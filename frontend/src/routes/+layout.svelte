@@ -1,6 +1,5 @@
 <script lang="ts">
 	import '../app.css';
-	import { QueryClientProvider } from '@tanstack/svelte-query';
 	import { BrowserAgent } from '@newrelic/browser-agent';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
@@ -8,7 +7,6 @@
 	import AppShell from '#lib/components/AppShell.svelte';
 	import { initSession, login, sessionExpired, user } from '#lib/auth/client';
 	import { clearSettings, loadSettings, settings } from '#lib/settings';
-	import { queryClient } from '#lib/query';
 	import { waitLocale } from '#lib/i18n';
 	import type { LayoutProps } from './$types';
 
@@ -94,11 +92,9 @@
 </script>
 
 {#if ready}
-	<QueryClientProvider client={queryClient}>
-		<AppShell>
-			{@render children()}
-		</AppShell>
-	</QueryClientProvider>
+	<AppShell>
+		{@render children()}
+	</AppShell>
 
 	<!-- Session-expired dialog (round 9): raised by the 401 handler in
 		lib/auth/client.ts when a request 401s while a session is present

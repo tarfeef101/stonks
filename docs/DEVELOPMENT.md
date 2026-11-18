@@ -118,7 +118,7 @@ Test user's account console: `http://localhost:18081/realms/finance/account`.
 
 ## Manual auth E2E (browser)
 
-The scripted proof of the OIDC flow is `scripts/verify-oidc.sh` (run from
+The scripted proof of the OIDC flow is `scripts/verify.sh oidc` (run from
 the repo root after `make dev`): discovery, PKCE S256 authorize, login-form
 POST, state round-trip, token exchange, and `id_token`/`access_token`
 claim assertions — 16 checks, all passing. The click-through equivalent:

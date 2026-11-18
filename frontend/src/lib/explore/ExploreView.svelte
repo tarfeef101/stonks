@@ -1,11 +1,29 @@
 <script lang="ts">
-	import * as echarts from 'echarts';
+	import * as echarts from 'echarts/core';
+	import type { EChartsOption } from 'echarts';
+	import { PieChart, LineChart, BarChart } from 'echarts/charts';
+	import { TooltipComponent, GridComponent } from 'echarts/components';
+	import { CanvasRenderer } from 'echarts/renderers';
 	import { Chart } from 'svelte-echarts';
 	import { _ } from 'svelte-i18n';
 	import { user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
-	import { listTransactions, type Transaction, type ListParams } from '#lib/api/transactions';
-	import { aggregate, formatCents, metricForSign, type ExploreState, type Names } from './state';
+	import { type Transaction } from '#lib/api/transactions';
+	import {
+		aggregate,
+		formatCents,
+		metricForSign,
+		type ExploreFilters,
+		type ExploreState,
+		type Names
+	} from './state';
+	import { loadExploreRows } from './cache';
+
+	// ECharts is tree-shaken to the pieces this view uses (round 41):
+	// the three chart kinds it can render, the tooltip + grid it always
+	// configures, and the canvas renderer. <Chart init={echarts.init}>
+	// below runs exactly this build, not the full bundle.
+	echarts.use([PieChart, LineChart, BarChart, TooltipComponent, GridComponent, CanvasRenderer]);
 
 	// Explore view (step 6.5): the shared read-only render of an Explore
 	// state — the paged 3.2 List data loop, the client-side
@@ -55,11 +73,6 @@
 	// as a store subscription to the prop).
 	let { state: explore, names, rangeFrom, rangeTo }: Props = $props();
 
-	// The 3.2 endpoint caps limit at 100: page offset 0..900, stop early
-	// on a short page; 10 full pages = the 1000-row cap note.
-	const PAGE_SIZE = 100;
-	const MAX_PAGES = 10;
-
 	// The pie's slice colors: ECharts 5's default palette, pinned here so
 	// the slices and the legend table's swatches can't drift (row i
 	// shows PIE_COLORS[i % length] for slice i).
@@ -102,7 +115,7 @@
 	/** The ECharts option for the current view, or null for the table
 	 * view / no rows. Tooltip and axis formatters run formatCents over
 	 * the raw values (the only displayed-number path). */
-	const chartOptions = $derived.by((): echarts.EChartsOption | null => {
+	const chartOptions = $derived.by((): EChartsOption | null => {
 		if (explore.chart === 'table' || aggs.length === 0) return null;
 		const fmt = (v: unknown): string => formatCents(Math.round(Number(v)));
 		if (explore.chart === 'pie') {
@@ -146,47 +159,22 @@
 
 	// --- Loading (filter-driven) ----------------------------------------
 
-	/** The server-side filter fields only: the view fields (chart /
-	 * group) are deliberately excluded — they re-render the view without
-	 * a refetch and are NEVER sent to the API. */
-	type FilterFields = Pick<
-		ExploreState,
-		'from' | 'to' | 'account' | 'category' | 'min' | 'max' | 'q' | 'sign'
-	>;
-
-	/** One page's 3.2 List params (absent = omitted; 'none' =
-	 * uncategorized-only). */
-	function listParams(s: FilterFields, offset: number): ListParams {
-		const p: ListParams = { limit: PAGE_SIZE, offset };
-		if (s.from !== '') p.date_from = s.from;
-		if (s.to !== '') p.date_to = s.to;
-		if (s.account.length > 0) p.account_id = [...s.account];
-		if (s.category.length > 0) p.category_id = s.category.map((c) => (c === 'none' ? '' : c));
-		if (s.min !== '') p.min_amount = s.min;
-		if (s.max !== '') p.max_amount = s.max;
-		if (s.q !== '') p.search = s.q;
-		if (s.sign !== '') p.sign = s.sign;
-		return p;
-	}
-
-	/** Loads all matching pages (0..900; a short page ends the walk). */
-	async function loadRows(s: FilterFields): Promise<void> {
+	/** Loads all matching pages (0..900; a short page ends the walk).
+	 * The walk itself lives in explore/cache.ts — deduped in flight and
+	 * TTL-cached per (user, filter), so several hosts rendering the
+	 * same view cost one fetch; this function only owns the view's
+	 * local seq guards, spinner, and error line. */
+	async function loadRows(sub: string, s: ExploreFilters): Promise<void> {
 		const seq = ++fetchSeq;
 		loading = true;
 		loadError = null;
 		try {
-			const out: Transaction[] = [];
-			let cap = false;
-			for (let page = 0; page < MAX_PAGES; page++) {
-				const batch = await listTransactions(listParams(s, page * PAGE_SIZE));
-				if (seq !== fetchSeq) return;
-				out.push(...batch);
-				if (batch.length < PAGE_SIZE) break;
-				if (page === MAX_PAGES - 1) cap = true;
-			}
+			const walk = await loadExploreRows(sub, s);
 			if (seq !== fetchSeq) return;
-			rows = out;
-			capped = cap;
+			// The rows are read-only in the UI; the shallow copy keeps
+			// the shared cache private regardless.
+			rows = [...walk.rows];
+			capped = walk.capped;
 		} catch (e) {
 			if (seq !== fetchSeq) return;
 			rows = [];
@@ -204,7 +192,7 @@
 	// range wins over whatever dates the state carries).
 	$effect(() => {
 		const sub = $user?.profile.sub ?? null;
-		const snap: FilterFields = {
+		const snap: ExploreFilters = {
 			from: rangeFrom !== undefined ? rangeFrom : explore.from,
 			to: rangeTo !== undefined ? rangeTo : explore.to,
 			account: explore.account,
@@ -222,7 +210,7 @@
 			loading = false;
 			return;
 		}
-		void loadRows(snap);
+		void loadRows(sub, snap);
 	});
 
 	/** The backend answers 4xx with the 3.1 envelope {error: {code,

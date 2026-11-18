@@ -14,6 +14,35 @@
 #   postgres  15432   backend   18080   keycloak  18081
 #   frontend  18082   mailpit   1025 (SMTP) + 18025 (UI)
 
+# Shared environment anchor: the exact env block both the backend and
+# worker services need (DATABASE_URL, KEK, the SMTP block, the LLM
+# block, and the LLM endpoint SRF guard). A new key both services must
+# see goes here ONCE; the services merge it in with `<<: *env` plus
+# their own service-specific extras.
+x-env: &env
+  DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
+  KEK: ${KEK:-}
+  # SMTP (step 8.3): the mailpit sink; the worker's report dispatch
+  # sends via the same mailpit the backend uses.
+  SMTP_HOST: ${SMTP_HOST:-mailpit}
+  SMTP_PORT: ${SMTP_PORT:-1025}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_TLS_POLICY: ${SMTP_TLS_POLICY:-none}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  # LLM endpoint SRF guard (internal/llm): comma-separated CIDRs /
+  # bare IPs the LLM base URL may additionally resolve to. Unset/
+  # empty = no extra admission (the strict policy then admits only
+  # public https); the always-rejected set (cloud metadata /
+  # link-local, ::1, 0.0.0.0) is never admitted. Dev default = this
+  # project's docker bridge subnet (verified with `docker network
+  # inspect`), so the opt-in `make dev-llm` llama service is
+  # reachable.
+  FTRK_LLM_ENDPOINT_CIDRS: ${FTRK_LLM_ENDPOINT_CIDRS:-172.19.0.0/16}
+
 services:
   # postgres:18 — exact minor 18.6, verified 2026-11-02
   # (`docker run --rm postgres:18 psql --version`); recorded in docs/DEVELOPMENT.md.
@@ -67,8 +96,8 @@ services:
     ports:
       - "18080:8080"
     environment:
+      <<: *env
       PORT: "8080"
-      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
       # OIDC (step 1.3): AUTH0_ISSUER is the token's `iss` (browser horizon).
       # The verifier discovers JWKS against OIDC_DISCOVERY_URL — the container
       # horizon in dev (D-021); empty = AUTH0_ISSUER for one-horizon IdPs
@@ -80,25 +109,6 @@ services:
       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
       OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-http://keycloak:8080/realms/finance}
       NR_LICENSE_KEY: ${NR_LICENSE_KEY:-}
-      KEK: ${KEK:-}
-      SMTP_HOST: ${SMTP_HOST:-mailpit}
-      SMTP_PORT: ${SMTP_PORT:-1025}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASS: ${SMTP_PASS:-}
-      SMTP_FROM: ${SMTP_FROM:-}
-      SMTP_TLS_POLICY: ${SMTP_TLS_POLICY:-none}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      # LLM endpoint SRF guard (internal/llm): comma-separated CIDRs /
-      # bare IPs the LLM base URL may additionally resolve to. Unset/
-      # empty = no extra admission (the strict policy then admits only
-      # public https); the always-rejected set (cloud metadata /
-      # link-local, ::1, 0.0.0.0) is never admitted. Dev default = this
-      # project's docker bridge subnet (verified with `docker network
-      # inspect`), so the opt-in `make dev-llm` llama service is
-      # reachable.
-      FTRK_LLM_ENDPOINT_CIDRS: ${FTRK_LLM_ENDPOINT_CIDRS:-172.19.0.0/16}
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,33 +123,17 @@ services:
   # the categorise job queue is core flow (POST /api/v1/categorise and the
   # import chain enqueue jobs that only this service drains). The worker
   # owns the queue with FOR UPDATE SKIP LOCKED and re-queues 'running'
-  # rows at startup, so a single node is correct for dev. Env mirrors the
-  # backend's LLM_* block: unset means the runner defaults apply (base
-  # http://llama:8080/v1, the full-path model id the dev llama.cpp reports
-  # in /v1/models), and a user's stored llm_credentials row always wins
-  # over env. No keycloak dependency: the worker verifies nothing — it
+  # rows at startup, so a single node is correct for dev. Env shares the
+  # backend's x-env anchor (top of file): unset means the runner defaults
+  # apply (base http://llama:8080/v1, the full-path model id the dev
+  # llama.cpp reports in /v1/models), and a user's stored llm_credentials
+  # row always wins over env. No keycloak dependency: the worker verifies nothing — it
   # reads users.wrapped_dek + KEK directly.
   worker:
     build: ./backend
     entrypoint: ["worker"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/finance?sslmode=disable}
-      KEK: ${KEK:-}
-      # SMTP (step 8.3): the worker's report dispatch sends via the same
-      # mailpit the backend uses; mirrors the backend's SMTP block.
-      SMTP_HOST: ${SMTP_HOST:-mailpit}
-      SMTP_PORT: ${SMTP_PORT:-1025}
-      SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASS: ${SMTP_PASS:-}
-      SMTP_FROM: ${SMTP_FROM:-}
-      SMTP_TLS_POLICY: ${SMTP_TLS_POLICY:-none}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
-      # Mirrors the backend's LLM endpoint SRF guard (see the comment on
-      # the backend service above): dev default = this project's bridge
-      # subnet so the llama service is dialable.
-      FTRK_LLM_ENDPOINT_CIDRS: ${FTRK_LLM_ENDPOINT_CIDRS:-172.19.0.0/16}
+      <<: *env
       # FI sync (step 9.2): dev-only fake adapter + the 8.3 clock override.
       FI_FAKE_ADAPTERS: ${FI_FAKE_ADAPTERS:-}
       FI_FAKE_ADAPTER_FAIL: ${FI_FAKE_ADAPTER_FAIL:-}

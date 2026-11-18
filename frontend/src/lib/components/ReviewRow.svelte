@@ -8,6 +8,7 @@
 		type RepromptResult,
 		type ReviewQueueRow
 	} from '#lib/api/review';
+	import { notifyDataChanged } from '#lib/explore/cache';
 
 	// One review-queue row (step 5.5): the transaction's details, a
 	// category picker, and the per-row actions — resolve with the
@@ -48,6 +49,7 @@
 		reprompt = null;
 		try {
 			await acceptReview(row.id, categoryId);
+			notifyDataChanged();
 			await onResolved();
 		} catch (e) {
 			accepting = false;
@@ -64,7 +66,10 @@
 		try {
 			const res = await repromptReview(row.id);
 			reprompt = res;
-			if (res.applied) await onResolved();
+			if (res.applied) {
+				notifyDataChanged();
+				await onResolved();
+			}
 		} catch (e) {
 			reprompting = false;
 			error = envelopeMessage(e);

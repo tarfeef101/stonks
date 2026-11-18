@@ -31,6 +31,7 @@
 		type PatchTransactionInput,
 		type Transaction
 	} from '#lib/api/transactions';
+	import { notifyDataChanged } from '#lib/explore/cache';
 
 	// Round 33: alerts are actionable in place. A `review` alert opens
 	// the whole review queue in a modal (apply per row, reject, edit,
@@ -44,7 +45,12 @@
 
 	// --- Page state ------------------------------------------------------
 
+	/** One page of a list endpoint (the backend default). */
+	const PAGE_SIZE = 100;
+
 	let items = $state<Notification[]>([]);
+	let itemsHasMore = $state(false);
+	let itemsLoadingMore = $state(false);
 	let loadError = $state<string | null>(null);
 	let loading = $state(true);
 
@@ -100,17 +106,39 @@
 		return new Date(iso).toLocaleString();
 	}
 
-	/** Re-lists the caller's notifications; a stale loadError is
-	 * cleared on success so it cannot outlive the mutation that
-	 * caused it. */
+	/** Re-lists the first page of the caller's notifications; a stale
+	 * loadError is cleared on success so it cannot outlive the
+	 * mutation that caused it. */
 	async function reload(): Promise<void> {
 		try {
-			items = await listNotifications();
+			const page = await listNotifications(PAGE_SIZE, 0);
+			items = page;
+			itemsHasMore = page.length >= PAGE_SIZE;
 			loadError = null;
 		} catch (e) {
 			loadError = envelopeMessage(e);
 		} finally {
 			loading = false;
+		}
+	}
+
+	/** Appends the next page of notifications (offset = rendered
+	 * count). The fetched page is deduped by id against what is
+	 * already rendered — while the endpoint ignores offset that makes
+	 * the click a no-op instead of a duplicated list. */
+	async function loadMoreItems(): Promise<void> {
+		if (itemsLoadingMore) return;
+		itemsLoadingMore = true;
+		try {
+			const page = await listNotifications(PAGE_SIZE, items.length);
+			const known = new Set(items.map((n) => n.id));
+			const fresh = page.filter((n) => !known.has(n.id));
+			if (fresh.length > 0) items = [...items, ...fresh];
+			itemsHasMore = page.length >= PAGE_SIZE && fresh.length > 0;
+		} catch (e) {
+			loadError = envelopeMessage(e);
+		} finally {
+			itemsLoadingMore = false;
 		}
 	}
 
@@ -202,6 +230,8 @@
 		loading: boolean;
 		loadError: string | null;
 		rows: ReviewQueueRow[];
+		rowsHasMore: boolean;
+		rowsLoadingMore: boolean;
 		rowState: Record<string, ReviewRowState>;
 		allCategoryId: string;
 		applyingAll: boolean;
@@ -232,6 +262,8 @@
 				loading: true,
 				loadError: null,
 				rows: [],
+				rowsHasMore: false,
+				rowsLoadingMore: false,
 				rowState: {},
 				allCategoryId: '',
 				applyingAll: false,
@@ -267,9 +299,10 @@
 		const target = reviewModal;
 		if (target === null) return;
 		try {
-			const rows = await listReviewQueue();
+			const rows = await listReviewQueue(PAGE_SIZE, 0);
 			if (target !== reviewModal) return;
 			target.rows = rows;
+			target.rowsHasMore = rows.length >= PAGE_SIZE;
 			for (const r of rows) {
 				if (target.rowState[r.id] === undefined) {
 					target.rowState[r.id] = defaultRowState();
@@ -287,6 +320,32 @@
 		}
 	}
 
+	/** Appends the next page of the modal's queue (offset = rendered
+	 * count, deduped by id — see loadMoreItems); new rows get fresh
+	 * per-row state like the first-page seed. */
+	async function loadMoreReviewModal(): Promise<void> {
+		const m = reviewModal;
+		if (m === null || m.rowsLoadingMore) return;
+		m.rowsLoadingMore = true;
+		try {
+			const page = await listReviewQueue(PAGE_SIZE, m.rows.length);
+			if (m !== reviewModal) return;
+			const known = new Set(m.rows.map((r) => r.id));
+			const fresh = page.filter((r) => !known.has(r.id));
+			if (fresh.length > 0) m.rows = [...m.rows, ...fresh];
+			for (const r of fresh) {
+				if (m.rowState[r.id] === undefined) m.rowState[r.id] = defaultRowState();
+			}
+			m.rowsHasMore = page.length >= PAGE_SIZE && fresh.length > 0;
+			m.loadError = null;
+		} catch (e) {
+			if (m !== reviewModal) return;
+			m.loadError = envelopeMessage(e);
+		} finally {
+			if (m === reviewModal) m.rowsLoadingMore = false;
+		}
+	}
+
 	/** Accepts one row with the picked category; the row disappears
 	 * from the queue (its notification goes with it) and the queue
 	 * re-lists itself. */
@@ -300,6 +359,7 @@
 			const after = rowState(row.id);
 			if (after !== null) after.busy = null;
 			dispatchUnreadChanged();
+			notifyDataChanged();
 			await refreshReviewModal();
 		} catch (e) {
 			const after = rowState(row.id);
@@ -322,6 +382,7 @@
 			const after = rowState(row.id);
 			if (after !== null) after.busy = null;
 			dispatchUnreadChanged();
+			notifyDataChanged();
 			await refreshReviewModal();
 		} catch (e) {
 			const after = rowState(row.id);
@@ -435,6 +496,7 @@
 				after.editForm = null;
 			}
 			dispatchUnreadChanged();
+			notifyDataChanged();
 			await refreshReviewModal();
 		} catch (e) {
 			const after = rowState(row.id);
@@ -456,6 +518,7 @@
 			if (m !== reviewModal) return;
 			m.appliedAll = res.applied;
 			dispatchUnreadChanged();
+			notifyDataChanged();
 			await refreshReviewModal();
 		} catch (e) {
 			if (m !== reviewModal) return;
@@ -763,6 +826,18 @@
 						</li>
 					{/each}
 				</ul>
+				{#if itemsHasMore}
+					<div class="flex justify-end">
+						<button
+							class="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+							disabled={itemsLoadingMore}
+							type="button"
+							onclick={() => void loadMoreItems()}
+						>
+							{itemsLoadingMore ? $_('common.loading_more') : $_('common.load_more')}
+						</button>
+					</div>
+				{/if}
 			{/if}
 		{/if}
 	{/if}
@@ -1043,6 +1118,18 @@
 								</tbody>
 							</table>
 						</div>
+						{#if m.rowsHasMore}
+							<div class="mt-2 flex justify-end">
+								<button
+									class="rounded-md border border-zinc-300 px-3 py-1.5 text-sm hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+									disabled={m.rowsLoadingMore}
+									type="button"
+									onclick={() => void loadMoreReviewModal()}
+								>
+									{m.rowsLoadingMore ? $_('common.loading_more') : $_('common.load_more')}
+								</button>
+							</div>
+						{/if}
 					{:else if m.appliedAll === null}
 						<p class="text-sm text-zinc-500 dark:text-zinc-400">{$_('review.empty')}</p>
 					{/if}

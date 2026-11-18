@@ -9,10 +9,6 @@
 #   golang:1.27.3          backend build/test/lint/fmt
 #   node:26.13.0           frontend build/lint/fmt (exact 26.x minor recorded in docs/TECH-DECISIONS.md)
 #   hashicorp/terraform:1.17.1   tf-validate (pinned at step 1.1, D-017)
-#
-# NOTE: every guarded target uses a single-shell `if [ ... ]; then ...; else ...; fi`
-# recipe line — a bare `test ... || exit 0` line would NOT stop subsequent recipe
-# lines (each line runs in its own shell).
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -49,19 +45,11 @@ build: backend-build frontend-build ## Build everything (backend + frontend)
 
 .PHONY: backend-build
 backend-build: ## Build Go module + cmd/api and cmd/worker (golang:1.27.3)
-	@if [ -f backend/go.mod ]; then \
-	  $(DOCKER_GO) sh -c 'go build ./... && go build -o bin/api ./cmd/api && go build -o bin/worker ./cmd/worker'; \
-	else \
-	  echo "skip: backend lands in step 0.2"; \
-	fi
+	$(DOCKER_GO) sh -c 'go build ./... && go build -o bin/api ./cmd/api && go build -o bin/worker ./cmd/worker'
 
 .PHONY: frontend-build
 frontend-build: ## Build frontend SPA bundle (node:26)
-	@if [ -f frontend/package.json ]; then \
-	  $(DOCKER_NODE) sh -c 'npm ci && npm run build'; \
-	else \
-	  echo "skip: frontend lands in step 0.3"; \
-	fi
+	$(DOCKER_NODE) sh -c 'npm ci && npm run build'
 
 # ---------- test ----------
 
@@ -70,11 +58,7 @@ test: backend-test ## Run all tests
 
 .PHONY: backend-test
 backend-test: ## Backend unit + testcontainers integration tests (golang:1.27.3)
-	@if [ -f backend/go.mod ]; then \
-	  $(DOCKER_GO_TC) sh -c 'go test ./...'; \
-	else \
-	  echo "skip: backend lands in step 0.2"; \
-	fi
+	$(DOCKER_GO_TC) sh -c 'go test ./...'
 
 # ---------- lint / fmt ----------
 
@@ -83,64 +67,36 @@ lint: backend-lint frontend-lint ## Lint everything
 
 .PHONY: backend-lint
 backend-lint: ## go vet + gofmt check (golang:1.27.3)
-	@if [ -f backend/go.mod ]; then \
-	  $(DOCKER_GO) sh -c 'set -e; go vet ./...; bad=$$(gofmt -l .); [ -z "$$bad" ] || { echo "gofmt needed on:"; echo "$$bad"; exit 1; }'; \
-	else \
-	  echo "skip: backend lands in step 0.2"; \
-	fi
+	$(DOCKER_GO) sh -c 'set -e; go vet ./...; bad=$$(gofmt -l .); [ -z "$$bad" ] || { echo "gofmt needed on:"; echo "$$bad"; exit 1; }'
 
 .PHONY: frontend-lint
 frontend-lint: ## svelte-check + eslint (node:26)
-	@if [ -f frontend/package.json ]; then \
-	  $(DOCKER_NODE) sh -c 'npm ci && npm run check && npm run lint'; \
-	else \
-	  echo "skip: frontend lands in step 0.3"; \
-	fi
+	$(DOCKER_NODE) sh -c 'npm ci && npm run check && npm run lint'
 
 .PHONY: fmt
 fmt: backend-fmt frontend-fmt ## Format everything
 
 .PHONY: backend-fmt
 backend-fmt: ## gofmt -w (golang:1.27.3)
-	@if [ -f backend/go.mod ]; then \
-	  $(DOCKER_GO) sh -c 'gofmt -w .'; \
-	else \
-	  echo "skip: backend lands in step 0.2"; \
-	fi
+	$(DOCKER_GO) sh -c 'gofmt -w .'
 
 .PHONY: frontend-fmt
 frontend-fmt: ## prettier --write (node:26)
-	@if [ -f frontend/package.json ]; then \
-	  $(DOCKER_NODE) sh -c 'npm ci && npm run format'; \
-	else \
-	  echo "skip: frontend lands in step 0.3"; \
-	fi
+	$(DOCKER_NODE) sh -c 'npm ci && npm run format'
 
 # ---------- migrations ----------
 
 .PHONY: migrate
 migrate: ## Apply DB migrations (goose up) via the compose migrate service
-	@if [ -f docker-compose.dev.yml ] && [ -d backend/migrations ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate up; \
-	else \
-	  echo "skip: migrations + compose migrate service land in a later step"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml run --rm migrate up
 
 .PHONY: migrate-down
 migrate-down: ## Roll back DB migrations (goose down)
-	@if [ -f docker-compose.dev.yml ] && [ -d backend/migrations ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate down; \
-	else \
-	  echo "skip: migrations + compose migrate service land in a later step"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml run --rm migrate down
 
 .PHONY: migrate-status
 migrate-status: ## Show migration status (goose status)
-	@if [ -f docker-compose.dev.yml ] && [ -d backend/migrations ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml run --rm migrate status; \
-	else \
-	  echo "skip: migrations + compose migrate service land in a later step"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml run --rm migrate status
 
 # ---------- secrets ----------
 
@@ -152,86 +108,46 @@ gen-kek: ## Print a random 64-hex-char (32 B) KEK for .env (D-020; host coreutil
 
 .PHONY: dev
 dev: ## Boot full local stack (postgres, backend, frontend, Keycloak, Mailpit)
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml up --build -d; \
-	  $(COMPOSE) -f docker-compose.dev.yml ps; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml up --build -d; \
+	$(COMPOSE) -f docker-compose.dev.yml ps
 
 .PHONY: dev-ps
 dev-ps: ## Show local stack status
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml ps; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml ps
 
 .PHONY: dev-logs
 dev-logs: ## Tail local stack logs
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml logs -f --tail=100; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml logs -f --tail=100
 
 .PHONY: dev-down
 dev-down: ## Stop the local stack
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml down; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml down
 
 .PHONY: dev-llm
 dev-llm: ## Boot opt-in LLM services (llama-init + llama; first boot downloads ~2.5 GB model)
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml --profile llm up -d llama-init llama; \
-	  $(COMPOSE) -f docker-compose.dev.yml ps; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml --profile llm up -d llama-init llama; \
+	$(COMPOSE) -f docker-compose.dev.yml ps
 
 .PHONY: dev-llm-down
 dev-llm-down: ## Stop the opt-in LLM services (model volume persists)
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml --profile llm down llama llama-init; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml --profile llm down llama llama-init
 
 .PHONY: dev-llm-clean
 dev-llm-clean: ## Remove the downloaded LLM model volume (ftrk-llm-model); next dev-llm re-downloads
-	@if [ -f docker-compose.dev.yml ]; then \
-	  $(COMPOSE) -f docker-compose.dev.yml volume rm ftrk-llm-model; \
-	else \
-	  echo "skip: compose stack lands in step 0.4"; \
-	fi
+	$(COMPOSE) -f docker-compose.dev.yml volume rm ftrk-llm-model
 
 # ---------- images ----------
 
 .PHONY: images
 images: ## Build production container images locally (no push)
-	@if [ -f backend/Dockerfile ]; then \
-	  docker build -t finance-tracker/backend:local backend/; \
-	else \
-	  echo "skip: backend Dockerfile lands in step 0.2"; \
-	fi
-	@if [ -f frontend/Dockerfile ]; then \
-	  docker build -t finance-tracker/frontend:local frontend/; \
-	else \
-	  echo "skip: frontend Dockerfile lands in step 0.3"; \
-	fi
+	docker build -t finance-tracker/backend:local backend/; \
+	docker build -t finance-tracker/frontend:local frontend/
 
 .PHONY: images-push
 images-push: ## Push images to $(REGISTRY) — MANUAL / OPERATOR-GATED (iteration 1 never pushes)
 	@test -n "$(REGISTRY)" || { echo "refusing: REGISTRY unset (iteration 1 must not push images)"; exit 1; }
-	@if [ -f backend/Dockerfile ] && [ -f frontend/Dockerfile ]; then \
-	  docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-backend:local --push backend/; \
-	  docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-frontend:local --push frontend/; \
-	else \
-	  echo "skip: needs both Dockerfiles (steps 0.2/0.3)"; \
-	fi
+	docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-backend:local --push backend/; \
+	docker buildx build --platform linux/amd64 -t $(REGISTRY)/finance-tracker-frontend:local --push frontend/
 
 # ---------- terraform (templates only — never applied) ----------
 # `tf-validate` runs `init` per directory; the resulting .terraform.lock.hcl
@@ -250,16 +166,4 @@ tf-validate: ## Validate Terraform templates (init -backend=false, validate, fmt
 	    docker run --rm -v $(ROOT):/w -w /w/$$d $(TF_IMG) fmt -check && \
 	    rm -f $$d/.terraform.lock.hcl; \
 	  done; \
-	else \
-	  echo "skip: terraform modules land in step 1.1"; \
-	fi
-
-# ---------- e2e ----------
-
-.PHONY: e2e
-e2e: ## Run the scripted API-level E2E tour against the running local stack
-	@if [ -f scripts/e2e.sh ]; then \
-	  bash scripts/e2e.sh; \
-	else \
-	  echo "skip: E2E tour lands in step 4.6"; \
 	fi

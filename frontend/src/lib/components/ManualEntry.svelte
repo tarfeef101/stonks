@@ -10,6 +10,7 @@
 		type CreateTransactionInput,
 		type Transaction
 	} from '#lib/api/transactions';
+	import { notifyDataChanged } from '#lib/explore/cache';
 
 	// Manual entry (step 4.7): record a transaction that is not in any
 	// statement file. The form posts the same wire shape an imported row
@@ -87,6 +88,7 @@
 		const input = buildInput();
 		try {
 			const tx: Transaction = await createTransaction(input);
+			notifyDataChanged();
 			created = { id: tx.id, amount: input.amount, datePosted: input.date_posted };
 			// Reset the entry fields; the account + category keep their
 			// selection for back-to-back entries.

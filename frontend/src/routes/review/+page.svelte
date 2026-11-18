@@ -18,6 +18,7 @@
 		type OffsetSuggestion
 	} from '#lib/api/offsets';
 	import ReviewRow from '#lib/components/ReviewRow.svelte';
+	import { notifyDataChanged } from '#lib/explore/cache';
 
 	// Review queue (step 5.5): the rows the categorise worker flagged
 	// with a sub-threshold suggestion. A row is resolved by picking one
@@ -28,7 +29,12 @@
 	// A resolved row leaves the queue, so every successful action ends
 	// in a queue refresh.
 
+	/** One page of a list endpoint (the backend default). */
+	const PAGE_SIZE = 100;
+
 	let rows = $state<ReviewQueueRow[]>([]);
+	let rowsHasMore = $state(false);
+	let rowsLoadingMore = $state(false);
 	let categories = $state<Category[]>([]);
 	let accounts = $state<Account[]>([]);
 	let loadError = $state<string | null>(null);
@@ -46,7 +52,11 @@
 	// and stores its pairs as proposals; accepting a proposal groups
 	// the two legs so they leave the lists and the aggregates.
 	let suggestions = $state<OffsetSuggestion[]>([]);
+	let suggestionsHasMore = $state(false);
+	let suggestionsLoadingMore = $state(false);
 	let groups = $state<OffsetGroup[]>([]);
+	let groupsHasMore = $state(false);
+	let groupsLoadingMore = $state(false);
 	let scanning = $state(false);
 	let scanResult = $state<number | null>(null);
 	let scanError = $state<string | null>(null);
@@ -64,16 +74,39 @@
 		return accounts.find((a) => a.id === id)?.name ?? id;
 	}
 
-	/** Re-fetches the queue (the pickers' data is loaded once in
-	 * onMount, like the imports page). */
+	/** Re-fetches the first page of the queue (the pickers' data is
+	 * loaded once in onMount, like the imports page). */
 	async function refreshQueue(): Promise<void> {
 		try {
-			rows = await listReviewQueue();
+			const page = await listReviewQueue(PAGE_SIZE, 0);
+			rows = page;
+			rowsHasMore = page.length >= PAGE_SIZE;
 			loadError = null;
 		} catch (e) {
 			loadError = envelopeMessage(e);
 		} finally {
 			loading = false;
+		}
+	}
+
+	/** Appends the next page of the queue (offset = rendered count).
+	 * The fetched page is deduped by id against what is already
+	 * rendered — while an endpoint ignores offset that makes the
+	 * click a no-op instead of a duplicated list. */
+	async function loadMoreQueue(): Promise<void> {
+		if (rowsLoadingMore) return;
+		rowsLoadingMore = true;
+		loadError = null;
+		try {
+			const page = await listReviewQueue(PAGE_SIZE, rows.length);
+			const known = new Set(rows.map((r) => r.id));
+			const fresh = page.filter((r) => !known.has(r.id));
+			if (fresh.length > 0) rows = [...rows, ...fresh];
+			rowsHasMore = page.length >= PAGE_SIZE && fresh.length > 0;
+		} catch (e) {
+			loadError = envelopeMessage(e);
+		} finally {
+			rowsLoadingMore = false;
 		}
 	}
 
@@ -86,6 +119,7 @@
 		try {
 			const res = await acceptAllReview(allCategoryId);
 			appliedAll = res.applied;
+			notifyDataChanged();
 			await refreshQueue();
 		} catch (e) {
 			allError = envelopeMessage(e);
@@ -115,13 +149,59 @@
 		return e instanceof Error ? e.message : String(e);
 	}
 
-	/** Re-fetches the pending suggestions and the active groups. */
+	/** Re-fetches the first pages of the pending suggestions and the
+	 * active groups. */
 	async function refreshOffsets(): Promise<void> {
 		try {
-			[suggestions, groups] = await Promise.all([listOffsetSuggestions(), listOffsetGroups()]);
+			const [sugs, grps] = await Promise.all([
+				listOffsetSuggestions(PAGE_SIZE, 0),
+				listOffsetGroups(PAGE_SIZE, 0)
+			]);
+			suggestions = sugs;
+			groups = grps;
+			suggestionsHasMore = sugs.length >= PAGE_SIZE;
+			groupsHasMore = grps.length >= PAGE_SIZE;
 			offsetError = null;
 		} catch (e) {
 			offsetError = envelopeMessage(e);
+		}
+	}
+
+	/** Appends the next page of the pending suggestions (offset =
+	 * rendered count, deduped by id — see loadMoreQueue). */
+	async function loadMoreSuggestions(): Promise<void> {
+		if (suggestionsLoadingMore) return;
+		suggestionsLoadingMore = true;
+		offsetError = null;
+		try {
+			const page = await listOffsetSuggestions(PAGE_SIZE, suggestions.length);
+			const known = new Set(suggestions.map((s) => s.id));
+			const fresh = page.filter((s) => !known.has(s.id));
+			if (fresh.length > 0) suggestions = [...suggestions, ...fresh];
+			suggestionsHasMore = page.length >= PAGE_SIZE && fresh.length > 0;
+		} catch (e) {
+			offsetError = envelopeMessage(e);
+		} finally {
+			suggestionsLoadingMore = false;
+		}
+	}
+
+	/** Appends the next page of the active groups (offset = rendered
+	 * count, deduped by id — see loadMoreQueue). */
+	async function loadMoreGroups(): Promise<void> {
+		if (groupsLoadingMore) return;
+		groupsLoadingMore = true;
+		offsetError = null;
+		try {
+			const page = await listOffsetGroups(PAGE_SIZE, groups.length);
+			const known = new Set(groups.map((g) => g.id));
+			const fresh = page.filter((g) => !known.has(g.id));
+			if (fresh.length > 0) groups = [...groups, ...fresh];
+			groupsHasMore = page.length >= PAGE_SIZE && fresh.length > 0;
+		} catch (e) {
+			offsetError = envelopeMessage(e);
+		} finally {
+			groupsLoadingMore = false;
 		}
 	}
 
@@ -152,6 +232,7 @@
 		offsetError = null;
 		try {
 			await acceptOffsetSuggestion(id);
+			notifyDataChanged();
 			await refreshOffsets();
 		} catch (e) {
 			offsetError = envelopeMessage(e);
@@ -168,6 +249,7 @@
 		offsetError = null;
 		try {
 			await dismissOffsetSuggestion(id);
+			notifyDataChanged();
 			await refreshOffsets();
 		} catch (e) {
 			offsetError = envelopeMessage(e);
@@ -185,6 +267,7 @@
 		offsetError = null;
 		try {
 			await clearOffsetGroup(id);
+			notifyDataChanged();
 			await refreshOffsets();
 		} catch (e) {
 			offsetError = envelopeMessage(e);
@@ -198,11 +281,11 @@
 	// and the cards stay hidden behind the sign-in prompt.)
 	onMount(() => {
 		void Promise.all([
-			listReviewQueue(),
+			listReviewQueue(PAGE_SIZE, 0),
 			listCategories(),
 			listAccounts(),
-			listOffsetSuggestions(),
-			listOffsetGroups()
+			listOffsetSuggestions(PAGE_SIZE, 0),
+			listOffsetGroups(PAGE_SIZE, 0)
 		])
 			.then(([txs, cats, accs, sugs, grps]) => {
 				rows = txs;
@@ -210,6 +293,9 @@
 				accounts = accs;
 				suggestions = sugs;
 				groups = grps;
+				rowsHasMore = txs.length >= PAGE_SIZE;
+				suggestionsHasMore = sugs.length >= PAGE_SIZE;
+				groupsHasMore = grps.length >= PAGE_SIZE;
 				loadError = null;
 			})
 			.catch((e) => {
@@ -306,6 +392,18 @@
 							</tbody>
 						</table>
 					</div>
+					{#if rowsHasMore}
+						<div class="mt-3 flex justify-end">
+							<button
+								class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+								disabled={rowsLoadingMore}
+								type="button"
+								onclick={() => void loadMoreQueue()}
+							>
+								{rowsLoadingMore ? $_('common.loading_more') : $_('common.load_more')}
+							</button>
+						</div>
+					{/if}
 				</div>
 			{/if}
 
@@ -377,6 +475,18 @@
 								</li>
 							{/each}
 						</ul>
+						{#if suggestionsHasMore}
+							<div class="mt-2 flex justify-end">
+								<button
+									class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+									disabled={suggestionsLoadingMore}
+									type="button"
+									onclick={() => void loadMoreSuggestions()}
+								>
+									{suggestionsLoadingMore ? $_('common.loading_more') : $_('common.load_more')}
+								</button>
+							</div>
+						{/if}
 					{/if}
 				</div>
 
@@ -409,6 +519,18 @@
 								</li>
 							{/each}
 						</ul>
+						{#if groupsHasMore}
+							<div class="mt-2 flex justify-end">
+								<button
+									class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-50"
+									disabled={groupsLoadingMore}
+									type="button"
+									onclick={() => void loadMoreGroups()}
+								>
+									{groupsLoadingMore ? $_('common.loading_more') : $_('common.load_more')}
+								</button>
+							</div>
+						{/if}
 					{/if}
 				</div>
 

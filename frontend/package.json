@@ -41,7 +41,6 @@
 	},
 	"dependencies": {
 		"@newrelic/browser-agent": "^1.324.1",
-		"@tanstack/svelte-query": "^6.3.8",
 		"dompurify": "^3.4.17",
 		"echarts": "^5.6.0",
 		"marked": "^18.2.0",

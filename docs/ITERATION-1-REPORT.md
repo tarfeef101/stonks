@@ -1,5 +1,12 @@
 # Iteration 1 Report — Personal Finance Tracker
 
+> **Point in time.** This report is a snapshot of the 2026-10-31 → 2026-11-08/09
+> autonomous run and ends at step 9.2 by design (the plan's stop gate) — it is
+> **not** kept up to date. Everything committed after that run — the later
+> review/fix rounds, each recorded in `git log` with the `(round N)` suffix —
+> is documented in `git log`, not here. Read this report as "what iteration 1
+> delivered at its stop gate"; consult the git history for current state.
+
 Phases 0–9 (steps 0.1 → 9.2) delivered in the 2026-10-31 → 2026-11-08/09 autonomous run.
 
 ## Scope

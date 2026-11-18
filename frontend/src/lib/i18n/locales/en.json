@@ -3,7 +3,9 @@
 		"title": "Personal Finance Tracker"
 	},
 	"common": {
-		"manage_accounts": "Manage in settings →"
+		"manage_accounts": "Manage in settings →",
+		"load_more": "Load more",
+		"loading_more": "Loading…"
 	},
 	"nav": {
 		"summary": "Summary",

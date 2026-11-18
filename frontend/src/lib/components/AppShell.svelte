@@ -59,6 +59,10 @@
 
 	onMount(() => {
 		const t = setInterval(() => {
+			// Round 41: skip ticks in a background tab — the
+			// visibilitychange handler below refreshes once when the
+			// tab comes back, so nothing is missed, just deferred.
+			if (document.hidden) return;
 			if ($user?.profile.sub) {
 				refreshUnread();
 			}
@@ -71,9 +75,18 @@
 			}
 		};
 		window.addEventListener('ftrk:unread-changed', onUnreadChanged);
+		// Round 41: the tab became visible again (ticks were skipped
+		// while hidden) — refresh once immediately.
+		const onVisibilityChange = (): void => {
+			if (!document.hidden && $user?.profile.sub) {
+				refreshUnread();
+			}
+		};
+		document.addEventListener('visibilitychange', onVisibilityChange);
 		return () => {
 			clearInterval(t);
 			window.removeEventListener('ftrk:unread-changed', onUnreadChanged);
+			document.removeEventListener('visibilitychange', onVisibilityChange);
 		};
 	});
 </script>

@@ -50,6 +50,15 @@ export interface ExploreState {
 	group: GroupBy;
 }
 
+/** The server-side filter fields only: the view fields (chart / group)
+ * are deliberately excluded — they re-render the view without a refetch
+ * and are NEVER sent to the API. apiQuery takes this (not ExploreState)
+ * so a caller can't accidentally send view fields. */
+export type ExploreFilters = Pick<
+	ExploreState,
+	'from' | 'to' | 'account' | 'category' | 'min' | 'max' | 'q' | 'sign'
+>;
+
 /** A transaction row as this module consumes it — structurally compatible
  * with (and therefore assignable from) the API's Transaction. */
 export interface TxRow {
@@ -256,7 +265,7 @@ export function withoutRange(qs: string): string {
  * Each `category` value is one category_id; 'none' becomes an EMPTY
  * category_id (uncategorized-only). chart/group are view-only — never
  * present. */
-export function apiQuery(s: ExploreState, offset: number): URLSearchParams {
+export function apiQuery(s: ExploreFilters, offset: number): URLSearchParams {
 	const params = new URLSearchParams();
 	if (s.from !== '') params.append('date_from', s.from);
 	if (s.to !== '') params.append('date_to', s.to);

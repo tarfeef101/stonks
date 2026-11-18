@@ -32,6 +32,18 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
 	onUnauthorized = handler;
 }
 
+/** Builds the optional `?limit=&offset=` suffix for the paginated list
+ * endpoints (backend convention: both ints, defaults 100/0). Empty
+ * string when neither is provided — unpaginated callers keep hitting
+ * the bare path. */
+export function pagingQuery(limit?: number, offset?: number): string {
+	const q = new URLSearchParams();
+	if (limit !== undefined) q.set('limit', String(limit));
+	if (offset !== undefined) q.set('offset', String(offset));
+	const s = q.toString();
+	return s ? `?${s}` : '';
+}
+
 export class ApiError extends Error {
 	readonly status: number;
 
