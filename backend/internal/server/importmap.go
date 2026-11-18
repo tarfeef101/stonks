@@ -511,8 +511,9 @@ type presetOut struct {
 
 // importPresets serves GET /api/v1/imports/presets: the code builtins
 // (specs rebuilt from the preset definitions) followed by the
-// caller's saved presets (import_schemas, customs only — the legacy DB
-// builtin rows are not the code builtins and stay out of the list).
+// caller's saved presets (import_schemas — customs only since 0018,
+// D-029: the table no longer holds builtin rows, so every listed row
+// is the user's own).
 func (h *handler) importPresets(w http.ResponseWriter, r *http.Request) {
 	if h.imports == nil {
 		notConfigured(w)
@@ -551,9 +552,6 @@ func (h *handler) importPresets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, sc := range schemas {
-			if sc.Builtin {
-				continue
-			}
 			out = append(out, presetOut{ID: sc.ID, Name: sc.Name, Kind: sc.Kind, Spec: sc.Spec})
 		}
 	}

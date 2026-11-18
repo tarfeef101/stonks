@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"finance-tracker/internal/reporttypes"
 )
 
 // txPageSize is the page size the collector walks Tx.List with: the
@@ -31,11 +33,13 @@ type ListFilter struct {
 // TxSource is the transaction half of the collector's data plane. The
 // collector defines its own narrow interface (it does not reuse
 // internal/server or internal/repo types) so step 8.3 can implement it
-// with a small adapter over *repo.TransactionStore. CategorySpend and
-// Row are the report-local structs; the adapter copies the repo types.
-// The per-category math happens here (categorySpend), not in the
-// source: both periods share one code path, and the optional per-row
-// FX conversion runs before the sums (see FxSource).
+// with a small adapter over *repo.TransactionStore. CategorySpend is
+// report-local; Row is defined in internal/reporttypes (shared with the
+// schedule package's adapters) and re-exported as an alias below — the
+// adapter copies the repo types into it. The per-category math happens
+// here (categorySpend), not in the source: both periods share one code
+// path, and the optional per-row FX conversion runs before the sums
+// (see FxSource).
 type TxSource interface {
 	List(ctx context.Context, userID string, f ListFilter, dek []byte) ([]Row, error)
 }
@@ -54,20 +58,11 @@ type FxSource interface {
 	Factor(ctx context.Context, date time.Time, from, to string) (factor float64, converted bool, err error)
 }
 
-// Budget is one budget row as the collector consumes it; the adapter
-// decrypts Targets (a JSON object keyed by category id -> canonical
-// 2-decimal string, exactly repo.Budget.Targets after decryption).
-//
-// Order contract: BudgetSource.List returns rows in a stable,
-// deterministic order (repo.BudgetStore.List orders by created_at, id),
-// and Collect takes the FIRST active row whose Period matches. (The
-// handoff's "lexicographically first ID" is not expressible here: the
-// pinned struct has no ID field — see REPORT.md, PINCORR.)
-type Budget struct {
-	Period  string
-	Active  bool
-	Targets map[string]string
-}
+// Budget is one budget row as the collector consumes it. The
+// definition lives in internal/reporttypes (shared with the schedule
+// package's adapters); see reporttypes.Budget for the Targets shape and
+// the order contract Collect relies on.
+type Budget = reporttypes.Budget
 
 // BudgetSource lists the user's budgets; see Budget for the order
 // contract Collect relies on.
@@ -75,11 +70,10 @@ type BudgetSource interface {
 	List(ctx context.Context, userID string, dek []byte) ([]Budget, error)
 }
 
-// Name is one category row as the collector consumes it.
-type Name struct {
-	ID   string
-	Name string
-}
+// Name is one category row as the collector consumes it. The
+// definition lives in internal/reporttypes (shared with the schedule
+// package's adapters); see reporttypes.Name.
+type Name = reporttypes.Name
 
 // CategorySource lists the user's categories (the adapter copies
 // repo.Category rows; dek decrypts names).

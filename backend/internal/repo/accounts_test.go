@@ -1,8 +1,8 @@
 // Account store tests (plan step 2.5b): one shared postgres:18
 // testcontainer (newTestEnv) with subtests covering CRUD round trips
 // (incl. the **string clear idiom), validation, per-user uniqueness,
-// schema-reference scoping (builtins shared, customs per-user, FK SET
-// NULL on schema delete), and per-user isolation.
+// schema-reference scoping (customs only since 0018, FK SET NULL on
+// schema delete), and per-user isolation.
 package repo
 
 import (
@@ -26,35 +26,27 @@ func TestAccountStore(t *testing.T) {
 	ctx := env.ctx
 	aid, bid := a.row.ID, b.row.ID
 
-	// One builtin for the schema-reference subtests.
-	if n, err := schema.EnsureBuiltins(ctx); err != nil || n != 3 {
-		t.Fatalf("ensure builtins: got %d (err %v), want 3", n, err)
-	}
-	var csvBuiltin string
-	list, err := schema.List(ctx, aid, a.dek)
+	// One of a's own custom schemas for the schema-reference subtests
+	// (0018 dropped the builtins; a schema id is all an account's
+	// default_schema_id needs).
+	asc, err := schema.Create(ctx, aid, SchemaIn{
+		Name: "A-import", Kind: "csv", Spec: json.RawMessage(`{"columns":{"date":"1"}}`),
+	}, a.dek)
 	if err != nil {
-		t.Fatalf("list schemas: %v", err)
-	}
-	for _, s := range list {
-		if s.Kind == "csv" {
-			csvBuiltin = s.ID
-		}
-	}
-	if csvBuiltin == "" {
-		t.Fatal("no csv builtin found")
+		t.Fatalf("create schema: %v", err)
 	}
 
 	t.Run("crud round trip, subtype + schema ref", func(t *testing.T) {
 		sub := "chequing"
 		acc, err := acct.Create(ctx, aid, AccountIn{
 			Name: "  Main Bank  ", Type: "bank", Subtype: &sub,
-			Currency: "USD", DefaultSchemaID: &csvBuiltin,
+			Currency: "USD", DefaultSchemaID: &asc.ID,
 		}, a.dek)
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		if acc.Name != "Main Bank" || acc.Type != "bank" || acc.Subtype != "chequing" ||
-			acc.Currency != "USD" || acc.DefaultSchemaID != csvBuiltin {
+			acc.Currency != "USD" || acc.DefaultSchemaID != asc.ID {
 			t.Fatalf("created: %+v", acc)
 		}
 		got, err := acct.Get(ctx, aid, acc.ID, a.dek)
@@ -73,7 +65,7 @@ func TestAccountStore(t *testing.T) {
 			t.Fatalf("update: %v", err)
 		}
 		if renamed.Name != "Second Bank" || renamed.Type != "investment" || renamed.Currency != "CAD" ||
-			renamed.Subtype != "chequing" || renamed.DefaultSchemaID != csvBuiltin {
+			renamed.Subtype != "chequing" || renamed.DefaultSchemaID != asc.ID {
 			t.Fatalf("updated: %+v", renamed)
 		}
 		// The old name is free again after the rename.
@@ -153,13 +145,7 @@ func TestAccountStore(t *testing.T) {
 		}
 	})
 
-	t.Run("schema ref: scoped, builtins shared, FK SET NULL", func(t *testing.T) {
-		spec := json.RawMessage(`{"columns":{"date":"1"}}`)
-		asc, err := schema.Create(ctx, aid, SchemaIn{Name: "A-import", Kind: "csv", Spec: spec}, a.dek)
-		if err != nil {
-			t.Fatalf("create a schema: %v", err)
-		}
-
+	t.Run("schema ref: customs only, FK SET NULL", func(t *testing.T) {
 		// A well-formed but nonexistent schema id.
 		missing := zeroUUID
 		if _, err := acct.Create(ctx, aid, AccountIn{Name: "NoSchema", Type: "bank", Currency: "USD", DefaultSchemaID: &missing}, a.dek); !errors.Is(err, ErrSchemaNotFound) {
@@ -170,10 +156,11 @@ func TestAccountStore(t *testing.T) {
 		if _, err := acct.Create(ctx, bid, AccountIn{Name: "B-with-A-schema", Type: "bank", Currency: "USD", DefaultSchemaID: &asc.ID}, b.dek); !errors.Is(err, ErrSchemaNotFound) {
 			t.Fatalf("cross-user schema on create: want ErrSchemaNotFound, got %v", err)
 		}
-		// The builtin is usable by both users.
-		bacct, err := acct.Create(ctx, bid, AccountIn{Name: "B-with-builtin", Type: "bank", Currency: "USD", DefaultSchemaID: &csvBuiltin}, b.dek)
+		// b's own account (no schema ref) is what the cross-user
+		// update check bounces against.
+		bacct, err := acct.Create(ctx, bid, AccountIn{Name: "B-bare", Type: "bank", Currency: "USD"}, b.dek)
 		if err != nil {
-			t.Fatalf("builtin must be visible to b: %v", err)
+			t.Fatalf("create b account: %v", err)
 		}
 		cross := &asc.ID
 		if _, err := acct.Update(ctx, bid, bacct.ID, AccountPatch{DefaultSchemaID: &cross}, b.dek); !errors.Is(err, ErrSchemaNotFound) {

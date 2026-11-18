@@ -8,6 +8,7 @@ import (
 
 	"finance-tracker/internal/repo"
 	"finance-tracker/internal/report"
+	"finance-tracker/internal/reporttypes"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -112,14 +113,14 @@ func NewTransactionAdapter(store *repo.TransactionStore) *TransactionAdapter {
 // List pages one report.ListFilter window (the limit pinned to the
 // repo hard cap) through the narrow ListReportRows query and copies
 // all five report fields.
-func (a *TransactionAdapter) List(ctx context.Context, userID string, f report.ListFilter, dek []byte) ([]report.Row, error) {
+func (a *TransactionAdapter) List(ctx context.Context, userID string, f report.ListFilter, dek []byte) ([]reporttypes.Row, error) {
 	rows, err := a.Store.ListReportRows(ctx, userID, f.From, f.To, txPageLimit, f.Offset, dek)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]report.Row, 0, len(rows))
+	out := make([]reporttypes.Row, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, report.Row{
+		out = append(out, reporttypes.Row{
 			Description: r.Description,
 			Amount:      r.Amount,
 			CategoryID:  r.CategoryID,
@@ -147,12 +148,12 @@ func NewBudgetAdapter(store *repo.BudgetStore) *BudgetAdapter {
 // List copies the repo budget rows, unmarshalling Targets (an empty
 // blob is impossible in practice — Create validates non-empty — but a
 // nil/empty blob yields an empty target map).
-func (a *BudgetAdapter) List(ctx context.Context, userID string, dek []byte) ([]report.Budget, error) {
+func (a *BudgetAdapter) List(ctx context.Context, userID string, dek []byte) ([]reporttypes.Budget, error) {
 	rows, err := a.Store.List(ctx, userID, dek)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]report.Budget, 0, len(rows))
+	out := make([]reporttypes.Budget, 0, len(rows))
 	for _, b := range rows {
 		var targets map[string]string
 		if len(b.Targets) > 0 {
@@ -160,7 +161,7 @@ func (a *BudgetAdapter) List(ctx context.Context, userID string, dek []byte) ([]
 				return nil, fmt.Errorf("schedule: budget %s targets: %w", b.ID, err)
 			}
 		}
-		out = append(out, report.Budget{Period: b.Period, Active: b.Active, Targets: targets})
+		out = append(out, reporttypes.Budget{Period: b.Period, Active: b.Active, Targets: targets})
 	}
 	return out, nil
 }
@@ -177,14 +178,14 @@ func NewCategoryAdapter(store *repo.CategoryStore) *CategoryAdapter {
 }
 
 // List copies the repo category rows.
-func (a *CategoryAdapter) List(ctx context.Context, userID string, dek []byte) ([]report.Name, error) {
+func (a *CategoryAdapter) List(ctx context.Context, userID string, dek []byte) ([]reporttypes.Name, error) {
 	rows, err := a.Store.List(ctx, userID, dek)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]report.Name, 0, len(rows))
+	out := make([]reporttypes.Name, 0, len(rows))
 	for _, c := range rows {
-		out = append(out, report.Name{ID: c.ID, Name: c.Name})
+		out = append(out, reporttypes.Name{ID: c.ID, Name: c.Name})
 	}
 	return out, nil
 }

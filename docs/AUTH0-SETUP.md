@@ -5,7 +5,14 @@ tenant, no account, no AWS resource is ever created by repo automation
 (plan §0, step 1.1). During iteration 1 the **local Keycloak dev realm is
 the only IdP** (see `docs/DEVELOPMENT.md`). This runbook is what the
 operator follows later, when swapping to a real Auth0 tenant — a
-deployment change is then env-only (`AUTH0_ISSUER` / `AUTH0_CLIENT_ID`).
+deployment change is then env-only (`OIDC_ISSUER` / `OIDC_CLIENT_ID`).
+
+Since D-030 the env-var names are IdP-agnostic (`OIDC_*`, not `AUTH0_*`):
+dev Keycloak and prod Auth0 use the SAME names, so swapping IdPs is a value
+change, not a rename. Exception: the SSM parameter names in `infra/aws-ssm`
+still carry the legacy `AUTH0_*` spelling (that template predates D-030 and
+is validate-only) — the `secretsync` Job maps them onto the current `OIDC_*`
+env names (see the note in the SSM section below).
 
 `make tf-validate` keeps every template green (per directory: `terraform
 init -backend=false`, `validate`, `fmt -check`).
@@ -59,11 +66,11 @@ Outputs per Auth0 environment: `issuer` (`https://<tenant domain>`),
 
    | Output       | Where it goes                                            |
    |--------------|----------------------------------------------------------|
-   | `issuer`     | `AUTH0_ISSUER` (k8s Secret baseline, or SSM — below)     |
-   | `client_id`  | `AUTH0_CLIENT_ID`                                        |
+   | `issuer`     | `OIDC_ISSUER` (k8s Secret baseline, or SSM — below)      |
+   | `client_id`  | `OIDC_CLIENT_ID`                                         |
    | `domain`     | informational                                            |
 
-   `AUTH0_CLIENT_SECRET` (a plan §6 name) stays **empty**: the SPA is
+   `OIDC_CLIENT_SECRET` (a plan §6 name) stays **empty**: the SPA is
    first-party — PKCE protects the code flow and the backend verifies
    tokens via the tenant JWKS, so no secret exists to use.
 
@@ -118,6 +125,13 @@ of plain k8s Secrets; the opt-in `secretsync` Job fetches them).
    Copy the Auth0 `issuer`/`client_id` outputs into
    `/finance-tracker/AUTH0_ISSUER` and `/finance-tracker/AUTH0_CLIENT_ID`
    the same way.
+
+   **Note (D-030):** the parameter names above keep the legacy `AUTH0_*`
+   spelling — `infra/aws-ssm/main.tf` predates the rename and is
+   validate-only, so the parameter names are the app's old env names. The
+   `secretsync` Job (lands with the deployment work) maps each SSM
+   parameter onto the app's current `OIDC_*` env-var name, so the app
+   never reads `AUTH0_*` from its environment.
 
    **Caveat:** whether SSM accepts an *empty* SecureString value on
    creation is not verified (AWS docs don't say). If `apply` is rejected

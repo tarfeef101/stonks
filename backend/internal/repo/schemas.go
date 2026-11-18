@@ -1,14 +1,14 @@
 // Import-schema repository (plan step 2.5b): import_schemas
-// (migration 0001). Two shapes under one table (0001 shape CHECK):
-// builtins are global and public (user_id NULL, builtin true,
-// name plaintext) — they are read-only and maintained by
-// EnsureBuiltins; customs are per-user (user_id NOT NULL, name
-// DEK-encrypted).
+// (migration 0001). Since 0018 the table is CUSTOM-ONLY: every row is
+// per-user (user_id NOT NULL, name DEK-encrypted) — the former global
+// builtins were deleted, and the code builtins in internal/presets
+// (served by GET /v1/imports/presets) are the sole preset source
+// (D-029).
 //
-// A schema is usable by a user iff it is a builtin or owned by that
-// user; Get/Update/Delete treat "no such id" and "somebody else's
-// custom" identically (ErrSchemaNotFound) — existence is not disclosed
-// across users.
+// A schema is usable by a user iff it is owned by that user;
+// Get/Update/Delete treat "no such id" and "somebody else's schema"
+// identically (ErrSchemaNotFound) — existence is not disclosed across
+// users.
 //
 // kind is immutable on update: the importer (step 4.x) compiles its
 // parsing pipeline against it, so retyping a preset in place would
@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"finance-tracker/internal/crypto"
 
@@ -41,39 +40,24 @@ var schemaKindOK = func() map[string]bool {
 	return m
 }()
 
-// builtinSchemas are the three global presets EnsureBuiltins maintains
-// (idempotent per (name, kind)). Specs start empty: field mappings are
-// the user's (or the importer's defaults, step 4.x).
-var builtinSchemas = []struct {
+// Schema is one import_schemas row (customs only since 0018). Name is
+// the decrypted name. Spec is the raw jsonb (a JSON object).
+type Schema struct {
+	ID   string
 	Name string
 	Kind string
 	Spec json.RawMessage
-}{
-	{Name: "Generic CSV", Kind: "csv", Spec: json.RawMessage(`{}`)},
-	{Name: "OFX Statement", Kind: "ofx", Spec: json.RawMessage(`{}`)},
-	{Name: "Generic JSON", Kind: "json", Spec: json.RawMessage(`{}`)},
 }
 
-// Schema is one import_schemas row. Name is plaintext for builtins, the
-// decrypted name for customs. Spec is the raw jsonb (a JSON object).
-type Schema struct {
-	ID      string
-	Name    string
-	Kind    string
-	Builtin bool
-	Spec    json.RawMessage
-}
-
-// SchemaIn is the Create input for a CUSTOM schema (builtins are
-// read-only; see EnsureBuiltins).
+// SchemaIn is the Create input.
 type SchemaIn struct {
 	Name string
 	Kind string
 	Spec json.RawMessage
 }
 
-// SchemaPatch is the Update input for a CUSTOM schema; nil = untouched.
-// kind is deliberately absent — it is immutable (see package header).
+// SchemaPatch is the Update input; nil = untouched. kind is
+// deliberately absent — it is immutable (see package header).
 type SchemaPatch struct {
 	Name *string
 	Spec *json.RawMessage
@@ -94,8 +78,7 @@ func validateSpec(spec json.RawMessage) error {
 }
 
 // SchemaStore persists import_schemas. One store serves every user;
-// each method takes a userID and scopes its SQL on it (builtins are
-// shared by construction).
+// each method takes a userID and scopes its SQL on it.
 type SchemaStore struct {
 	pool *pgxpool.Pool
 }
@@ -109,30 +92,24 @@ func NewSchemaStore(pool *pgxpool.Pool) *SchemaStore {
 	return &SchemaStore{pool: pool}
 }
 
-// schemaFrom assembles a Schema from a row's columns; customs are
-// decrypted under the caller's DEK, builtins read the plaintext name.
-func schemaFrom(id string, name sql.NullString, enc []byte, kind string, builtin bool, spec []byte, dek []byte) (Schema, error) {
-	s := Schema{ID: id, Kind: kind, Builtin: builtin, Spec: json.RawMessage(spec)}
-	if builtin {
-		s.Name = name.String
-		return s, nil
-	}
+// schemaFrom assembles a Schema from a row's columns; the name is
+// decrypted under the caller's DEK.
+func schemaFrom(id string, enc []byte, kind string, spec []byte, dek []byte) (Schema, error) {
 	n, err := decryptName(id, enc, dek)
 	if err != nil {
 		return Schema{}, err
 	}
-	s.Name = n
-	return s, nil
+	return Schema{ID: id, Name: n, Kind: kind, Spec: json.RawMessage(spec)}, nil
 }
 
-// List returns the builtins plus the user's custom schemas (builtins
-// first). dek decrypts the custom names.
+// List returns the user's custom schemas in created_at, id order. dek
+// decrypts the names.
 func (s *SchemaStore) List(ctx context.Context, userID string, dek []byte) ([]Schema, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, name_encrypted, kind, builtin, spec
+		SELECT id, name_encrypted, kind, spec
 		FROM import_schemas
-		WHERE builtin = true OR user_id = $1
-		ORDER BY builtin DESC, created_at, id`, userID)
+		WHERE user_id = $1
+		ORDER BY created_at, id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("repo: list schemas: %w", err)
 	}
@@ -141,16 +118,14 @@ func (s *SchemaStore) List(ctx context.Context, userID string, dek []byte) ([]Sc
 	for rows.Next() {
 		var (
 			id  string
-			nm  sql.NullString
 			enc []byte
 			nd  string
-			bl  bool
 			sp  []byte
 		)
-		if err := rows.Scan(&id, &nm, &enc, &nd, &bl, &sp); err != nil {
+		if err := rows.Scan(&id, &enc, &nd, &sp); err != nil {
 			return nil, fmt.Errorf("repo: scan schema: %w", err)
 		}
-		sc, err := schemaFrom(id, nm, enc, nd, bl, sp, dek)
+		sc, err := schemaFrom(id, enc, nd, sp, dek)
 		if err != nil {
 			return nil, err
 		}
@@ -162,33 +137,30 @@ func (s *SchemaStore) List(ctx context.Context, userID string, dek []byte) ([]Sc
 	return out, nil
 }
 
-// Get returns a schema visible to the user (builtin or own custom), or
-// ErrSchemaNotFound otherwise.
+// Get returns the user's own schema, or ErrSchemaNotFound otherwise.
 func (s *SchemaStore) Get(ctx context.Context, userID, id string, dek []byte) (Schema, error) {
 	var (
-		nm  sql.NullString
 		enc []byte
 		nd  string
-		bl  bool
 		sp  []byte
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT name, name_encrypted, kind, builtin, spec
+		SELECT name_encrypted, kind, spec
 		FROM import_schemas
-		WHERE id = $1 AND (builtin = true OR user_id = $2)`, id, userID).
-		Scan(&nm, &enc, &nd, &bl, &sp)
+		WHERE id = $1 AND user_id = $2`, id, userID).
+		Scan(&enc, &nd, &sp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Schema{}, ErrSchemaNotFound
 	}
 	if err != nil {
 		return Schema{}, fmt.Errorf("repo: get schema: %w", err)
 	}
-	return schemaFrom(id, nm, enc, nd, bl, sp, dek)
+	return schemaFrom(id, enc, nd, sp, dek)
 }
 
-// Create inserts a custom schema for the user and returns it. The
-// 0001 shape CHECK (custom ⟹ user_id set, name encrypted) holds by
-// construction of the INSERT.
+// Create inserts a custom schema for the user and returns it. The 0018
+// shape CHECK (user_id set, name encrypted) holds by construction of
+// the INSERT.
 func (s *SchemaStore) Create(ctx context.Context, userID string, in SchemaIn, dek []byte) (Schema, error) {
 	if err := validateName(in.Name); err != nil {
 		return Schema{}, fmt.Errorf("repo: %w", err)
@@ -206,39 +178,33 @@ func (s *SchemaStore) Create(ctx context.Context, userID string, in SchemaIn, de
 	}
 	var id string
 	err = s.pool.QueryRow(ctx, `
-		INSERT INTO import_schemas (user_id, name_encrypted, kind, builtin, spec)
-		VALUES ($1, $2, $3, false, $4)
+		INSERT INTO import_schemas (user_id, name_encrypted, kind, spec)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id`, userID, pack, in.Kind, string(in.Spec)).Scan(&id)
 	if err != nil {
 		return Schema{}, fmt.Errorf("repo: create schema: %w", err)
 	}
-	return Schema{ID: id, Name: name, Kind: in.Kind, Builtin: false, Spec: in.Spec}, nil
+	return Schema{ID: id, Name: name, Kind: in.Kind, Spec: in.Spec}, nil
 }
 
-// Update applies the non-nil fields of p to the user's custom schema
-// and returns the updated row. Builtins are read-only
-// (ErrBuiltinReadOnly, pre-checked before any mutation).
+// Update applies the non-nil fields of p to the user's schema and
+// returns the updated row.
 func (s *SchemaStore) Update(ctx context.Context, userID, id string, p SchemaPatch, dek []byte) (Schema, error) {
 	var (
-		nm  sql.NullString
 		enc []byte
 		nd  string
-		bl  bool
 		sp  []byte
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT name, name_encrypted, kind, builtin, spec
+		SELECT name_encrypted, kind, spec
 		FROM import_schemas
-		WHERE id = $1 AND (builtin = true OR user_id = $2)`, id, userID).
-		Scan(&nm, &enc, &nd, &bl, &sp)
+		WHERE id = $1 AND user_id = $2`, id, userID).
+		Scan(&enc, &nd, &sp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Schema{}, ErrSchemaNotFound
 	}
 	if err != nil {
 		return Schema{}, fmt.Errorf("repo: get schema: %w", err)
-	}
-	if bl {
-		return Schema{}, ErrBuiltinReadOnly
 	}
 
 	nameChanged, specChanged := false, false
@@ -263,7 +229,7 @@ func (s *SchemaStore) Update(ctx context.Context, userID, id string, p SchemaPat
 	}
 
 	if !nameChanged && !specChanged {
-		return schemaFrom(id, nm, enc, nd, bl, sp, dek)
+		return schemaFrom(id, enc, nd, sp, dek)
 	}
 
 	sets := make([]string, 0, 3)
@@ -292,23 +258,9 @@ func (s *SchemaStore) Update(ctx context.Context, userID, id string, p SchemaPat
 	return s.Get(ctx, userID, id, dek)
 }
 
-// Delete removes the user's custom schema. Builtins are read-only
-// (ErrBuiltinReadOnly). Accounts pointing at the deleted schema have
-// default_schema_id SET NULL by the 0002 FK.
+// Delete removes the user's schema. Accounts pointing at the deleted
+// schema have default_schema_id SET NULL by the 0002 FK.
 func (s *SchemaStore) Delete(ctx context.Context, userID, id string) error {
-	var bl bool
-	err := s.pool.QueryRow(ctx, `
-		SELECT builtin FROM import_schemas
-		WHERE id = $1 AND (builtin = true OR user_id = $2)`, id, userID).Scan(&bl)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrSchemaNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("repo: check schema: %w", err)
-	}
-	if bl {
-		return ErrBuiltinReadOnly
-	}
 	cmdTag, err := s.pool.Exec(ctx, `
 		DELETE FROM import_schemas
 		WHERE id = $1 AND user_id = $2`, id, userID)
@@ -316,58 +268,7 @@ func (s *SchemaStore) Delete(ctx context.Context, userID, id string) error {
 		return fmt.Errorf("repo: delete schema: %w", err)
 	}
 	if cmdTag.RowsAffected() == 0 {
-		return ErrSchemaNotFound // deleted between check and delete
+		return ErrSchemaNotFound // unknown id or another user's row
 	}
 	return nil
-}
-
-// EnsureBuiltins inserts every builtinSchemas entry that is missing
-// (matched by name+kind), in one transaction under a
-// transaction-scoped advisory lock so concurrent first bootstraps
-// serialize instead of racing the insert (the table has no unique
-// constraint on builtin names — the lock IS the concurrency guard).
-// Returns the number of rows inserted (0 for a populated database).
-func (s *SchemaStore) EnsureBuiltins(ctx context.Context) (int, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("repo: begin ensure builtins: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = tx.Rollback(rctx)
-		}
-	}()
-
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext('ftrk-import-schemas-builtins'))`); err != nil {
-		return 0, fmt.Errorf("repo: advisory lock: %w", err)
-	}
-
-	inserted := 0
-	for _, b := range builtinSchemas {
-		var id string
-		err := tx.QueryRow(ctx, `
-			INSERT INTO import_schemas (name, kind, builtin, spec)
-			SELECT $1, $2, true, $3
-			WHERE NOT EXISTS (
-				SELECT 1 FROM import_schemas
-				WHERE builtin = true AND name = $1 AND kind = $2)
-			RETURNING id`, b.Name, b.Kind, string(b.Spec)).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue // already present
-		}
-		if err != nil {
-			return 0, fmt.Errorf("repo: ensure builtin %q: %w", b.Name, err)
-		}
-		inserted++
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("repo: commit ensure builtins: %w", err)
-	}
-	committed = true
-	return inserted, nil
 }

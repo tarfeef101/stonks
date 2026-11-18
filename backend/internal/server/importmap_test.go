@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"finance-tracker/internal/csvparse"
-	"finance-tracker/internal/repo"
 
 	"github.com/lestrrat-go/jwx/v3/jwk"
 )
@@ -195,14 +194,10 @@ func sixtyRowCSV() []byte {
 
 // TestImportPresets covers GET /imports/presets: the eight builtins in
 // canonical order (specs rebuilt from the preset definitions), then the
-// caller's saved presets — legacy DB builtin rows stay out of the
-// list (the !Builtin filter).
+// caller's saved presets (0018: the DB holds customs only, so there is
+// no builtin filter left to test).
 func TestImportPresets(t *testing.T) {
 	schemas := &memSchemaStore{}
-	// A legacy DB builtin row: excluded by the handler.
-	schemas.rows = append(schemas.rows, memSchemaRow{sc: repo.Schema{
-		ID: nextTestID(), Name: "Legacy Builtin", Kind: "csv", Builtin: true, Spec: json.RawMessage(`{}`),
-	}})
 	customSpec := `{"kind":"csv","map":{"amount":{"index":2}}}`
 	customID := addCustomSchema(schemas, "id-ipm-a", "My Bank", "csv", json.RawMessage(customSpec))
 

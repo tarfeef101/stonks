@@ -9,9 +9,9 @@
 //
 // default_schema_id → import_schemas ON DELETE SET NULL (0002): a
 // deleted schema orphans the setting, never the account. The reference
-// check IS user-scoped here (a schema is valid iff it is a builtin or
-// owned by this user); the FK alone would accept another user's custom
-// schema.
+// check IS user-scoped here (a schema is valid iff it is owned by this
+// user — the table is custom-only since 0018); the FK alone would accept
+// another user's schema.
 package repo
 
 import (
@@ -57,8 +57,8 @@ type Account struct {
 }
 
 // AccountIn is the Create input. Subtype is nil = unset; DefaultSchemaID
-// is nil or "" = none, otherwise a schema that is a builtin or owned by
-// the same user (see package header).
+// is nil or "" = none, otherwise a schema owned by the same user (see
+// package header).
 type AccountIn struct {
 	Name            string
 	Type            string
@@ -113,15 +113,15 @@ func validateAccountFields(in AccountIn) error {
 }
 
 // schemaVisible reports whether the schema exists and is usable by this
-// user: builtins are global, customs are per-user. A missing or
-// other-user's schema looks identical (ErrSchemaNotFound at the call
-// sites) — existence is not disclosed across users.
+// user: schemas are per-user (the table is custom-only since 0018). A
+// missing or other-user's schema looks identical (ErrSchemaNotFound at
+// the call sites) — existence is not disclosed across users.
 func (s *AccountStore) schemaVisible(ctx context.Context, userID, schemaID string) (bool, error) {
 	var ok bool
 	err := s.pool.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM import_schemas
-			WHERE id = $2 AND (builtin = true OR user_id = $1))`,
+			WHERE id = $2 AND user_id = $1)`,
 		userID, schemaID).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("repo: check schema: %w", err)

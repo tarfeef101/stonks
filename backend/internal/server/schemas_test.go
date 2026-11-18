@@ -1,14 +1,12 @@
 // Route tests for the import-schema endpoints (plan steps 3.3 + 4.5):
 // GET /api/v1/import-schemas and POST /api/v1/import-schemas ("save
 // mapping as preset") over the in-memory memSchemaStore, which mirrors
-// the repo.SchemaStore contract the handlers depend on:
-// EnsureBuiltins runs first (and is recorded), the list is the three
-// global builtins (insertion order, standing in for created_at, id)
-// followed by the caller's customs (insertion order), other users'
-// customs never leak in, Get sees builtins and the caller's own rows,
-// and Create names the id, trims the name and stores the spec
-// verbatim. The shared helpers (authHdr, apiErr, nextTestID, doReq)
-// live in accounts_test.go and settings_test.go.
+// the repo.SchemaStore contract the handlers depend on (0018: customs
+// only): the list is the caller's customs in insertion order (standing
+// in for created_at, id), other users' customs never leak in, Get sees
+// the caller's own rows only, and Create names the id, trims the name
+// and stores the spec verbatim. The shared helpers (authHdr, apiErr,
+// nextTestID, doReq) live in accounts_test.go and settings_test.go.
 package server
 
 import (
@@ -25,37 +23,24 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jwk"
 )
 
-// memSchemaRow is one fake-store row; builtins carry an empty userID.
+// memSchemaRow is one fake-store row (0018: customs only — every row
+// belongs to a user).
 type memSchemaRow struct {
 	userID string
 	sc     repo.Schema
 }
 
 // memSchemaStore mirrors the repo.SchemaStore semantics the handlers
-// depend on: EnsureBuiltins is recorded (and its error passed through),
-// List answers the builtins first, then the caller's customs, both in
-// insertion order (the repo orders by builtin DESC, created_at, id),
-// excluding every other user's customs, Get sees builtins and the
-// caller's own rows only, and Create trims the name, mints the id and
-// stores the spec verbatim (Builtin: false).
+// depend on: List answers the caller's customs in insertion order (the
+// repo orders by created_at, id), excluding every other user's rows,
+// Get sees the caller's own rows only, and Create trims the name,
+// mints the id and stores the spec verbatim.
 type memSchemaStore struct {
 	rows []memSchemaRow
 
-	ensureErr error
 	listErr   error
-	ensured   bool
 	getErr    error
 	createErr error
-}
-
-// memBuiltinSchemas mirrors repo.builtinSchemas (unexported — the route
-// tests cannot reference it): the three global presets with empty specs.
-func memBuiltinSchemas() []repo.Schema {
-	return []repo.Schema{
-		{ID: nextTestID(), Name: "Generic CSV", Kind: "csv", Builtin: true, Spec: json.RawMessage(`{}`)},
-		{ID: nextTestID(), Name: "OFX Statement", Kind: "ofx", Builtin: true, Spec: json.RawMessage(`{}`)},
-		{ID: nextTestID(), Name: "Generic JSON", Kind: "json", Builtin: true, Spec: json.RawMessage(`{}`)},
-	}
 }
 
 // addCustomSchema seeds one custom row and returns its minted id.
@@ -63,23 +48,9 @@ func addCustomSchema(m *memSchemaStore, userID, name, kind string, spec json.Raw
 	id := nextTestID()
 	m.rows = append(m.rows, memSchemaRow{
 		userID: userID,
-		sc:     repo.Schema{ID: id, Name: name, Kind: kind, Builtin: false, Spec: spec},
+		sc:     repo.Schema{ID: id, Name: name, Kind: kind, Spec: spec},
 	})
 	return id
-}
-
-func (m *memSchemaStore) EnsureBuiltins(_ context.Context) (int, error) {
-	if m.ensureErr != nil {
-		return 0, m.ensureErr
-	}
-	m.ensured = true
-	n := 0
-	for _, r := range m.rows {
-		if r.sc.Builtin {
-			n++
-		}
-	}
-	return n, nil
 }
 
 func (m *memSchemaStore) List(_ context.Context, userID string, _ []byte) ([]repo.Schema, error) {
@@ -88,12 +59,7 @@ func (m *memSchemaStore) List(_ context.Context, userID string, _ []byte) ([]rep
 	}
 	out := []repo.Schema{}
 	for _, r := range m.rows {
-		if r.sc.Builtin {
-			out = append(out, r.sc)
-		}
-	}
-	for _, r := range m.rows {
-		if !r.sc.Builtin && r.userID == userID {
+		if r.userID == userID {
 			out = append(out, r.sc)
 		}
 	}
@@ -105,7 +71,7 @@ func (m *memSchemaStore) Get(_ context.Context, userID, id string, _ []byte) (re
 		return repo.Schema{}, m.getErr
 	}
 	for _, r := range m.rows {
-		if r.sc.ID == id && (r.sc.Builtin || r.userID == userID) {
+		if r.sc.ID == id && r.userID == userID {
 			return r.sc, nil
 		}
 	}
@@ -117,11 +83,10 @@ func (m *memSchemaStore) Create(_ context.Context, userID string, in repo.Schema
 		return repo.Schema{}, m.createErr
 	}
 	sc := repo.Schema{
-		ID:      nextTestID(),
-		Name:    strings.TrimSpace(in.Name),
-		Kind:    in.Kind,
-		Builtin: false,
-		Spec:    in.Spec,
+		ID:   nextTestID(),
+		Name: strings.TrimSpace(in.Name),
+		Kind: in.Kind,
+		Spec: in.Spec,
 	}
 	m.rows = append(m.rows, memSchemaRow{userID: userID, sc: sc})
 	return sc, nil
@@ -141,16 +106,11 @@ func newSchemasServer(t *testing.T, store SchemaStore) (http.Handler, jwk.Key) {
 	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil), key
 }
 
-// TestImportSchemasList covers the list contract: the three builtins
-// first (builtin: true, empty spec, no bookkeeping timestamps) in seed
-// order, then the caller's customs (builtin: false, spec passed through
-// verbatim) in seed order — and other users' customs excluded. It also
-// proves the handler runs EnsureBuiltins before the list.
+// TestImportSchemasList covers the list contract (0018): the caller's
+// customs only, in seed order (spec passed through verbatim), and
+// other users' customs excluded.
 func TestImportSchemasList(t *testing.T) {
 	store := &memSchemaStore{}
-	for _, b := range memBuiltinSchemas() {
-		store.rows = append(store.rows, memSchemaRow{sc: b})
-	}
 	specA1 := `{"columns":["date","amount"],"kind":"csv"}`
 	specA2 := `{"nested":true}`
 	a1 := addCustomSchema(store, "id-sch-a", "A One", "csv", json.RawMessage(specA1))
@@ -168,66 +128,30 @@ func TestImportSchemasList(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatalf("body is not JSON: %v (%s)", err, out)
 	}
-	if len(rows) != 5 {
-		t.Fatalf("A's list = %d rows, want 5 (3 builtins + A's 2 customs; B's excluded)", len(rows))
-	}
-	if !store.ensured {
-		t.Fatal("list answered without running EnsureBuiltins first")
+	if len(rows) != 2 {
+		t.Fatalf("A's list = %d rows, want 2 (A's 2 customs; B's excluded)", len(rows))
 	}
 
-	// Builtins first, in seed order, with an empty spec and no
-	// bookkeeping timestamps.
-	wantBuiltins := []struct {
-		name string
-		kind string
-	}{
-		{"Generic CSV", "csv"},
-		{"OFX Statement", "ofx"},
-		{"Generic JSON", "json"},
-	}
-	for i, want := range wantBuiltins {
-		row := rows[i]
-		if row["name"] != want.name || row["kind"] != want.kind {
-			t.Errorf("row %d = %v/%v, want %s/%s", i, row["name"], row["kind"], want.name, want.kind)
-		}
-		if row["builtin"] != true {
-			t.Errorf("row %d builtin = %v, want true", i, row["builtin"])
-		}
-		spec, ok := row["spec"].(map[string]any)
-		if !ok || len(spec) != 0 {
-			t.Errorf("row %d spec = %v, want an empty object", i, row["spec"])
-		}
-		if _, ok := row["created_at"]; ok {
-			t.Errorf("row %d carries created_at (bookkeeping stays server-side)", i)
-		}
-		if _, ok := row["updated_at"]; ok {
-			t.Errorf("row %d carries updated_at (bookkeeping stays server-side)", i)
-		}
-	}
-
-	// A's customs after the builtins, in seed order, spec verbatim.
-	if rows[3]["id"] != a1 || rows[4]["id"] != a2 {
-		t.Fatalf("customs = [%v, %v], want [%s, %s] after the builtins", rows[3]["id"], rows[4]["id"], a1, a2)
+	// A's customs in seed order, spec verbatim.
+	if rows[0]["id"] != a1 || rows[1]["id"] != a2 {
+		t.Fatalf("customs = [%v, %v], want [%s, %s]", rows[0]["id"], rows[1]["id"], a1, a2)
 	}
 	for i, wantSpec := range []string{specA1, specA2} {
-		row := rows[3+i]
-		if row["builtin"] != false {
-			t.Errorf("row %d builtin = %v, want false", 3+i, row["builtin"])
-		}
+		row := rows[i]
 		got, ok := row["spec"].(map[string]any)
 		if !ok {
-			t.Fatalf("row %d spec = %v, want an object", 3+i, row["spec"])
+			t.Fatalf("row %d spec = %v, want an object", i, row["spec"])
 		}
 		var want map[string]any
 		if err := json.Unmarshal([]byte(wantSpec), &want); err != nil {
 			t.Fatalf("test bug: bad want spec: %v", err)
 		}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("row %d spec = %v, want the verbatim document %s", 3+i, got, wantSpec)
+			t.Errorf("row %d spec = %v, want the verbatim document %s", i, got, wantSpec)
 		}
 	}
 
-	// B sees the builtins plus only its own custom.
+	// B sees only its own custom.
 	code, out = doReq(t, h, http.MethodGet, "/api/v1/import-schemas", "", hdrB)
 	if code != http.StatusOK {
 		t.Fatalf("B: status = %d, want 200 (body %s)", code, out)
@@ -236,35 +160,18 @@ func TestImportSchemasList(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &bRows); err != nil {
 		t.Fatalf("body is not JSON: %v (%s)", err, out)
 	}
-	if len(bRows) != 4 {
-		t.Fatalf("B's list = %d rows, want 4 (3 builtins + B's custom; A's excluded)", len(bRows))
+	if len(bRows) != 1 {
+		t.Fatalf("B's list = %d rows, want 1 (B's custom; A's excluded)", len(bRows))
 	}
-	if bRows[3]["id"] != b1 {
-		t.Errorf("B's custom = %v, want %s last", bRows[3]["id"], b1)
+	if bRows[0]["id"] != b1 {
+		t.Errorf("B's custom = %v, want %s", bRows[0]["id"], b1)
 	}
 }
 
-// TestImportSchemasErrors covers the two 500s: an EnsureBuiltins
-// failure (before the list) and a List failure (after the ensure, which
-// still ran).
+// TestImportSchemasErrors covers the list-failure 500 (0018 removed
+// the EnsureBuiltins step the list used to run first).
 func TestImportSchemasErrors(t *testing.T) {
-	t.Run("ensure failure is 500", func(t *testing.T) {
-		store := &memSchemaStore{ensureErr: errors.New("boom")}
-		h, key := newSchemasServer(t, store)
-		hdr := authHdr(mintIdentityToken(t, key, "sch-e", "e@localhost", "E", "e"))
-		code, out := doReq(t, h, http.MethodGet, "/api/v1/import-schemas", "", hdr)
-		if code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500 (body %s)", code, out)
-		}
-		if c, m := apiErr(t, out); c != codeInternal || m != "builtin schemas could not be ensured" {
-			t.Errorf("error = %s/%q, want %s/builtin schemas could not be ensured", c, m, codeInternal)
-		}
-		if store.ensured {
-			t.Error("store marked ensured despite the failure")
-		}
-	})
-
-	t.Run("list failure is 500 after the ensure ran", func(t *testing.T) {
+	t.Run("list failure is 500", func(t *testing.T) {
 		store := &memSchemaStore{listErr: errors.New("boom")}
 		h, key := newSchemasServer(t, store)
 		hdr := authHdr(mintIdentityToken(t, key, "sch-l", "l@localhost", "L", "l"))
@@ -274,9 +181,6 @@ func TestImportSchemasErrors(t *testing.T) {
 		}
 		if c, m := apiErr(t, out); c != codeInternal || m != "schema operation failed" {
 			t.Errorf("error = %s/%q, want %s/schema operation failed", c, m, codeInternal)
-		}
-		if !store.ensured {
-			t.Error("list failure, but EnsureBuiltins did not run first")
 		}
 	})
 }
@@ -331,8 +235,8 @@ func TestImportSchemasCreate(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &row); err != nil {
 			t.Fatalf("decode: %v (body %s)", err, out)
 		}
-		if row.Name != "Padded Name" || row.Kind != "csv" || row.Builtin {
-			t.Errorf("created row = %+v, want trimmed name, kind csv, builtin false", row)
+		if row.Name != "Padded Name" || row.Kind != "csv" {
+			t.Errorf("created row = %+v, want trimmed name, kind csv", row)
 		}
 		if string(row.Spec) != validSpec {
 			t.Errorf("spec = %s, want the sent bytes verbatim", row.Spec)
@@ -352,7 +256,7 @@ func TestImportSchemasCreate(t *testing.T) {
 		}
 		found := false
 		for _, r := range rows {
-			if r.ID == row.ID && r.Name == "Padded Name" && !r.Builtin {
+			if r.ID == row.ID && r.Name == "Padded Name" {
 				found = true
 			}
 		}

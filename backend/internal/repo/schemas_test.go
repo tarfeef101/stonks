@@ -1,9 +1,9 @@
 // Schema store tests (plan step 2.5b): one shared postgres:18
-// testcontainer (newTestEnv) with subtests covering builtin seeding +
-// read-only, custom CRUD round trips, validation, and per-user
-// scoping. The concurrency guard — the advisory lock, which is the
-// ONLY guard (no unique constraint on builtin names) — is proven in
-// TestEnsureBuiltinsRace with a second, fresh env.
+// testcontainer (newTestEnv) with subtests covering the custom CRUD
+// round trips, validation, and per-user scoping. Since 0018 the table
+// is customs only (the global builtins are deleted; the code builtins
+// in internal/presets are the sole preset source, D-029), so there is
+// no seeding surface to test here.
 package repo
 
 import (
@@ -11,7 +11,6 @@ import (
 	"errors"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -37,93 +36,13 @@ func TestSchemaStore(t *testing.T) {
 	ctx := env.ctx
 	aid, bid := a.row.ID, b.row.ID
 
-	t.Run("ensure builtins idempotent, visible to all users", func(t *testing.T) {
-		n, err := store.EnsureBuiltins(ctx)
-		if err != nil {
-			t.Fatalf("ensure: %v", err)
-		}
-		if n != 3 {
-			t.Fatalf("first ensure: want 3 inserted, got %d", n)
-		}
-		// Re-ensuring is a no-op: the (name, kind) pairs are all present.
-		if n, err = store.EnsureBuiltins(ctx); err != nil || n != 0 {
-			t.Fatalf("re-ensure: want 0 inserted, got %d (err %v)", n, err)
-		}
-
-		list, err := store.List(ctx, aid, a.dek)
-		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		if len(list) != 3 {
-			t.Fatalf("rows: want 3 builtins, got %d", len(list))
-		}
-		want := map[string]string{"Generic CSV": "csv", "OFX Statement": "ofx", "Generic JSON": "json"}
-		var ids []string
-		for _, s := range list {
-			if !s.Builtin {
-				t.Fatalf("unexpected custom in freshly seeded list: %+v", s)
-			}
-			if got, ok := want[s.Name]; !ok || got != s.Kind {
-				t.Fatalf("builtin: want %q kind %q, got %q kind %q", s.Name, want[s.Name], s.Name, s.Kind)
-			}
-			if string(s.Spec) != "{}" {
-				t.Fatalf("builtin %q spec: want {}, got %s", s.Name, s.Spec)
-			}
-			ids = append(ids, s.ID)
-		}
-		// The SAME 3 rows are visible to the other user (builtins are
-		// global; the ordering is deterministic for a fixed row set).
-		lb, err := store.List(ctx, bid, b.dek)
-		if err != nil {
-			t.Fatalf("list b: %v", err)
-		}
-		if len(lb) != 3 {
-			t.Fatalf("b: want 3 rows, got %d", len(lb))
-		}
-		for i, s := range lb {
-			if s.ID != ids[i] {
-				t.Fatalf("b sees different builtins: %+v", lb)
-			}
-		}
-	})
-
-	t.Run("builtins are read-only", func(t *testing.T) {
-		list, err := store.List(ctx, aid, a.dek)
-		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		var builtinID string
-		for _, s := range list {
-			if s.Builtin {
-				builtinID = s.ID
-				break
-			}
-		}
-		if builtinID == "" {
-			t.Fatal("no builtin found")
-		}
-		if _, err := store.Update(ctx, aid, builtinID, SchemaPatch{Name: strPtr("Hacked")}, a.dek); !errors.Is(err, ErrBuiltinReadOnly) {
-			t.Fatalf("update builtin: want ErrBuiltinReadOnly, got %v", err)
-		}
-		if err := store.Delete(ctx, aid, builtinID); !errors.Is(err, ErrBuiltinReadOnly) {
-			t.Fatalf("delete builtin: want ErrBuiltinReadOnly, got %v", err)
-		}
-		// Read-only for EVERY user, not just the one who seeded them.
-		if _, err := store.Update(ctx, bid, builtinID, SchemaPatch{Name: strPtr("Hacked")}, b.dek); !errors.Is(err, ErrBuiltinReadOnly) {
-			t.Fatalf("b updates builtin: want ErrBuiltinReadOnly, got %v", err)
-		}
-		if got, err := store.Get(ctx, aid, builtinID, a.dek); err != nil || got.Name == "Hacked" {
-			t.Fatalf("builtin must be untouched: %+v (err %v)", got, err)
-		}
-	})
-
 	t.Run("custom crud round trip", func(t *testing.T) {
 		spec := json.RawMessage(`{"columns":{"date":"1"}}`)
 		sc, err := store.Create(ctx, aid, SchemaIn{Name: "  A-import  ", Kind: "csv", Spec: spec}, a.dek)
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if sc.Name != "A-import" || sc.Kind != "csv" || sc.Builtin || string(sc.Spec) != `{"columns":{"date":"1"}}` {
+		if sc.Name != "A-import" || sc.Kind != "csv" || string(sc.Spec) != `{"columns":{"date":"1"}}` {
 			t.Fatalf("created: %+v", sc)
 		}
 		got, err := store.Get(ctx, aid, sc.ID, a.dek)
@@ -132,17 +51,18 @@ func TestSchemaStore(t *testing.T) {
 		}
 		// specEqual: got came back from the DB, which normalizes jsonb
 		// whitespace; sc is Create's in-memory return.
-		if got.Name != sc.Name || got.Kind != sc.Kind || got.Builtin != sc.Builtin || !specEqual(got.Spec, sc.Spec) {
+		if got.Name != sc.Name || got.Kind != sc.Kind || !specEqual(got.Spec, sc.Spec) {
 			t.Fatalf("get: want %+v, got %+v", sc, got)
 		}
 
-		// List: builtins first, the user's customs after.
+		// List: the user's customs only (customs only since 0018), in
+		// created_at, id order.
 		list, err := store.List(ctx, aid, a.dek)
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
-		if len(list) != 4 || list[3].ID != sc.ID {
-			t.Fatalf("list: want 3 builtins then the custom, got %+v", list)
+		if len(list) != 1 || list[0].ID != sc.ID {
+			t.Fatalf("list: want the single custom, got %+v", list)
 		}
 
 		// Update name + spec. kind is not in SchemaPatch — it is
@@ -232,55 +152,6 @@ func TestSchemaStore(t *testing.T) {
 			if s.ID == mine.ID {
 				t.Fatal("b's list contains a's schema")
 			}
-			if !s.Builtin {
-				t.Fatalf("b sees a non-builtin schema: %+v", s)
-			}
 		}
 	})
-}
-
-// TestEnsureBuiltinsRace (own env: the race only exists on an empty
-// database) proves the advisory lock: two concurrent first bootstraps
-// must insert exactly the 3 builtins. Without the lock the
-// check-then-insert could race into 6 rows — the table has no unique
-// constraint on builtin names, so the lock IS the concurrency guard.
-func TestEnsureBuiltinsRace(t *testing.T) {
-	env := newTestEnv(t, "race-a")
-	store := NewSchemaStore(env.pool)
-	if store == nil {
-		t.Fatal("NewSchemaStore(nil-check): non-nil pool must give a store")
-	}
-	ctx := env.ctx
-	a := env.user(t, "race-a")
-
-	const goroutines = 2
-	counts := make([]int, goroutines)
-	errs := make([]error, goroutines)
-	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			counts[i], errs[i] = store.EnsureBuiltins(ctx)
-		}(i)
-	}
-	wg.Wait()
-
-	total := 0
-	for i := range errs {
-		if errs[i] != nil {
-			t.Fatalf("goroutine %d: %v", i, errs[i])
-		}
-		total += counts[i]
-	}
-	if total != 3 {
-		t.Fatalf("concurrent seed: want 3 rows inserted in total, got %d (lock race?)", total)
-	}
-	list, err := store.List(ctx, a.row.ID, a.dek)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(list) != 3 {
-		t.Fatalf("builtins after race: want exactly 3, got %d", len(list))
-	}
 }

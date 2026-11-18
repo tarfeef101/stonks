@@ -90,10 +90,10 @@ func New(cfg Config) (*Verifier, error) {
 // discovery; unit tests use it to avoid any network access.
 func NewWithKeyFunc(cfg Config, keyFunc KeyFunc) (*Verifier, error) {
 	if cfg.Issuer == "" {
-		return nil, errors.New("authn: issuer is required (AUTH0_ISSUER)")
+		return nil, errors.New("authn: issuer is required (OIDC_ISSUER)")
 	}
 	if cfg.Audience == "" {
-		return nil, errors.New("authn: audience is required (AUTH0_AUDIENCE)")
+		return nil, errors.New("authn: audience is required (OIDC_AUDIENCE)")
 	}
 	if keyFunc == nil {
 		return nil, errors.New("authn: key func is required")

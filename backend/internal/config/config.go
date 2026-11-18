@@ -50,19 +50,21 @@ type Config struct {
 	// reports not-ready.
 	DatabaseURL string
 
-	// Auth0Issuer / Auth0Audience / Auth0ClientID / Auth0ClientSecret
-	// identify the OIDC issuer (Keycloak dev realm in iteration 1, an
-	// Auth0 tenant later — same variable names, plan §6). Auth0Issuer is
-	// the token's `iss` value (browser horizon); Auth0Audience is the
-	// required access-token audience — in dev that is the realm's
-	// audience-mapper value, NOT the client id (D-013, D-021).
-	Auth0Issuer       string
-	Auth0Audience     string
-	Auth0ClientID     string
-	Auth0ClientSecret string
+	// OIDCIssuer / OIDCAudience / OIDCClientID / OIDCClientSecret
+	// identify the OIDC IdP. The names are IdP-agnostic (D-030): the
+	// Keycloak dev realm in iteration 1 and an Auth0 tenant in prod
+	// satisfy the same contract, so only the values differ (plan §6).
+	// OIDCIssuer is the token's `iss` value (browser horizon);
+	// OIDCAudience is the required access-token audience — in dev that
+	// is the realm's audience-mapper value, NOT the client id (D-013,
+	// D-021).
+	OIDCIssuer       string
+	OIDCAudience     string
+	OIDCClientID     string
+	OIDCClientSecret string
 
 	// OIDCDiscoveryURL is the horizon the verifier runs OIDC discovery
-	// (JWKS) against. Empty = Auth0Issuer (one-horizon IdPs, e.g. Auth0);
+	// (JWKS) against. Empty = OIDCIssuer (one-horizon IdPs, e.g. Auth0);
 	// set it when the token's `iss` is not reachable from the backend
 	// (dev split horizon, D-021).
 	OIDCDiscoveryURL string
@@ -84,15 +86,15 @@ func Load() (*Config, error) {
 
 func load(getenv func(string) string) (*Config, error) {
 	cfg := &Config{
-		Port:              8080,
-		DatabaseURL:       getenv("DATABASE_URL"),
-		Auth0Issuer:       getenv("AUTH0_ISSUER"),
-		Auth0Audience:     getenv("AUTH0_AUDIENCE"),
-		Auth0ClientID:     getenv("AUTH0_CLIENT_ID"),
-		Auth0ClientSecret: getenv("AUTH0_CLIENT_SECRET"),
-		OIDCDiscoveryURL:  getenv("OIDC_DISCOVERY_URL"),
-		NRLicenseKey:      getenv("NR_LICENSE_KEY"),
-		KEK:               getenv("KEK"),
+		Port:             8080,
+		DatabaseURL:      getenv("DATABASE_URL"),
+		OIDCIssuer:       getenv("OIDC_ISSUER"),
+		OIDCAudience:     getenv("OIDC_AUDIENCE"),
+		OIDCClientID:     getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret: getenv("OIDC_CLIENT_SECRET"),
+		OIDCDiscoveryURL: getenv("OIDC_DISCOVERY_URL"),
+		NRLicenseKey:     getenv("NR_LICENSE_KEY"),
+		KEK:              getenv("KEK"),
 		SMTP: SMTP{
 			Host:      getenv("SMTP_HOST"),
 			User:      getenv("SMTP_USER"),

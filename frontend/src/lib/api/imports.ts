@@ -88,12 +88,13 @@ export interface Account {
 	default_schema_id: string | null;
 }
 
-/** A saved preset (backend schemaOut) — the 201 of "save as preset". */
+/** A saved preset (backend schemaOut) — the 201 of "save as preset".
+ * Customs only since 0018: no builtin flag (the code presets carry
+ * theirs on the /imports/presets response). */
 export interface ImportSchema {
 	id: string;
 	name: string;
 	kind: string;
-	builtin: boolean;
 	spec: unknown;
 }
 

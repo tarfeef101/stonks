@@ -17,11 +17,11 @@ declare global {
 		interface Environment {
 			Public: {
 				/** OIDC issuer URL — dev: Keycloak realm 'finance'. */
-				PUBLIC_AUTH0_ISSUER?: string;
+				PUBLIC_OIDC_ISSUER?: string;
 				/** Public SPA client id — dev: 'finance-spa'. */
-				PUBLIC_AUTH0_CLIENT_ID?: string;
+				PUBLIC_OIDC_CLIENT_ID?: string;
 				/** Access-token audience — frontend-specific, default 'finance-api'. */
-				PUBLIC_AUTH0_AUDIENCE?: string;
+				PUBLIC_OIDC_AUDIENCE?: string;
 			};
 		}
 	}

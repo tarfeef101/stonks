@@ -28,31 +28,31 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("SMTP.TLSPolicy = %q, want %q", cfg.SMTP.TLSPolicy, "starttls")
 	}
 	if cfg.DatabaseURL != "" || cfg.NRLicenseKey != "" ||
-		cfg.Auth0Audience != "" || cfg.OIDCDiscoveryURL != "" {
+		cfg.OIDCAudience != "" || cfg.OIDCDiscoveryURL != "" {
 		t.Errorf("expected zero-value secrets, got %+v", cfg)
 	}
 }
 
 func TestLoadFull(t *testing.T) {
 	env := map[string]string{
-		"PORT":                "9090",
-		"DATABASE_URL":        "postgres://u:p@localhost:5432/fin?sslmode=disable",
-		"AUTH0_ISSUER":        "https://issuer.example/",
-		"AUTH0_AUDIENCE":      "aud.example",
-		"AUTH0_CLIENT_ID":     "cid",
-		"AUTH0_CLIENT_SECRET": "secret",
-		"OIDC_DISCOVERY_URL":  "http://keycloak:8080/realms/finance",
-		"NR_LICENSE_KEY":      "lic",
-		"KEK":                 strings.Repeat("ab", 32),
-		"SMTP_HOST":           "mailpit",
-		"SMTP_PORT":           "1025",
-		"SMTP_USER":           "user",
-		"SMTP_PASS":           "pass",
-		"SMTP_FROM":           "finance@example.com",
-		"SMTP_TLS_POLICY":     "none",
-		"LLM_BASE_URL":        "http://llama:8080/v1",
-		"LLM_API_KEY":         "key",
-		"LLM_MODEL":           "model",
+		"PORT":               "9090",
+		"DATABASE_URL":       "postgres://u:p@localhost:5432/fin?sslmode=disable",
+		"OIDC_ISSUER":        "https://issuer.example/",
+		"OIDC_AUDIENCE":      "aud.example",
+		"OIDC_CLIENT_ID":     "cid",
+		"OIDC_CLIENT_SECRET": "secret",
+		"OIDC_DISCOVERY_URL": "http://keycloak:8080/realms/finance",
+		"NR_LICENSE_KEY":     "lic",
+		"KEK":                strings.Repeat("ab", 32),
+		"SMTP_HOST":          "mailpit",
+		"SMTP_PORT":          "1025",
+		"SMTP_USER":          "user",
+		"SMTP_PASS":          "pass",
+		"SMTP_FROM":          "finance@example.com",
+		"SMTP_TLS_POLICY":    "none",
+		"LLM_BASE_URL":       "http://llama:8080/v1",
+		"LLM_API_KEY":        "key",
+		"LLM_MODEL":          "model",
 	}
 	cfg, err := load(func(k string) string { return env[k] })
 	if err != nil {
@@ -64,9 +64,9 @@ func TestLoadFull(t *testing.T) {
 	if cfg.DatabaseURL != env["DATABASE_URL"] {
 		t.Errorf("DatabaseURL = %q", cfg.DatabaseURL)
 	}
-	if cfg.Auth0Issuer != env["AUTH0_ISSUER"] || cfg.Auth0Audience != env["AUTH0_AUDIENCE"] ||
-		cfg.Auth0ClientID != env["AUTH0_CLIENT_ID"] || cfg.Auth0ClientSecret != env["AUTH0_CLIENT_SECRET"] {
-		t.Errorf("Auth0 vars not loaded: %+v", cfg)
+	if cfg.OIDCIssuer != env["OIDC_ISSUER"] || cfg.OIDCAudience != env["OIDC_AUDIENCE"] ||
+		cfg.OIDCClientID != env["OIDC_CLIENT_ID"] || cfg.OIDCClientSecret != env["OIDC_CLIENT_SECRET"] {
+		t.Errorf("OIDC vars not loaded: %+v", cfg)
 	}
 	if cfg.OIDCDiscoveryURL != env["OIDC_DISCOVERY_URL"] {
 		t.Errorf("OIDCDiscoveryURL = %q, want %q", cfg.OIDCDiscoveryURL, env["OIDC_DISCOVERY_URL"])

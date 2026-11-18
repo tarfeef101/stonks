@@ -1,8 +1,9 @@
 // Budget store tests (plan step 2.6, second half of the 2.6 split):
 // one shared postgres:18 testcontainer (newTestEnv) with subtests
-// covering the CRUD round trip (name + targets blob decrypt),
-// validation (period vocabulary, targets shape, per-user category keys,
-// value range), the no-op update rule, and per-user isolation.
+// covering the CRUD round trip (name decrypt + targets hydrated from
+// the budget_targets child table, 0018), validation (period vocabulary,
+// targets shape, per-user category keys, value range), the no-op
+// update rule, the child-row rewrite rule, and per-user isolation.
 package repo
 
 import (
@@ -93,6 +94,37 @@ func TestBudgetStore(t *testing.T) {
 		}
 		if !jsonDocsEqual(got.Targets, in.Targets) {
 			t.Fatalf("get targets: want %s, got %s", in.Targets, got.Targets)
+		}
+		if err := bud.Delete(ctx, aid, created.ID); err != nil {
+			t.Fatalf("cleanup delete: %v", err)
+		}
+	})
+
+	t.Run("hydrate preserves canonical 2-decimal text", func(t *testing.T) {
+		inTargets := targets(map[string]any{fa.ID: 60.0, fu.ID: 0.1})
+		created, err := bud.Create(ctx, aid, BudgetIn{
+			Name: "Canonical", Period: "month",
+			Targets: inTargets,
+		}, a.dek)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		got, err := bud.Get(ctx, aid, created.ID, a.dek)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		// The document is built from the PG numeric text (target::text),
+		// not from a float64 re-encoding: 60 comes back as 60.00, 0.1 as
+		// 0.10. The values are unquoted numbers; the keys are the uuids.
+		s := string(got.Targets)
+		if !strings.Contains(s, ":60.00") {
+			t.Fatalf("60 must come back as 60.00, got %s", s)
+		}
+		if !strings.Contains(s, ":0.10") {
+			t.Fatalf("0.1 must come back as 0.10, got %s", s)
+		}
+		if !jsonDocsEqual(got.Targets, inTargets) {
+			t.Fatalf("targets: want %s, got %s", inTargets, s)
 		}
 		if err := bud.Delete(ctx, aid, created.ID); err != nil {
 			t.Fatalf("cleanup delete: %v", err)
@@ -220,11 +252,9 @@ func TestBudgetStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		// Same name (re-trimmed), same active, byte-identical targets.
-		sameTargets := targets(map[string]any{fa.ID: 5})
+		// Same name (re-trimmed), same active, no targets: a no-op.
 		got, err := bud.Update(ctx, aid, created.ID, BudgetPatch{
 			Name: strPtr(" Stable "), Active: boolPtr(true),
-			Targets: rawPtr(sameTargets),
 		}, a.dek)
 		if err != nil {
 			t.Fatalf("no-op update: %v", err)
@@ -234,6 +264,61 @@ func TestBudgetStore(t *testing.T) {
 		}
 		if got.Name != "Stable" || !got.Active || !jsonDocsEqual(got.Targets, targets(map[string]any{fa.ID: 5})) {
 			t.Fatalf("row must be unchanged: %+v", got)
+		}
+		if err := bud.Delete(ctx, aid, created.ID); err != nil {
+			t.Fatalf("cleanup delete: %v", err)
+		}
+	})
+
+	t.Run("targets patch always rewrites child rows", func(t *testing.T) {
+		created, err := bud.Create(ctx, aid, BudgetIn{
+			Name: "Rewrite", Period: "month",
+			Targets: targets(map[string]any{fa.ID: 5}),
+		}, a.dek)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		// The same document re-sent: no diffing (0018 model) — the child
+		// rows are DELETEd and re-INSERTed, and updated_at moves.
+		got, err := bud.Update(ctx, aid, created.ID, BudgetPatch{
+			Targets: rawPtr(targets(map[string]any{fa.ID: 5})),
+		}, a.dek)
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if !got.UpdatedAt.After(created.UpdatedAt) {
+			t.Fatalf("targets rewrite must bump updated_at: %v -> %v", created.UpdatedAt, got.UpdatedAt)
+		}
+		if !jsonDocsEqual(got.Targets, targets(map[string]any{fa.ID: 5})) {
+			t.Fatalf("targets: %s", got.Targets)
+		}
+		// The child table holds exactly the expected single row.
+		var n int
+		if err := env.pool.QueryRow(ctx,
+			"SELECT count(*) FROM budget_targets WHERE budget_id = $1",
+			created.ID).Scan(&n); err != nil {
+			t.Fatalf("count targets: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("child rows: got %d, want 1", n)
+		}
+		// ...and a genuinely different set replaces the old one.
+		got, err = bud.Update(ctx, aid, created.ID, BudgetPatch{
+			Targets: rawPtr(targets(map[string]any{fu.ID: 6})),
+		}, a.dek)
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if !jsonDocsEqual(got.Targets, targets(map[string]any{fu.ID: 6})) {
+			t.Fatalf("targets: %s", got.Targets)
+		}
+		if err := env.pool.QueryRow(ctx,
+			"SELECT count(*) FROM budget_targets WHERE budget_id = $1 AND category_id = $2",
+			created.ID, fa.ID).Scan(&n); err != nil {
+			t.Fatalf("count old row: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("old child row must be gone: got %d", n)
 		}
 		if err := bud.Delete(ctx, aid, created.ID); err != nil {
 			t.Fatalf("cleanup delete: %v", err)
@@ -323,9 +408,10 @@ func TestBudgetStore(t *testing.T) {
 
 // TestBudgetActiveTargets covers the summary's narrow select: only the
 // ACTIVE budgets of the requested period come back, names are never
-// decrypted (not selected at all), targets are decrypted, order is
-// created_at, id, and foreign users' rows never leak. One fresh
-// testcontainer (the per-Test-fn convention).
+// decrypted (not selected at all), targets are hydrated from the
+// budget_targets child table (0018), order is created_at, id, and
+// foreign users' rows never leak. One fresh testcontainer (the per-Test-
+// fn convention).
 func TestBudgetActiveTargets(t *testing.T) {
 	env := newTestEnv(t, "budx-a", "budx-b")
 	cat := NewCategoryStore(env.pool)
@@ -466,39 +552,42 @@ func TestBudgetValidateTargetsPure(t *testing.T) {
 	// The shape rules (no DB): uuid keys, numeric non-negative values.
 	// The keys are syntactically valid uuids — ownership (whether the
 	// key is the caller's category) is the DB half, tested in
-	// TestBudgetStore.
+	// TestBudgetStore. The valid cases also pin the return: the document
+	// parsed to category id -> numeric LITERAL TEXT (json.Number keeps
+	// the source digits), which Create/Update insert unquoted.
 	uk := "3f2c1a9e-6b4d-4c8a-9e2f-1d5b7a3c8e0f"
 	cases := []struct {
 		name    string
 		targets string
 		wantErr bool
+		wantVal string // json.Number text when the case is valid
 	}{
-		{"valid object", `{"` + uk + `": 1}`, false},
-		{"zero value ok", `{"` + uk + `": 0}`, false},
-		{"fractional ok", `{"` + uk + `": 10.25}`, false},
-		{"not JSON", `{`, true},
-		{"array", `[1]`, true},
-		{"scalar", `"x"`, true},
-		{"empty object", `{}`, true},
-		{"bad key", `{"nope": 1}`, true},
-		{"short key", `{"a-b": 1}`, true},
-		{"string value", `{"` + uk + `": "1"}`, true},
-		{"null value", `{"` + uk + `": null}`, true},
-		{"bool value", `{"` + uk + `": true}`, true},
-		{"negative", `{"` + uk + `": -0.01}`, true},
-		{"above ceiling", `{"` + uk + `": 1e12}`, true},
+		{"valid object", `{"` + uk + `": 1}`, false, "1"},
+		{"zero value ok", `{"` + uk + `": 0}`, false, "0"},
+		{"fractional ok", `{"` + uk + `": 10.25}`, false, "10.25"},
+		{"not JSON", `{`, true, ""},
+		{"array", `[1]`, true, ""},
+		{"scalar", `"x"`, true, ""},
+		{"empty object", `{}`, true, ""},
+		{"bad key", `{"nope": 1}`, true, ""},
+		{"short key", `{"a-b": 1}`, true, ""},
+		{"string value", `{"` + uk + `": "1"}`, true, ""},
+		{"null value", `{"` + uk + `": null}`, true, ""},
+		{"bool value", `{"` + uk + `": true}`, true, ""},
+		{"negative", `{"` + uk + `": -0.01}`, true, ""},
+		{"above ceiling", `{"` + uk + `": 1e12}`, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			keys, err := validateTargetsShape(json.RawMessage(tc.targets))
+			m, err := validateTargetsShape(json.RawMessage(tc.targets))
 			if tc.wantErr && err == nil {
 				t.Fatal("expected an error, got nil")
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("got %v, want nil", err)
 			}
-			if !tc.wantErr && (len(keys) != 1 || keys[0] != uk) {
-				t.Fatalf("keys: got %v, want [%s]", keys, uk)
+			if !tc.wantErr && (len(m) != 1 || m[uk] != json.Number(tc.wantVal)) {
+				t.Fatalf("targets: got %v, want map[%s: %s]", m, uk, tc.wantVal)
 			}
 		})
 	}

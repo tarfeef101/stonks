@@ -6,14 +6,14 @@
 // /authorize, /oauth/token and /v2/logout paths (no endpoint override) and
 // normalises the expected issuer to https://, so it cannot talk to the local
 // Keycloak dev IdP (plan §0 bars dev HTTPS). This wrapper is
-// issuer-agnostic via plain OIDC discovery: pointing PUBLIC_AUTH0_ISSUER /
-// PUBLIC_AUTH0_CLIENT_ID at a real Auth0 tenant later is env-only (Auth0
+// issuer-agnostic via plain OIDC discovery: pointing PUBLIC_OIDC_ISSUER /
+// PUBLIC_OIDC_CLIENT_ID at a real Auth0 tenant later is env-only (Auth0
 // serves the same .well-known discovery document).
 //
 // Env (build-time, PUBLIC_ prefix — plan §6 canonical names):
-//   PUBLIC_AUTH0_ISSUER     issuer URL (dev: Keycloak realm 'finance')
-//   PUBLIC_AUTH0_CLIENT_ID  public SPA client id (realm: 'finance-spa')
-//   PUBLIC_AUTH0_AUDIENCE   access-token audience — frontend-specific
+//   PUBLIC_OIDC_ISSUER      issuer URL (dev: Keycloak realm 'finance')
+//   PUBLIC_OIDC_CLIENT_ID   public SPA client id (realm: 'finance-spa')
+//   PUBLIC_OIDC_AUDIENCE    access-token audience — frontend-specific
 //                           extension of the §6 names (the realm's audience
 //                           mapper adds it to the access token); default
 //                           'finance-api'
@@ -30,9 +30,9 @@ import { writable } from 'svelte/store';
 import { UserManager, WebStorageStateStore, type User } from 'oidc-client-ts';
 import { setTokenProvider, setUnauthorizedHandler } from '#lib/api/client';
 
-const ISSUER = import.meta.env.PUBLIC_AUTH0_ISSUER ?? 'http://localhost:18081/realms/finance';
-const CLIENT_ID = import.meta.env.PUBLIC_AUTH0_CLIENT_ID ?? 'finance-spa';
-const AUDIENCE = import.meta.env.PUBLIC_AUTH0_AUDIENCE ?? 'finance-api';
+const ISSUER = import.meta.env.PUBLIC_OIDC_ISSUER ?? 'http://localhost:18081/realms/finance';
+const CLIENT_ID = import.meta.env.PUBLIC_OIDC_CLIENT_ID ?? 'finance-spa';
+const AUDIENCE = import.meta.env.PUBLIC_OIDC_AUDIENCE ?? 'finance-api';
 
 /** Reactive current user (null when signed out). */
 export const user = writable<User | null>(null);

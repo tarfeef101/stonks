@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"finance-tracker/internal/reporttypes"
 )
 
 // Period is the report period kind.
@@ -173,20 +175,13 @@ type Data struct {
 	CategoryNames      map[string]string
 }
 
-// Row is one transaction row. TopMerchants reads only Description (the
-// decrypted memo) and Amount (the canonical 2-decimal signed amount,
-// negative = spend); the collector's categorySpend also reads
-// CategoryID (the row's category, "" = uncategorized — a NULL or
-// deleted category), Date (the row's date_posted at UTC date precision;
-// zero = no FX lookup) and Currency (the account's ISO-4217 code; empty
-// = no FX conversion).
-type Row struct {
-	Description string
-	Amount      string
-	CategoryID  string
-	Date        time.Time
-	Currency    string
-}
+// Row is one transaction row at the report boundary. The definition
+// lives in internal/reporttypes (shared with the schedule package's
+// adapters, so the boundary shape is defined exactly once); see
+// reporttypes.Row for the field contract. Re-exported as an alias so
+// the collector, Generate, and the mailer path keep their report.Row
+// references.
+type Row = reporttypes.Row
 
 // Generate builds a Report from d. It is pure (no ctx, no DB, no
 // now()): every time-dependent input arrives via d. All money math is

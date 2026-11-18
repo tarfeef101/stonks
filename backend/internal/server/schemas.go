@@ -1,9 +1,11 @@
 // Import-schema endpoints (plan steps 3.3 + 4.5): GET /api/v1/import-
-// schemas over the repo.SchemaStore — the global builtin presets plus
-// the caller's custom schemas, builtins first (repo contract) — and
-// POST /api/v1/import-schemas, the "save mapping as preset" write:
-// the import flow stores a confirmed mapping document as a custom
-// schema (builtins stay read-only, they live in code, step 4.4).
+// schemas over the repo.SchemaStore — the caller's custom schemas
+// (customs only since 0018; the global presets are the code builtins
+// in internal/presets, served by GET /api/v1/imports/presets, D-029)
+// — and POST /api/v1/import-schemas, the "save mapping as preset"
+// write: the import flow stores a confirmed mapping document as a
+// custom schema (the code builtins are read-only by construction,
+// step 4.4).
 package server
 
 import (
@@ -25,33 +27,30 @@ type SchemaStore interface {
 	List(ctx context.Context, userID string, dek []byte) ([]repo.Schema, error)
 	Get(ctx context.Context, userID, id string, dek []byte) (repo.Schema, error)
 	Create(ctx context.Context, userID string, in repo.SchemaIn, dek []byte) (repo.Schema, error)
-	EnsureBuiltins(ctx context.Context) (int, error)
 }
 
-// schemaOut is the wire row. Spec is the raw mapping document (a JSON
-// object, {} for the untouched builtins) passed through as-is.
+// schemaOut is the wire row (customs only since 0018 — no builtin
+// flag: the code presets carry theirs on the /imports/presets
+// response). Spec is the raw mapping document (a JSON object) passed
+// through as-is.
 type schemaOut struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Kind    string          `json:"kind"`
-	Builtin bool            `json:"builtin"`
-	Spec    json.RawMessage `json:"spec"`
+	ID   string          `json:"id"`
+	Name string          `json:"name"`
+	Kind string          `json:"kind"`
+	Spec json.RawMessage `json:"spec"`
 }
 
 func toSchemaOut(sc repo.Schema) schemaOut {
 	return schemaOut{
-		ID:      sc.ID,
-		Name:    sc.Name,
-		Kind:    sc.Kind,
-		Builtin: sc.Builtin,
-		Spec:    sc.Spec,
+		ID:   sc.ID,
+		Name: sc.Name,
+		Kind: sc.Kind,
+		Spec: sc.Spec,
 	}
 }
 
-// schemasList serves GET /api/v1/import-schemas. It ensures the
-// builtins before listing so a fresh database answers the presets on
-// its first request (the repo's EnsureBuiltins is idempotent and
-// serialized under an advisory lock).
+// schemasList serves GET /api/v1/import-schemas: the caller's custom
+// schemas (the repo scopes the query to the user).
 func (h *handler) schemasList(w http.ResponseWriter, r *http.Request) {
 	if h.schemas == nil {
 		notConfigured(w)
@@ -59,11 +58,6 @@ func (h *handler) schemasList(w http.ResponseWriter, r *http.Request) {
 	}
 	c, ok := h.requireUser(w, r)
 	if !ok {
-		return
-	}
-	if _, err := h.schemas.EnsureBuiltins(r.Context()); err != nil {
-		slog.Error("ensure builtin import schemas failed", "error", err)
-		writeAPIError(w, http.StatusInternalServerError, codeInternal, "builtin schemas could not be ensured")
 		return
 	}
 	schemas, err := h.schemas.List(r.Context(), c.row.ID, c.dek)

@@ -113,14 +113,14 @@ func main() {
 	// AuthN (step 1.3). The verifier requires an issuer and audience; a
 	// missing value is a configuration error, so fail fast at boot rather
 	// than serving a server that can only ever answer 401.
-	if cfg.Auth0Issuer == "" || cfg.Auth0Audience == "" {
+	if cfg.OIDCIssuer == "" || cfg.OIDCAudience == "" {
 		logger.Error("authn misconfigured",
-			"hint", "AUTH0_ISSUER and AUTH0_AUDIENCE are required (see .env.example)")
+			"hint", "OIDC_ISSUER and OIDC_AUDIENCE are required (see .env.example)")
 		os.Exit(1)
 	}
 	verifier, err := authn.New(authn.Config{
-		Issuer:       cfg.Auth0Issuer,
-		Audience:     cfg.Auth0Audience,
+		Issuer:       cfg.OIDCIssuer,
+		Audience:     cfg.OIDCAudience,
 		DiscoveryURL: cfg.OIDCDiscoveryURL,
 	})
 	if err != nil {

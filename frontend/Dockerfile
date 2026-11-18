@@ -13,7 +13,7 @@
 #   PUBLIC_API_BASE           API base path           (default /api)
 #   PUBLIC_NR_LICENSE_KEY     NR browser license key  (agent off when unset)
 #   PUBLIC_NR_APPLICATION_ID  NR browser app id       (agent off when unset)
-#   PUBLIC_AUTH0_ISSUER       IdP issuer URL; its origin goes into the
+#   PUBLIC_OIDC_ISSUER        IdP issuer URL; its origin goes into the
 #                             CSP frame-src (default
 #                             http://localhost:18081/realms/finance,
 #                             i.e. the src/lib/auth/client.ts fallback)
@@ -26,11 +26,11 @@ COPY . .
 ARG PUBLIC_API_BASE=/api
 ARG PUBLIC_NR_LICENSE_KEY=
 ARG PUBLIC_NR_APPLICATION_ID=
-ARG PUBLIC_AUTH0_ISSUER=http://localhost:18081/realms/finance
+ARG PUBLIC_OIDC_ISSUER=http://localhost:18081/realms/finance
 ENV PUBLIC_API_BASE=$PUBLIC_API_BASE \
     PUBLIC_NR_LICENSE_KEY=$PUBLIC_NR_LICENSE_KEY \
     PUBLIC_NR_APPLICATION_ID=$PUBLIC_NR_APPLICATION_ID \
-    PUBLIC_AUTH0_ISSUER=$PUBLIC_AUTH0_ISSUER
+    PUBLIC_OIDC_ISSUER=$PUBLIC_OIDC_ISSUER
 # Build, then derive the CSP include from the built index.html. The
 # NR connect-src origin is only added when the agent is compiled in
 # (a license key was provided at build time).
@@ -40,7 +40,7 @@ RUN npm run build \
        else \
            export CSP_CONNECT_EXTRA=''; \
        fi \
-    && CSP_ISSUER="$PUBLIC_AUTH0_ISSUER" node scripts/generate-csp.mjs
+    && CSP_ISSUER="$PUBLIC_OIDC_ISSUER" node scripts/generate-csp.mjs
 
 FROM nginx:alpine
 # SPA + security config: our own main conf (no user directive — the

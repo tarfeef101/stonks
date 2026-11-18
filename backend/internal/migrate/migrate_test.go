@@ -1,9 +1,10 @@
 // Package migrate_test runs the goose migrations in backend/migrations
 // against a disposable postgres:18 container (testcontainers) and pins the
 // schema invariants the data layer relies on: identity uniqueness,
-// encrypted-name uniqueness, builtin/custom schema shape, account type
-// vocabulary, the transaction dedup key, the shared period vocabulary,
-// per-user LLM-provider uniqueness, FK cascades.
+// encrypted-name uniqueness, import-schema shape (custom-only since 0018),
+// account type vocabulary, the transaction dedup key, the shared period
+// vocabulary, budget-target range + uniqueness, per-user LLM-provider
+// uniqueness, FK cascades.
 //
 // Runs via `make backend-test` (golang:1.27.3 container with the host
 // docker.sock mounted — Makefile DOCKER_GO_TC, D-001). Reuses the local
@@ -31,6 +32,7 @@ const (
 	codeUniqueViolation     = "23505"
 	codeCheckViolation      = "23514"
 	codeForeignKeyViolation = "23503"
+	codeNumericOverflow     = "22003"
 )
 
 // migrationsDir is relative to this package's directory (go test's cwd).
@@ -131,22 +133,23 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 17 (all nineteen tables present, fx_rates from 0017 on top of
-// 0016's three partial transaction indexes on top of saved_views from
-// 0015 on top of dashboard_widgets.row_span from 0014 on top of dashboards
-// + dashboard_widgets from 0013 on top of offset_suggestions +
-// transactions.offset_group_id from 0012 on top of users.theme from 0011 on
-// top of fi_institutions + fi_credentials from 0010 on top of mortgages
-// from 0009 + dashboard_cards from 0008 + categorise_jobs from 0007 +
-// import_jobs' 0006 mapping column), a second `up` is a no-op, and `down`
-// rolls back exactly one step (0017 drops fx_rates; 0016's three partial
-// indexes stay, saved_views keeps 0015, dashboard_widgets keeps 0014's
-// row_span, the dashboards + dashboard_widgets tables keep 0013,
-// offset_suggestions keeps 0012's transactions.offset_group_id, users
-// keeps its 0011 theme, and the fi tables, mortgages, dashboard_cards,
-// categorise_jobs, import_jobs' 0006 mapping column and
-// 0001+0002+0003+0004 stay in place, users keeps its 0004 onboarded_at
-// column).
+// version 18 (all twenty tables present, budget_targets from 0018 on top
+// of fx_rates from 0017 on top of 0016's three partial transaction indexes
+// on top of saved_views from 0015 on top of dashboard_widgets.row_span
+// from 0014 on top of dashboards + dashboard_widgets from 0013 on top of
+// offset_suggestions + transactions.offset_group_id from 0012 on top of
+// users.theme from 0011 on top of fi_institutions + fi_credentials from
+// 0010 on top of mortgages from 0009 + dashboard_cards from 0008 +
+// categorise_jobs from 0007 + import_jobs' 0006 mapping column), a second
+// `up` is a no-op, and `down` rolls back exactly one step (0018 rolls back:
+// budget_targets goes, budgets.targets_encrypted and import_schemas.builtin
+// come back; 0017 keeps fx_rates, 0016's three partial indexes stay,
+// saved_views keeps 0015, dashboard_widgets keeps 0014's row_span, the
+// dashboards + dashboard_widgets tables keep 0013, offset_suggestions keeps
+// 0012's transactions.offset_group_id, users keeps its 0011 theme, and the
+// fi tables, mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006
+// mapping column and 0001+0002+0003+0004 stay in place, users keeps its
+// 0004 onboarded_at column).
 func TestGooseLifecycle(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -154,8 +157,8 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 17 {
-		t.Fatalf("version after up = %d, want 17", ver)
+	if ver != 18 {
+		t.Fatalf("version after up = %d, want 18", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
@@ -163,6 +166,7 @@ func TestGooseLifecycle(t *testing.T) {
 		"import_jobs", "categorise_jobs", "dashboard_cards", "mortgages",
 		"fi_institutions", "fi_credentials", "offset_suggestions",
 		"dashboards", "dashboard_widgets", "saved_views", "fx_rates",
+		"budget_targets",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -195,12 +199,14 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 17 {
-		t.Fatalf("version after re-up = %d (err %v), want 17", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 18 {
+		t.Fatalf("version after re-up = %d (err %v), want 18", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0017) only —
-	// fx_rates goes; 0016 stays (its three partial indexes), 0015 stays
+	// One-step down: goose rolls back the latest migration (0018) only —
+	// budget_targets goes, budgets.targets_encrypted and
+	// import_schemas.builtin come back (with their 3 builtin rows); 0017
+	// stays (fx_rates), 0016 stays (its three partial indexes), 0015 stays
 	// (saved_views), 0014 stays
 	// (dashboard_widgets.row_span), 0013
 	// stays (dashboards + dashboard_widgets), 0012 stays (offset_suggestions
@@ -211,13 +217,30 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 16 {
-		t.Fatalf("version after down = %d (err %v), want 16", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 17 {
+		t.Fatalf("version after down = %d (err %v), want 17", ver, err)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name = 'fx_rates'`); n != 0 {
-		t.Fatalf("fx_rates remaining after one-step down = %d, want 0 (0017 rolls back)", n)
+		  WHERE table_schema = 'public' AND table_name = 'budget_targets'`); n != 0 {
+		t.Fatalf("budget_targets remaining after one-step down = %d, want 0 (0018 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'budgets'
+		    AND column_name = 'targets_encrypted'`); n != 1 {
+		t.Fatalf("budgets.targets_encrypted restored after one-step down = %d, want 1 (0018 Down re-adds it)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'import_schemas'
+		    AND column_name = 'builtin'`); n != 1 {
+		t.Fatalf("import_schemas.builtin restored after one-step down = %d, want 1 (0018 Down re-adds it)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'fx_rates'`); n != 1 {
+		t.Fatalf("fx_rates remaining after one-step down = %d, want 1 (only 0018 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
@@ -227,12 +250,12 @@ func TestGooseLifecycle(t *testing.T) {
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'dashboards'`); n != 1 {
-		t.Fatalf("dashboards remaining after one-step down = %d, want 1 (only 0017 rolls back)", n)
+		t.Fatalf("dashboards remaining after one-step down = %d, want 1 (only 0018 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'dashboard_widgets'`); n != 1 {
-		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 1 (only 0017 rolls back)", n)
+		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 1 (only 0018 rolls back)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns
@@ -305,7 +328,8 @@ func TestGooseLifecycle(t *testing.T) {
 
 // TestSchemaConstraints pins the 0001 invariants: users identity + defaults,
 // per-user category uniqueness and parent rules, import_schemas kind +
-// builtin/custom shape, notifications rules, and the cascade semantics.
+// custom-only shape (builtins are single-sourced in code since 0018),
+// notifications rules, and the cascade semantics.
 func TestSchemaConstraints(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -415,32 +439,21 @@ func TestSchemaConstraints(t *testing.T) {
 	// --- import_schemas ---------------------------------------------------
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO import_schemas (user_id, name_encrypted, kind, builtin, spec)
-		VALUES ($1, $2, 'xml', false, '{}')`, userID, []byte("name-pack"))
+		INSERT INTO import_schemas (user_id, name_encrypted, kind, spec)
+		VALUES ($1, $2, 'xml', '{}')`, userID, []byte("name-pack"))
 	assertViolation(t, err, codeCheckViolation, "kind outside csv/ofx/json")
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO import_schemas (user_id, name, kind, builtin, spec)
-		VALUES ($1, 'Mine', 'csv', true, '{}')`, userID)
-	assertViolation(t, err, codeCheckViolation, "builtin with user_id")
-
-	_, err = db.ExecContext(ctx, `
-		INSERT INTO import_schemas (user_id, name, kind, builtin, spec)
-		VALUES ($1, 'Mine', 'csv', false, '{}')`, userID)
+		INSERT INTO import_schemas (user_id, name, kind, spec)
+		VALUES ($1, 'Mine', 'csv', '{}')`, userID)
 	assertViolation(t, err, codeCheckViolation, "custom schema with plaintext name")
 
-	// Valid shapes: a global builtin (public name) and a per-user custom
-	// (DEK-encrypted name only).
-	var builtinID, customID string
+	// Valid shape: per-user custom only (DEK-encrypted name; the builtins
+	// are single-sourced in code since 0018, not DB rows).
+	var customID string
 	err = db.QueryRowContext(ctx, `
-		INSERT INTO import_schemas (name, kind, builtin, spec)
-		VALUES ('Bank CSV', 'csv', true, '{"delimiter": ","}') RETURNING id`).Scan(&builtinID)
-	if err != nil {
-		t.Fatalf("insert builtin schema: %v", err)
-	}
-	err = db.QueryRowContext(ctx, `
-		INSERT INTO import_schemas (user_id, name_encrypted, kind, builtin, spec)
-		VALUES ($1, $2, 'ofx', false, '{}') RETURNING id`, userID, []byte("name-pack")).Scan(&customID)
+		INSERT INTO import_schemas (user_id, name_encrypted, kind, spec)
+		VALUES ($1, $2, 'ofx', '{}') RETURNING id`, userID, []byte("name-pack")).Scan(&customID)
 	if err != nil {
 		t.Fatalf("insert custom schema: %v", err)
 	}
@@ -464,7 +477,7 @@ func TestSchemaConstraints(t *testing.T) {
 
 	// Delete user 2 and verify every per-user row goes with it —
 	// categories (incl. children via the self-FK), custom schemas,
-	// notifications. The global builtin survives.
+	// notifications.
 	var childID string
 	parentID, err := insertCategory(userID2, "hash-p", nil)
 	if err != nil {
@@ -494,13 +507,9 @@ func TestSchemaConstraints(t *testing.T) {
 	if n := countRows(t, db, ctx, `SELECT count(*) FROM notifications WHERE user_id = $1`, userID2); n != 0 {
 		t.Fatalf("notifications surviving user delete = %d, want 0", n)
 	}
-	if n := countRows(t, db, ctx, `SELECT count(*) FROM import_schemas WHERE id = $1`, builtinID); n != 1 {
-		t.Fatalf("global builtin survived? = %d, want 1", n)
-	}
 	if n := countRows(t, db, ctx, `SELECT count(*) FROM user_categories WHERE id = $1`, catA); n != 1 {
 		t.Fatalf("first user's category should survive, present = %d", n)
 	}
-	_ = customID
 }
 
 // TestAccountTransactionConstraints pins the 0002 invariants: account
@@ -526,10 +535,10 @@ func TestAccountTransactionConstraints(t *testing.T) {
 		t.Fatalf("insert second user: %v", err)
 	}
 	err = db.QueryRowContext(ctx, `
-		INSERT INTO import_schemas (name, kind, builtin, spec)
-		VALUES ('Bank CSV', 'csv', true, '{}') RETURNING id`).Scan(&schemaID)
+		INSERT INTO import_schemas (user_id, name_encrypted, kind, spec)
+		VALUES ($1, $2, 'csv', '{}') RETURNING id`, userID, []byte("name-pack")).Scan(&schemaID)
 	if err != nil {
-		t.Fatalf("insert builtin schema: %v", err)
+		t.Fatalf("insert custom schema: %v", err)
 	}
 
 	// --- accounts ---------------------------------------------------------
@@ -715,9 +724,11 @@ func TestAccountTransactionConstraints(t *testing.T) {
 	}
 }
 
-// TestBudgetCredentialConstraints pins the 0003 invariants: the shared
-// period vocabulary on budgets and the per-user provider uniqueness +
-// vocabulary on llm_credentials, plus the user-delete cascade.
+// TestBudgetCredentialConstraints pins the 0003 invariants (the shared
+// period vocabulary on budgets, the per-user provider uniqueness +
+// vocabulary on llm_credentials) and the 0018 budget_targets child table
+// (target range, (budget_id, category_id) uniqueness, both FK cascades),
+// and the user-delete cascade.
 func TestBudgetCredentialConstraints(t *testing.T) {
 	db, ctx := migratedDB(t)
 
@@ -740,12 +751,13 @@ func TestBudgetCredentialConstraints(t *testing.T) {
 
 	// --- budgets -----------------------------------------------------------
 
-	// name + the whole targets jsonb ride as one encrypted blob each.
+	// name rides as one encrypted blob; per-category targets live in the
+	// budget_targets child table since 0018 (no targets_encrypted column).
 	var budgetID string
 	err = db.QueryRowContext(ctx, `
-		INSERT INTO budgets (user_id, period, name_encrypted, targets_encrypted)
-		VALUES ($1, 'month', $2, $3) RETURNING id`,
-		userID, []byte("name-pack"), []byte("targets-pack")).Scan(&budgetID)
+		INSERT INTO budgets (user_id, period, name_encrypted)
+		VALUES ($1, 'month', $2) RETURNING id`,
+		userID, []byte("name-pack")).Scan(&budgetID)
 	if err != nil {
 		t.Fatalf("insert budget: %v", err)
 	}
@@ -753,14 +765,74 @@ func TestBudgetCredentialConstraints(t *testing.T) {
 	// Period shares the vocabulary pinned in 0001 (week is deliberately
 	// outside the set, however DESIGN.md phrases it).
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO budgets (user_id, period, name_encrypted, targets_encrypted)
-		VALUES ($1, 'week', $2, $3)`, userID, []byte("name-pack"), []byte("targets-pack"))
+		INSERT INTO budgets (user_id, period, name_encrypted)
+		VALUES ($1, 'week', $2)`, userID, []byte("name-pack"))
 	assertViolation(t, err, codeCheckViolation, "budget period outside vocabulary")
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO budgets (user_id, period, name_encrypted, targets_encrypted)
-		VALUES ($1, 'month', $2, $3)`, ghost, []byte("name-pack"), []byte("targets-pack"))
+		INSERT INTO budgets (user_id, period, name_encrypted)
+		VALUES ($1, 'month', $2)`, ghost, []byte("name-pack"))
 	assertViolation(t, err, codeForeignKeyViolation, "budget without user")
+
+	// --- budget_targets ---------------------------------------------------
+
+	// A category to attach targets to.
+	var catID string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO user_categories (user_id, name_encrypted, name_hash)
+		VALUES ($1, $2, 'hash-t') RETURNING id`, userID, []byte("name-pack")).Scan(&catID)
+	if err != nil {
+		t.Fatalf("insert category: %v", err)
+	}
+
+	// A valid target: plain numeric, scanned back as its decimal text with
+	// the :2 scale kept (60.00, not 60).
+	var targetText string
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO budget_targets (budget_id, category_id, target)
+		VALUES ($1, $2, 60.00) RETURNING target::text`, budgetID, catID).Scan(&targetText)
+	if err != nil {
+		t.Fatalf("insert budget target: %v", err)
+	}
+	if targetText != "60.00" {
+		t.Fatalf("target = %q, want \"60.00\"", targetText)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO budget_targets (budget_id, category_id, target)
+		VALUES ($1, $2, 10)`, budgetID, ghost)
+	assertViolation(t, err, codeForeignKeyViolation, "target without category")
+
+	// One target per (budget_id, category_id).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO budget_targets (budget_id, category_id, target)
+		VALUES ($1, $2, 20)`, budgetID, catID)
+	assertViolation(t, err, codeUniqueViolation, "duplicate (budget_id, category_id)")
+
+	// Range: the CHECK keeps targets in [0, 999999999999.99]. The lower
+	// bound fires as a CHECK violation; the upper bound is the numeric(14,2)
+	// type max itself, so an out-of-range literal overflows the type (22003)
+	// before the CHECK is ever evaluated.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO budget_targets (budget_id, category_id, target)
+		VALUES ($1, $2, -1)`, budgetID, catID)
+	assertViolation(t, err, codeCheckViolation, "negative target")
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO budget_targets (budget_id, category_id, target)
+		VALUES ($1, $2, 100000000000000)`, budgetID, catID)
+	assertViolation(t, err, codeNumericOverflow, "target above range")
+
+	// Category delete cascades: its target row goes, the budget stays.
+	if _, err := db.ExecContext(ctx, `DELETE FROM user_categories WHERE id = $1`, catID); err != nil {
+		t.Fatalf("delete category: %v", err)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM budget_targets WHERE category_id = $1`, catID); n != 0 {
+		t.Fatalf("target rows surviving category delete = %d, want 0", n)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM budgets WHERE id = $1`, budgetID); n != 1 {
+		t.Fatalf("budget present after category delete = %d, want 1", n)
+	}
 
 	// --- llm_credentials ------------------------------------------------------
 
@@ -810,6 +882,9 @@ func TestBudgetCredentialConstraints(t *testing.T) {
 	}
 	if n := countRows(t, db, ctx, `SELECT count(*) FROM budgets WHERE id = $1`, budgetID); n != 0 {
 		t.Fatalf("budget surviving user delete = %d, want 0", n)
+	}
+	if n := countRows(t, db, ctx, `SELECT count(*) FROM budget_targets WHERE budget_id = $1`, budgetID); n != 0 {
+		t.Fatalf("budget targets surviving user delete = %d, want 0", n)
 	}
 	if n := countRows(t, db, ctx, `SELECT count(*) FROM llm_credentials WHERE id = $1`, credID); n != 0 {
 		t.Fatalf("credential surviving user delete = %d, want 0", n)
