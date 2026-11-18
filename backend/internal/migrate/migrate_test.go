@@ -133,21 +133,26 @@ func pingUntilReady(ctx context.Context, db *sql.DB, budget time.Duration) error
 }
 
 // TestGooseLifecycle covers the done-when: a fresh DB migrates cleanly to
-// version 18 (all twenty tables present, budget_targets from 0018 on top
-// of fx_rates from 0017 on top of 0016's three partial transaction indexes
-// on top of saved_views from 0015 on top of dashboard_widgets.row_span
-// from 0014 on top of dashboards + dashboard_widgets from 0013 on top of
+// version 19 (all twenty-three tables present, the plan room tables
+// plan_limit_overrides + plan_room_adjustments + account_snapshots from
+// 0019 on top of budget_targets from 0018 on top of fx_rates from 0017 on
+// top of 0016's three partial transaction indexes on top of saved_views
+// from 0015 on top of dashboard_widgets.row_span from 0014 on top of
+// dashboards + dashboard_widgets from 0013 on top of
 // offset_suggestions + transactions.offset_group_id from 0012 on top of
 // users.theme from 0011 on top of fi_institutions + fi_credentials from
 // 0010 on top of mortgages from 0009 + dashboard_cards from 0008 +
 // categorise_jobs from 0007 + import_jobs' 0006 mapping column), a second
-// `up` is a no-op, and `down` rolls back exactly one step (0018 rolls back:
-// budget_targets goes, budgets.targets_encrypted and import_schemas.builtin
-// come back; 0017 keeps fx_rates, 0016's three partial indexes stay,
-// saved_views keeps 0015, dashboard_widgets keeps 0014's row_span, the
-// dashboards + dashboard_widgets tables keep 0013, offset_suggestions keeps
-// 0012's transactions.offset_group_id, users keeps its 0011 theme, and the
-// fi tables, mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006
+// `up` is a no-op, and `down` rolls back exactly one step (0019 rolls
+// back: the three plan tables go, users.birth_year_encrypted goes, the
+// four 0019 accounts columns and the two 0019 transactions columns +
+// external-origin check go, and the accounts/dashboard_widgets type
+// vocabulary checks revert; 0018 keeps budget_targets, 0017 keeps
+// fx_rates, 0016's three partial indexes stay, saved_views keeps 0015,
+// dashboard_widgets keeps 0014's row_span, the dashboards +
+// dashboard_widgets tables keep 0013, offset_suggestions keeps 0012's
+// transactions.offset_group_id, users keeps its 0011 theme, and the fi
+// tables, mortgages, dashboard_cards, categorise_jobs, import_jobs' 0006
 // mapping column and 0001+0002+0003+0004 stay in place, users keeps its
 // 0004 onboarded_at column).
 func TestGooseLifecycle(t *testing.T) {
@@ -157,8 +162,8 @@ func TestGooseLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version after up: %v", err)
 	}
-	if ver != 18 {
-		t.Fatalf("version after up = %d, want 18", ver)
+	if ver != 19 {
+		t.Fatalf("version after up = %d, want 19", ver)
 	}
 	for _, table := range []string{
 		"users", "user_categories", "import_schemas", "notifications",
@@ -166,7 +171,8 @@ func TestGooseLifecycle(t *testing.T) {
 		"import_jobs", "categorise_jobs", "dashboard_cards", "mortgages",
 		"fi_institutions", "fi_credentials", "offset_suggestions",
 		"dashboards", "dashboard_widgets", "saved_views", "fx_rates",
-		"budget_targets",
+		"budget_targets", "plan_limit_overrides", "plan_room_adjustments",
+		"account_snapshots",
 	} {
 		n := countRows(t, db, ctx,
 			`SELECT count(*) FROM information_schema.tables
@@ -199,13 +205,20 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.UpContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("idempotent up: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 18 {
-		t.Fatalf("version after re-up = %d (err %v), want 18", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 19 {
+		t.Fatalf("version after re-up = %d (err %v), want 19", ver, err)
 	}
 
-	// One-step down: goose rolls back the latest migration (0018) only —
-	// budget_targets goes, budgets.targets_encrypted and
-	// import_schemas.builtin come back (with their 3 builtin rows); 0017
+	// One-step down: goose rolls back the latest migration (0019) only —
+	// the plan room tables go (plan_limit_overrides, plan_room_adjustments,
+	// account_snapshots), users.birth_year_encrypted goes, the four 0019
+	// accounts columns go (beneficiary_name_encrypted,
+	// beneficiary_birth_year_encrypted, opening_balance, opened_at), the
+	// two 0019 transactions columns go (transfer_group_id,
+	// external_origin) with their check + partial index, and the accounts
+	// + dashboard_widgets type checks revert to their pre-0019
+	// vocabularies; 0018 stays (budget_targets present,
+	// budgets.targets_encrypted and import_schemas.builtin absent), 0017
 	// stays (fx_rates), 0016 stays (its three partial indexes), 0015 stays
 	// (saved_views), 0014 stays
 	// (dashboard_widgets.row_span), 0013
@@ -217,30 +230,120 @@ func TestGooseLifecycle(t *testing.T) {
 	if err := goose.DownContext(ctx, db, migrationsDir); err != nil {
 		t.Fatalf("goose down: %v", err)
 	}
-	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 17 {
-		t.Fatalf("version after down = %d (err %v), want 17", ver, err)
+	if ver, err = goose.GetDBVersionContext(ctx, db); err != nil || ver != 18 {
+		t.Fatalf("version after down = %d (err %v), want 18", ver, err)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
-		  WHERE table_schema = 'public' AND table_name = 'budget_targets'`); n != 0 {
-		t.Fatalf("budget_targets remaining after one-step down = %d, want 0 (0018 rolls back)", n)
+		  WHERE table_schema = 'public' AND table_name = 'plan_limit_overrides'`); n != 0 {
+		t.Fatalf("plan_limit_overrides remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'plan_room_adjustments'`); n != 0 {
+		t.Fatalf("plan_room_adjustments remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'account_snapshots'`); n != 0 {
+		t.Fatalf("account_snapshots remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'users'
+		    AND column_name = 'birth_year_encrypted'`); n != 0 {
+		t.Fatalf("users.birth_year_encrypted remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'accounts'
+		    AND column_name = 'beneficiary_name_encrypted'`); n != 0 {
+		t.Fatalf("accounts.beneficiary_name_encrypted remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'accounts'
+		    AND column_name = 'beneficiary_birth_year_encrypted'`); n != 0 {
+		t.Fatalf("accounts.beneficiary_birth_year_encrypted remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'accounts'
+		    AND column_name = 'opening_balance'`); n != 0 {
+		t.Fatalf("accounts.opening_balance remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'accounts'
+		    AND column_name = 'opened_at'`); n != 0 {
+		t.Fatalf("accounts.opened_at remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'transactions'
+		    AND column_name = 'transfer_group_id'`); n != 0 {
+		t.Fatalf("transactions.transfer_group_id remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_schema = 'public' AND table_name = 'transactions'
+		    AND column_name = 'external_origin'`); n != 0 {
+		t.Fatalf("transactions.external_origin remaining after one-step down = %d, want 0 (0019 rolls back)", n)
+	}
+	// The 0019 Up widened two CHECK vocabularies; the Down must revert
+	// them: a plan account type and the 'savings' widget kind are
+	// rejected again.
+	var (
+		downUserID string
+		downDashID string
+	)
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO users (auth0_sub, email, display_name, wrapped_dek)
+		VALUES ('sub-down', 'e@example.com', 'E', $1) RETURNING id`,
+		[]byte("wrapped-dek-pack")).Scan(&downUserID)
+	if err != nil {
+		t.Fatalf("insert user for vocabulary revert: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO accounts (user_id, name_encrypted, name_hash, type, currency)
+		VALUES ($1, $2, 'hash-down', 'rrsp', 'CAD')`, downUserID, []byte("name-pack"))
+	assertViolation(t, err, codeCheckViolation, "rrsp account type accepted after 0019 rollback")
+	err = db.QueryRowContext(ctx, `
+		INSERT INTO dashboards (user_id, name_encrypted)
+		VALUES ($1, $2) RETURNING id`, downUserID, []byte("name-pack")).Scan(&downDashID)
+	if err != nil {
+		t.Fatalf("insert dashboard for vocabulary revert: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO dashboard_widgets
+			(user_id, dashboard_id, kind, name_encrypted, content_encrypted, sort_order)
+		VALUES ($1, $2, 'savings', $3, $4, 0)`,
+		downUserID, downDashID, []byte("name-pack"), []byte("content-pack"))
+	assertViolation(t, err, codeCheckViolation, "'savings' widget kind accepted after 0019 rollback")
+	// 0018 stays: budget_targets is still there, and the columns its Up
+	// removed (budgets.targets_encrypted, import_schemas.builtin) are
+	// still gone — 0018's Down did not run.
+	if n := countRows(t, db, ctx,
+		`SELECT count(*) FROM information_schema.tables
+		  WHERE table_schema = 'public' AND table_name = 'budget_targets'`); n != 1 {
+		t.Fatalf("budget_targets remaining after one-step down = %d, want 1 (0018 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns
 		  WHERE table_schema = 'public' AND table_name = 'budgets'
-		    AND column_name = 'targets_encrypted'`); n != 1 {
-		t.Fatalf("budgets.targets_encrypted restored after one-step down = %d, want 1 (0018 Down re-adds it)", n)
+		    AND column_name = 'targets_encrypted'`); n != 0 {
+		t.Fatalf("budgets.targets_encrypted = %d after one-step down, want 0 (0018 stays; targets live in budget_targets)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns
 		  WHERE table_schema = 'public' AND table_name = 'import_schemas'
-		    AND column_name = 'builtin'`); n != 1 {
-		t.Fatalf("import_schemas.builtin restored after one-step down = %d, want 1 (0018 Down re-adds it)", n)
+		    AND column_name = 'builtin'`); n != 0 {
+		t.Fatalf("import_schemas.builtin = %d after one-step down, want 0 (0018 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'fx_rates'`); n != 1 {
-		t.Fatalf("fx_rates remaining after one-step down = %d, want 1 (only 0018 rolls back)", n)
+		t.Fatalf("fx_rates remaining after one-step down = %d, want 1 (0017 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
@@ -250,12 +353,12 @@ func TestGooseLifecycle(t *testing.T) {
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'dashboards'`); n != 1 {
-		t.Fatalf("dashboards remaining after one-step down = %d, want 1 (only 0018 rolls back)", n)
+		t.Fatalf("dashboards remaining after one-step down = %d, want 1 (0013 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.tables
 		  WHERE table_schema = 'public' AND table_name = 'dashboard_widgets'`); n != 1 {
-		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 1 (only 0018 rolls back)", n)
+		t.Fatalf("dashboard_widgets remaining after one-step down = %d, want 1 (0013 stays)", n)
 	}
 	if n := countRows(t, db, ctx,
 		`SELECT count(*) FROM information_schema.columns
