@@ -696,3 +696,311 @@ func (h *handler) savingsAdjustmentsDelete(w http.ResponseWriter, r *http.Reques
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// --- savings snapshots and equity series (52a3) ------------------------------
+
+// maxSnapshotNoteLen bounds savings snapshots.note.
+const maxSnapshotNoteLen = 500
+
+// snapshotDTO is the wire form of repo.Snapshot. AsOf is a UTC calendar
+// date; the timestamps are RFC3339 (UTC).
+type snapshotDTO struct {
+	ID        string    `json:"id"`
+	AccountID string    `json:"account_id"`
+	AsOf      string    `json:"as_of"`
+	Balance   string    `json:"balance"`
+	Note      string    `json:"note"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func toSnapshotDTO(s repo.Snapshot) snapshotDTO {
+	return snapshotDTO{
+		ID:        s.ID,
+		AccountID: s.AccountID,
+		AsOf:      s.AsOf.UTC().Format("2006-01-02"),
+		Balance:   s.Balance,
+		Note:      s.Note,
+		CreatedAt: s.CreatedAt.UTC(),
+		UpdatedAt: s.UpdatedAt.UTC(),
+	}
+}
+
+// equityPointDTO is one point of the GET /api/v1/savings/equity response.
+type equityPointDTO struct {
+	AsOf             string `json:"as_of"`
+	Balance          string `json:"balance"`
+	NetContributions string `json:"net_contributions"`
+}
+
+// parseSnapshotDate parses a strict "YYYY-MM-DD" value at UTC midnight
+// (time.Parse rejects unzero-padded and garbage input) and requires the
+// year to be 1900..2100. It cannot reuse the shared parseDateParam: that
+// helper takes a field-name parameter and returns an error, so it would
+// redeclare the name in this package.
+func parseSnapshotDate(s string) (time.Time, bool) {
+	d, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if y := d.Year(); y < 1900 || y > 2100 {
+		return time.Time{}, false
+	}
+	return d, true
+}
+
+// probeSavingsAccount enforces that accountID belongs to the caller.
+// It answers 404 for a missing/foreign account and 500 for store
+// failures, and reports whether the handler may continue.
+func (h *handler) probeSavingsAccount(w http.ResponseWriter, ctx context.Context, callerID string, dek []byte, accountID string) bool {
+	if _, err := h.accounts.Get(ctx, callerID, accountID, dek); err != nil {
+		if errors.Is(err, repo.ErrAccountNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "account not found")
+			return false
+		}
+		slog.Error("savings snapshots: account probe failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal error")
+		return false
+	}
+	return true
+}
+
+// savingsSnapshotsList serves GET /api/v1/savings/snapshots: the
+// caller's snapshots for one account, newest first.
+func (h *handler) savingsSnapshotsList(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	acctID := r.URL.Query().Get("account_id")
+	if acctID == "" {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "account_id is required")
+		return
+	}
+	if !h.probeSavingsAccount(w, ctx, c.row.ID, c.dek, acctID) {
+		return
+	}
+	ss, err := h.snapshots.ListSnapshots(ctx, c.row.ID, acctID, c.dek)
+	if err != nil {
+		slog.Error("savings snapshots: list failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal error")
+		return
+	}
+	out := make([]snapshotDTO, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, toSnapshotDTO(s))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// snapshotIn is the POST /api/v1/savings/snapshots body.
+type snapshotIn struct {
+	AccountID string `json:"account_id"`
+	AsOf      string `json:"as_of"`
+	Balance   string `json:"balance"`
+	Note      string `json:"note"`
+}
+
+// savingsSnapshotsCreate serves POST /api/v1/savings/snapshots: record
+// a manual balance for an account as of a date that is not in the
+// future. A duplicate (account, as_of) is a 409 conflict.
+func (h *handler) savingsSnapshotsCreate(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	var in snapshotIn
+	if err := decodeBody(r, &in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "invalid request body")
+		return
+	}
+	if in.AccountID == "" {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "account_id is required")
+		return
+	}
+	if !h.probeSavingsAccount(w, ctx, c.row.ID, c.dek, in.AccountID) {
+		return
+	}
+	asOf, ok := parseSnapshotDate(in.AsOf)
+	if !ok {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "as_of must be a YYYY-MM-DD date between 1900-01-01 and 2100-12-31")
+		return
+	}
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if asOf.After(today) {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "as_of must not be in the future")
+		return
+	}
+	cents, ok := toCents(in.Balance)
+	if !ok || cents < 0 {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "balance must be a decimal amount of at least 0.00")
+		return
+	}
+	if len(in.Note) > maxSnapshotNoteLen {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf("note must be at most %d characters", maxSnapshotNoteLen))
+		return
+	}
+	s, err := h.snapshots.CreateSnapshot(ctx, c.row.ID, repo.SnapshotIn{
+		AccountID: in.AccountID,
+		AsOf:      asOf,
+		Balance:   centsToString(cents),
+		Note:      in.Note,
+	}, c.dek)
+	if err != nil {
+		if errors.Is(err, repo.ErrSnapshotConflict) {
+			writeAPIError(w, http.StatusConflict, codeConflict, "a snapshot already exists for this account on this date")
+			return
+		}
+		slog.Error("savings snapshots: create failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusCreated, toSnapshotDTO(s))
+}
+
+// savingsSnapshotsPatch serves PATCH /api/v1/savings/snapshots/{id}
+// with the envelope tri-state: an absent field is untouched, JSON null
+// clears note (balance cannot be null), a string sets the value.
+func (h *handler) savingsSnapshotsPatch(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	id := pathID(r)
+	var body struct {
+		Balance triStateString `json:"balance"`
+		Note    triStateString `json:"note"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "invalid request body")
+		return
+	}
+	// balance: absent -> nil; present null -> 400; present value -> the
+	// canonical decimal string (a pointer, since "" is a legal value).
+	var balance *string
+	if body.Balance.set {
+		if body.Balance.value == nil {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "balance cannot be null")
+			return
+		}
+		cents, ok := toCents(*body.Balance.value)
+		if !ok || cents < 0 {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "balance must be a decimal amount of at least 0.00")
+			return
+		}
+		s := centsToString(cents)
+		balance = &s
+	}
+	// note: absent -> nil; present null -> &"" (clear); present value ->
+	// the value (bounded to 500 bytes).
+	var note *string
+	if body.Note.set {
+		if body.Note.value != nil && len(*body.Note.value) > maxSnapshotNoteLen {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf("note must be at most %d characters", maxSnapshotNoteLen))
+			return
+		}
+		if body.Note.value == nil {
+			empty := ""
+			note = &empty
+		} else {
+			note = body.Note.value
+		}
+	}
+	s, err := h.snapshots.UpdateSnapshot(ctx, c.row.ID, id, repo.SnapshotPatch{Balance: balance, Note: note}, c.dek)
+	if err != nil {
+		if errors.Is(err, repo.ErrSnapshotNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "snapshot not found")
+			return
+		}
+		slog.Error("savings snapshots: update failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, toSnapshotDTO(s))
+}
+
+// savingsSnapshotsDelete serves DELETE /api/v1/savings/snapshots/{id}
+// and answers 204 (no content) on success.
+func (h *handler) savingsSnapshotsDelete(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	id := pathID(r)
+	if err := h.snapshots.DeleteSnapshot(ctx, c.row.ID, id); err != nil {
+		if errors.Is(err, repo.ErrSnapshotNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "snapshot not found")
+			return
+		}
+		slog.Error("savings snapshots: delete failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// savingsEquity serves GET /api/v1/savings/equity: the account's
+// balance and net-contribution series over a date range (default: the
+// last ten years through today, UTC).
+func (h *handler) savingsEquity(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	q := r.URL.Query()
+	acctID := q.Get("account_id")
+	if acctID == "" {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "account_id is required")
+		return
+	}
+	now := time.Now().UTC()
+	to := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if s := q.Get("to"); s != "" {
+		d, ok := parseSnapshotDate(s)
+		if !ok {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "to must be a YYYY-MM-DD date between 1900-01-01 and 2100-12-31")
+			return
+		}
+		to = d
+	}
+	from := to.AddDate(-10, 0, 0)
+	if s := q.Get("from"); s != "" {
+		d, ok := parseSnapshotDate(s)
+		if !ok {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "from must be a YYYY-MM-DD date between 1900-01-01 and 2100-12-31")
+			return
+		}
+		from = d
+	}
+	if from.After(to) {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "from must not be after to")
+		return
+	}
+	pts, err := h.snapshots.EquitySeries(ctx, c.row.ID, acctID, from, to)
+	if err != nil {
+		if errors.Is(err, repo.ErrAccountNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "account not found")
+			return
+		}
+		slog.Error("savings equity: equity series failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "internal error")
+		return
+	}
+	out := make([]equityPointDTO, 0, len(pts))
+	for _, p := range pts {
+		out = append(out, equityPointDTO{
+			AsOf:             p.AsOf.UTC().Format("2006-01-02"),
+			Balance:          centsToString(p.Balance),
+			NetContributions: centsToString(p.NetContributions),
+		})
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Points []equityPointDTO `json:"points"`
+	}{out})
+}

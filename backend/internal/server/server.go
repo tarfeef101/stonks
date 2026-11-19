@@ -289,6 +289,12 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		r.Get("/v1/savings/adjustments", h.savingsAdjustmentsList)
 		r.Post("/v1/savings/adjustments", h.savingsAdjustmentsCreate)
 		r.Delete("/v1/savings/adjustments/{id}", h.savingsAdjustmentsDelete)
+		// Savings snapshots and equity series (52a3).
+		r.Get("/v1/savings/snapshots", h.savingsSnapshotsList)
+		r.Post("/v1/savings/snapshots", h.savingsSnapshotsCreate)
+		r.Patch("/v1/savings/snapshots/{id}", h.savingsSnapshotsPatch)
+		r.Delete("/v1/savings/snapshots/{id}", h.savingsSnapshotsDelete)
+		r.Get("/v1/savings/equity", h.savingsEquity)
 		// Budgets (step 3.3). No single-GET route (the List covers it);
 		// period is immutable (absent from the PATCH body).
 		r.Get("/v1/budgets", h.budgetsList)
