@@ -692,7 +692,7 @@ func TestDashboardValidation(t *testing.T) {
 		{"empty dashboard name", "/api/v1/dashboards", `{"name":""}`, "name must not be empty"},
 		{"blank dashboard name", "/api/v1/dashboards", `{"name":"   "}`, "name must not be empty"},
 		{"long dashboard name", "/api/v1/dashboards", `{"name":"` + strings.Repeat("x", 256) + `"}`, "name must be at most 255 characters"},
-		{"bad kind", wpath, `{"name":"W","kind":"chart"}`, `kind must be "explore" or "markdown"`},
+		{"bad kind", wpath, `{"name":"W","kind":"chart"}`, `kind must be "explore", "markdown" or "savings"`},
 		{"explore over content cap", wpath, `{"name":"W","kind":"explore","content":"` + strings.Repeat("a", 1025) + `"}`, "content must be at most 1024 characters"},
 		{"markdown over content cap", wpath, `{"name":"W","kind":"markdown","content":"` + strings.Repeat("b", 16385) + `"}`, "content must be at most 16384 characters"},
 		{"span zero", wpath, `{"name":"W","kind":"explore","span":0}`, "span must be between 1 and 12"},
@@ -720,7 +720,7 @@ func TestDashboardValidation(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("combined: status = %d (body %s)", code, out)
 	}
-	want := `name must be at most 255 characters; kind must be "explore" or "markdown"; span must be between 1 and 12; row_span must be between 1 and 8`
+	want := `name must be at most 255 characters; kind must be "explore", "markdown" or "savings"; span must be between 1 and 12; row_span must be between 1 and 8`
 	if _, m := apiErr(t, out); m != want {
 		t.Fatalf("combined message = %q, want %q", m, want)
 	}

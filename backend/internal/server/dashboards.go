@@ -6,7 +6,9 @@
 // repo.DashboardStore + repo.DashboardWidgetStore. A dashboard is a
 // named container of widgets; a widget is kind "explore" (content = the
 // canonical explore_state query string, "" = the default all-time view)
-// or "markdown" (content = the markdown source). name + content are
+// or "markdown" (content = the markdown source) or "savings" (content
+// = the canonical savings JSON object, "" = the default room view;
+// migration 0019 extended the 0013 CHECK). name + content are
 // DEK-encrypted at rest by the repo layer; the handlers only ever see
 // plaintext in and out. Every store call is scoped to the caller's
 // users.id (widget calls to the dashboard too), so a token can only
@@ -24,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -55,15 +58,19 @@ type DashboardWidgetStore interface {
 	SetOrder(ctx context.Context, userID, dashboardID string, ids []string) error
 }
 
-// Widget kinds (0013 CHECK enum) and their content caps. explore_state
-// is a few key=value pairs (1024 keeps the encrypted pack small, the
-// old card cap); markdown is the user's free text (16384).
+// Widget kinds (0013 CHECK enum, extended to "savings" by 0019) and
+// their content caps. explore_state is a few key=value pairs (1024
+// keeps the encrypted pack small, the old card cap); markdown is the
+// user's free text (16384); savings is a small canonical JSON object
+// (256 keeps the packed form trivially small).
 const (
 	kindExplore  = "explore"
 	kindMarkdown = "markdown"
+	kindSavings  = "savings"
 
 	maxExploreContentLen  = 1024
 	maxMarkdownContentLen = 16384
+	maxSavingsContentLen  = 256
 
 	// maxWidgetRowSpan is the 0014 row_span CHECK ceiling: a widget can
 	// occupy at most 8 fixed-height grid rows (taller = scroll inside
@@ -150,17 +157,22 @@ func checkWidgetName(name string) error {
 	return nil
 }
 
-// validKind reports whether kind is one of the 0013 enum values.
+// validKind reports whether kind is one of the 0013 enum values
+// (extended to "savings" by 0019).
 func validKind(kind string) bool {
-	return kind == kindExplore || kind == kindMarkdown
+	return kind == kindExplore || kind == kindMarkdown || kind == kindSavings
 }
 
 // contentCapFor is the content length cap (runes) for the kind.
 func contentCapFor(kind string) int {
-	if kind == kindMarkdown {
+	switch kind {
+	case kindMarkdown:
 		return maxMarkdownContentLen
+	case kindSavings:
+		return maxSavingsContentLen
+	default:
+		return maxExploreContentLen
 	}
-	return maxExploreContentLen
 }
 
 // validateWidgetContent enforces the cap for the kind in effect.
@@ -170,6 +182,81 @@ func validateWidgetContent(kind, content string) error {
 		return fmt.Errorf("content must be at most %d characters", contentCapFor(kind))
 	}
 	return nil
+}
+
+// parseSavingsConfig parses the savings widget content: "" (the
+// default all-accounts room view) or the canonical JSON object
+// {"view":"room"} or {"view":"appreciation","account_id":"<uuid>"}.
+// The server validates but does not re-serialize: the frontend stores
+// the canonical form it sent (same convention as explore_state).
+// account_id is REQUIRED for the appreciation view and FORBIDDEN for
+// the room view; unknown keys are rejected (the lexicographically
+// first one, for a deterministic message).
+func parseSavingsConfig(content string) (view, accountID string, err error) {
+	if content == "" {
+		return "room", "", nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return "", "", fmt.Errorf(`savings content must be "" or a JSON object`)
+	}
+	var unknown []string
+	for k := range raw {
+		if k != "view" && k != "account_id" {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return "", "", fmt.Errorf(`savings content: unknown key %q`, unknown[0])
+	}
+	viewRaw, ok := raw["view"]
+	if !ok {
+		return "", "", fmt.Errorf(`savings content: view must be "room" or "appreciation"`)
+	}
+	var v string
+	if err := json.Unmarshal(viewRaw, &v); err != nil {
+		return "", "", fmt.Errorf(`savings content: view must be "room" or "appreciation"`)
+	}
+	if v != "room" && v != "appreciation" {
+		return "", "", fmt.Errorf(`savings content: view must be "room" or "appreciation"`)
+	}
+	if accRaw, ok := raw["account_id"]; ok {
+		var s string
+		if err := json.Unmarshal(accRaw, &s); err != nil {
+			return "", "", fmt.Errorf(`savings content: account_id must be a valid UUID`)
+		}
+		if !uuidShapeOK(s) {
+			return "", "", fmt.Errorf(`savings content: account_id must be a valid UUID`)
+		}
+		accountID = s
+	}
+	if v == "appreciation" && accountID == "" {
+		return "", "", fmt.Errorf(`savings content: account_id must be a valid UUID`)
+	}
+	if v == "room" && accountID != "" {
+		return "", "", fmt.Errorf(`savings content: account_id is not allowed with the room view`)
+	}
+	return v, accountID, nil
+}
+
+// savingsAccountOK checks that the savings widget's appreciation
+// account exists for the caller. A foreign or missing account is a
+// plain 404 (existence is not disclosed); any other store failure is
+// a 500 with the details only in the server log (the dashboardError
+// house idiom). On failure it writes the response and returns false.
+func (h *handler) savingsAccountOK(w http.ResponseWriter, r *http.Request, c caller, accID string) bool {
+	_, err := h.accounts.Get(r.Context(), c.row.ID, accID, c.dek)
+	if err != nil {
+		if errors.Is(err, repo.ErrAccountNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "account not found")
+			return false
+		}
+		slog.Error("savings widget account lookup failed", "error", err)
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "savings widget account lookup failed")
+		return false
+	}
+	return true
 }
 
 // validateSpan enforces the 1..12 grid-column span (0013 CHECK).
@@ -201,7 +288,7 @@ func (h *handler) validateWidgetIn(in *widgetIn) error {
 		problems = append(problems, err.Error())
 	}
 	if !validKind(in.Kind) {
-		problems = append(problems, `kind must be "explore" or "markdown"`)
+		problems = append(problems, `kind must be "explore", "markdown" or "savings"`)
 	}
 	if err := validateWidgetContent(in.Kind, in.Content); err != nil {
 		problems = append(problems, err.Error())
@@ -233,7 +320,7 @@ func (h *handler) validateWidgetPatch(p *widgetPatch, existingKind, existingCont
 	kindInEffect := existingKind
 	if p.Kind != nil {
 		if !validKind(*p.Kind) {
-			problems = append(problems, `kind must be "explore" or "markdown"`)
+			problems = append(problems, `kind must be "explore", "markdown" or "savings"`)
 		} else {
 			kindInEffect = *p.Kind
 		}
@@ -454,6 +541,16 @@ func (h *handler) widgetsCreate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
 	}
+	if in.Kind == kindSavings {
+		view, accID, err := parseSavingsConfig(in.Content)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+			return
+		}
+		if view == "appreciation" && !h.savingsAccountOK(w, r, c, accID) {
+			return
+		}
+	}
 	span := 6
 	if in.Span != nil {
 		span = *in.Span
@@ -522,6 +619,24 @@ func (h *handler) widgetsUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := h.validateWidgetPatch(&p, cur.Kind, cur.Content); err != nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
+	}
+	kindInEffect := cur.Kind
+	if p.Kind != nil {
+		kindInEffect = *p.Kind
+	}
+	contentInEffect := cur.Content
+	if p.Content != nil {
+		contentInEffect = *p.Content
+	}
+	if kindInEffect == kindSavings {
+		view, accID, err := parseSavingsConfig(contentInEffect)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+			return
+		}
+		if view == "appreciation" && !h.savingsAccountOK(w, r, c, accID) {
+			return
+		}
 	}
 	upd, err := h.widgets.Update(r.Context(), c.row.ID, dashID, wid, repo.DashboardWidgetPatch{
 		Name:    p.Name,
