@@ -14,9 +14,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"finance-tracker/internal/repo"
 
@@ -91,16 +93,24 @@ type memAccountRow struct {
 	subtype  string
 	currency string
 	schema   string
+	benName  string
+	benYear  *int
+	opening  string
+	opened   *time.Time
 }
 
 func toRepoAccount(r memAccountRow) repo.Account {
 	return repo.Account{
-		ID:              r.id,
-		Name:            r.name,
-		Type:            r.typ,
-		Subtype:         r.subtype,
-		Currency:        r.currency,
-		DefaultSchemaID: r.schema,
+		ID:                   r.id,
+		Name:                 r.name,
+		Type:                 r.typ,
+		Subtype:              r.subtype,
+		Currency:             r.currency,
+		DefaultSchemaID:      r.schema,
+		BeneficiaryName:      r.benName,
+		BeneficiaryBirthYear: r.benYear,
+		OpeningBalance:       r.opening,
+		OpenedAt:             r.opened,
 	}
 }
 
@@ -167,10 +177,21 @@ func (m *memAccountStore) Create(_ context.Context, userID string, in repo.Accou
 	if in.DefaultSchemaID != nil && *in.DefaultSchemaID != "" {
 		schema = *in.DefaultSchemaID
 	}
+	opening := "0.00"
+	if in.OpeningBalance != nil && *in.OpeningBalance != "" {
+		opening = *in.OpeningBalance // canonical form from the server
+	}
+	var benYear *int
+	if in.BeneficiaryBirthYear != nil && *in.BeneficiaryBirthYear != "" {
+		y, _ := strconv.Atoi(*in.BeneficiaryBirthYear) // server-validated
+		benYear = &y
+	}
 	id := nextTestID()
 	m.rows = append(m.rows, memAccountRow{
 		userID: userID, id: id, name: name, typ: in.Type,
 		subtype: subtype, currency: in.Currency, schema: schema,
+		benName: in.BeneficiaryName, benYear: benYear,
+		opening: opening, opened: in.OpenedAt,
 	})
 	return toRepoAccount(m.rows[len(m.rows)-1]), nil
 }
@@ -218,6 +239,27 @@ func (m *memAccountStore) Update(_ context.Context, userID, id string, p repo.Ac
 		} else {
 			r.schema = "" // inner-nil or "" = NULL (repo)
 		}
+	}
+	if p.BeneficiaryName != nil {
+		r.benName = *p.BeneficiaryName // "" = clear (repo)
+	}
+	if p.BeneficiaryBirthYear != nil {
+		if *p.BeneficiaryBirthYear == "" {
+			r.benYear = nil // clear (repo)
+		} else {
+			y, _ := strconv.Atoi(*p.BeneficiaryBirthYear) // server-validated
+			r.benYear = &y
+		}
+	}
+	if p.OpeningBalance != nil {
+		if *p.OpeningBalance == "" {
+			r.opening = "0.00" // reset to 0 (repo)
+		} else {
+			r.opening = *p.OpeningBalance // canonical from the server
+		}
+	}
+	if p.OpenedAt != nil {
+		r.opened = *p.OpenedAt // nil = clear (repo)
 	}
 	m.rows[idx] = r
 	return toRepoAccount(r), nil
