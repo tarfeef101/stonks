@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -53,25 +54,40 @@ const (
 	maxTxLimit     = 100
 )
 
+// externalOrigins is the 0019 external_origin vocabulary: where a
+// registered-plan contribution came from when it did not come out of
+// the user's own pocket. The empty string is deliberately NOT in the
+// set — &"" means "unset" (stored NULL), so it is rejected like any
+// out-of-vocabulary value; the 0019 CHECK constraint is the backstop.
+var externalOrigins = map[string]bool{
+	"employer":         true,
+	"government_grant": true,
+	"inherited":        true,
+	"other":            true,
+}
+
 // Transaction is one transactions row with its encrypted fields opened.
 // DateExecuted is nil when unset; CategoryID/Notes/Raw are "" when unset
-// (NULL). Amount is the canonical 2-decimal form ("10.00", "-5.50"),
+// (NULL). TransferGroupID/ExternalOrigin are nil when unset (NULL).
+// Amount is the canonical 2-decimal form ("10.00", "-5.50"),
 // re-canonicalized on scan (see decrypt).
 type Transaction struct {
-	ID            string
-	AccountID     string
-	DateExecuted  *time.Time
-	DatePosted    time.Time
-	Amount        string
-	CategoryID    string
-	OffsetGroupID *string
-	Description   string
-	Notes         string
-	Raw           string
-	DedupHash     string
-	ReviewPending bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID              string
+	AccountID       string
+	DateExecuted    *time.Time
+	DatePosted      time.Time
+	Amount          string
+	CategoryID      string
+	OffsetGroupID   *string
+	TransferGroupID *string
+	ExternalOrigin  *string
+	Description     string
+	Notes           string
+	Raw             string
+	DedupHash       string
+	ReviewPending   bool
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 
 	scan txScan // scratch for the NULL-carrying scan targets
 }
@@ -80,17 +96,21 @@ type Transaction struct {
 // uncategorized, otherwise a category owned by the same user. Notes/Raw
 // are nil or "" = unset (NULL). Description may be "" (real statements
 // have blank memos). Amount is any decimal with <=2 fractional digits;
-// it is canonicalized before storage and hashing.
+// it is canonicalized before storage and hashing. ExternalOrigin is nil
+// = a normal user contribution (stored NULL), otherwise one of the
+// externalOrigins values (stored as-is; the 0019 CHECK constraint is
+// the backstop).
 type TransactionIn struct {
-	AccountID     string
-	DateExecuted  *time.Time
-	DatePosted    time.Time
-	Amount        string
-	CategoryID    *string
-	Description   string
-	Notes         *string
-	Raw           *string
-	ReviewPending bool
+	AccountID      string
+	DateExecuted   *time.Time
+	DatePosted     time.Time
+	Amount         string
+	CategoryID     *string
+	Description    string
+	Notes          *string
+	Raw            *string
+	ReviewPending  bool
+	ExternalOrigin *string
 }
 
 // TransactionPatch is the Update input. nil = untouched. The **string
@@ -255,6 +275,11 @@ func (s *TransactionStore) validateTxIn(ctx context.Context, userID string, in T
 			return "", ErrCategoryNotFound
 		}
 	}
+	// User-facing on purpose (no "repo:" prefix): the 3.2 handler maps
+	// it to a 400 carrying this message, like ErrDateRule.
+	if in.ExternalOrigin != nil && !externalOrigins[*in.ExternalOrigin] {
+		return "", errors.New("external_origin must be one of: employer, government_grant, inherited, other")
+	}
 	amount, err := canonicalAmount(in.Amount)
 	if err != nil {
 		return "", err
@@ -367,17 +392,20 @@ func (s *TransactionStore) insertValidated(ctx context.Context, userID string, i
 		v := *in.CategoryID
 		catArg = &v
 	}
+	// external_origin: nil = NULL (a normal user contribution); a
+	// non-nil pointer is always in-vocabulary (validateTxIn).
 	var id string
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO transactions (user_id, account_id, date_executed, date_posted, amount,
 		                             category_id, description_encrypted, notes_encrypted,
-		                             raw_encrypted, dedup_hash, review_pending)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`+conflictClause+`
+		                             raw_encrypted, dedup_hash, review_pending,
+		                             external_origin)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`+conflictClause+`
 		RETURNING id`,
 		userID, in.AccountID, execArg, dateStr(in.DatePosted), amount,
 		catArg, descPack, notesArg, rawArg,
 		dedupHash(in.AccountID, in.DatePosted, amount, in.Description),
-		in.ReviewPending).Scan(&id)
+		in.ReviewPending, in.ExternalOrigin).Scan(&id)
 	if err != nil {
 		if pgErrCode(err) == "23505" {
 			return "", ErrDedupConflict
@@ -385,6 +413,159 @@ func (s *TransactionStore) insertValidated(ctx context.Context, userID string, i
 		return "", fmt.Errorf("repo: insert transaction: %w", err)
 	}
 	return id, nil
+}
+
+// TransferIn is the CreateTransfer input: one transfer between two of
+// the user's own accounts. Amount is any positive decimal with <=2
+// fractional digits (it is canonicalized; zero and negatives are
+// rejected). DateExecuted is nil = unset on both legs (when set, the
+// 0002 rule applies: not after DatePosted). Description is the verbatim
+// memo for BOTH legs when non-blank after trimming; blank means each
+// leg gets an auto memo naming the account it points to (the account
+// names, decrypted). Notes/Raw/ReviewPending mirror to both legs.
+type TransferIn struct {
+	FromAccountID string
+	ToAccountID   string
+	DateExecuted  *time.Time
+	DatePosted    time.Time
+	Amount        string
+	Description   string
+	Notes         *string
+	Raw           *string
+	ReviewPending bool
+}
+
+// CreateTransfer moves a positive amount from in.FromAccountID to
+// in.ToAccountID, persisting BOTH legs in one database transaction under
+// one shared transfer_group_id (minted in-app, like the offset group
+// ids): the source account gets the debit leg (-amount, auto memo
+// "Transfer to <destination name>"), the destination the credit leg
+// (+amount, "Transfer from <source name>") — a non-blank Description is
+// used verbatim on both legs instead. Both legs share the dates and the
+// mirrored Notes/Raw/ReviewPending, carry NULL category_id and
+// external_origin (a transfer is neither categorized nor an external
+// contribution), and get per-leg dedup hashes (the 0002 formula is
+// account-scoped). A dedup conflict on either leg rolls the whole
+// transfer back: ErrDedupConflict, neither leg persists. Returns the two
+// legs (from, then to) with their fields opened.
+func (s *TransactionStore) CreateTransfer(ctx context.Context, userID string, in TransferIn, dek []byte) (fromLeg, toLeg Transaction, err error) {
+	if in.FromAccountID == in.ToAccountID {
+		return Transaction{}, Transaction{}, errors.New("transfer source and destination must be different accounts")
+	}
+	fromName, err := s.accountName(ctx, userID, in.FromAccountID, dek)
+	if err != nil {
+		return Transaction{}, Transaction{}, err
+	}
+	toName, err := s.accountName(ctx, userID, in.ToAccountID, dek)
+	if err != nil {
+		return Transaction{}, Transaction{}, err
+	}
+	amount, err := canonicalAmount(in.Amount)
+	if err != nil {
+		return Transaction{}, Transaction{}, err
+	}
+	// canonicalAmount accepts negatives and "0.00"; a transfer is a
+	// positive movement only.
+	if amount == "0.00" || strings.HasPrefix(amount, "-") {
+		return Transaction{}, Transaction{}, errors.New("transfer amount must be positive")
+	}
+	if in.DateExecuted != nil && afterDate(*in.DateExecuted, in.DatePosted) {
+		return Transaction{}, Transaction{}, ErrDateRule
+	}
+	// Verbatim memo on both legs when non-blank; otherwise each leg
+	// names the account it points to (the source leg, on the source
+	// account, points AT the destination and vice versa).
+	fromDesc, toDesc := in.Description, in.Description
+	if strings.TrimSpace(in.Description) == "" {
+		fromDesc = "Transfer to " + toName
+		toDesc = "Transfer from " + fromName
+	}
+
+	groupID := uuid.NewString()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Transaction{}, Transaction{}, fmt.Errorf("repo: begin transfer: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op after Commit
+	fromID, err := s.insertTransferLeg(ctx, tx, userID, in.FromAccountID, groupID, in.DateExecuted, in.DatePosted, "-"+amount, fromDesc, in.Notes, in.Raw, in.ReviewPending, dek)
+	if err != nil {
+		return Transaction{}, Transaction{}, err
+	}
+	toID, err := s.insertTransferLeg(ctx, tx, userID, in.ToAccountID, groupID, in.DateExecuted, in.DatePosted, amount, toDesc, in.Notes, in.Raw, in.ReviewPending, dek)
+	if err != nil {
+		return Transaction{}, Transaction{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Transaction{}, Transaction{}, fmt.Errorf("repo: commit transfer: %w", err)
+	}
+	fromLeg, err = s.Get(ctx, userID, fromID, dek)
+	if err != nil {
+		return Transaction{}, Transaction{}, err
+	}
+	toLeg, err = s.Get(ctx, userID, toID, dek)
+	return fromLeg, toLeg, nil
+}
+
+// insertTransferLeg inserts one transfer leg inside the caller's
+// database transaction. category_id and external_origin are omitted
+// from the column list (NULL by construction); transfer_group_id binds
+// the shared group; dedup_hash is per-leg (account-scoped, 0002
+// formula). A 23505 is ErrDedupConflict — the caller's deferred
+// Rollback undoes the whole transfer, so neither leg persists.
+func (s *TransactionStore) insertTransferLeg(ctx context.Context, tx pgx.Tx, userID, accountID, groupID string, dateExecuted *time.Time, datePosted time.Time, amount, description string, notes, raw *string, reviewPending bool, dek []byte) (string, error) {
+	descPack, err := crypto.Seal(dek, []byte(description))
+	if err != nil {
+		return "", fmt.Errorf("repo: seal transfer description: %w", err)
+	}
+	notesArg, err := sealOpt(dek, derefStr(notes))
+	if err != nil {
+		return "", err
+	}
+	rawArg, err := sealOpt(dek, derefStr(raw))
+	if err != nil {
+		return "", err
+	}
+	var execArg any
+	if dateExecuted != nil {
+		execArg = dateStr(*dateExecuted)
+	}
+	var id string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO transactions (user_id, account_id, date_executed, date_posted, amount,
+		                             description_encrypted, notes_encrypted,
+		                             raw_encrypted, dedup_hash, review_pending,
+		                             transfer_group_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id`,
+		userID, accountID, execArg, dateStr(datePosted), amount,
+		descPack, notesArg, rawArg,
+		dedupHash(accountID, datePosted, amount, description),
+		reviewPending, groupID).Scan(&id)
+	if err != nil {
+		if pgErrCode(err) == "23505" {
+			return "", ErrDedupConflict
+		}
+		return "", fmt.Errorf("repo: insert transfer leg: %w", err)
+	}
+	return id, nil
+}
+
+// accountName returns the decrypted name of one of the user's accounts
+// (CreateTransfer auto memos). A missing or other user's account is
+// ErrAccountNotFound — existence not disclosed, same rule as the other
+// reference checks.
+func (s *TransactionStore) accountName(ctx context.Context, userID, accountID string, dek []byte) (string, error) {
+	var pack []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT name_encrypted FROM accounts WHERE user_id = $1 AND id = $2`,
+		userID, accountID).Scan(&pack)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrAccountNotFound
+		}
+		return "", fmt.Errorf("repo: get account name: %w", err)
+	}
+	return decryptName(accountID, pack, dek)
 }
 
 // Get returns one of the user's transactions with its fields opened.
@@ -426,7 +607,8 @@ func (s *TransactionStore) findByDedup(ctx context.Context, userID, accountID st
 
 // txSelect is the shared column list (order = txScanFields order).
 const txSelect = `SELECT id, account_id, date_executed, date_posted, amount, category_id,
-               offset_group_id, description_encrypted, notes_encrypted, raw_encrypted,
+               offset_group_id, transfer_group_id, external_origin,
+               description_encrypted, notes_encrypted, raw_encrypted,
                dedup_hash, review_pending, created_at, updated_at
 		FROM transactions`
 
@@ -437,7 +619,8 @@ func txScanFields(tx *Transaction) []any {
 	tx.scan = txScan{}
 	return []any{
 		&tx.ID, &tx.AccountID, &tx.scan.dateExecuted, &tx.DatePosted,
-		&tx.Amount, &tx.scan.categoryID, &tx.scan.offsetGroupID, &tx.scan.descEnc,
+		&tx.Amount, &tx.scan.categoryID, &tx.scan.offsetGroupID,
+		&tx.scan.transferGroupID, &tx.scan.externalOrigin, &tx.scan.descEnc,
 		&tx.scan.notesEnc, &tx.scan.rawEnc, &tx.DedupHash, &tx.ReviewPending,
 		&tx.CreatedAt, &tx.UpdatedAt,
 	}
@@ -446,12 +629,14 @@ func txScanFields(tx *Transaction) []any {
 // txScan is the scratch for one scanned row (the public Transaction
 // keeps "" / nil for unset values, which SQL returns as NULL).
 type txScan struct {
-	dateExecuted  sql.NullTime
-	categoryID    sql.NullString
-	offsetGroupID sql.NullString
-	descEnc       []byte
-	notesEnc      []byte
-	rawEnc        []byte
+	dateExecuted    sql.NullTime
+	categoryID      sql.NullString
+	offsetGroupID   sql.NullString
+	transferGroupID sql.NullString
+	externalOrigin  sql.NullString
+	descEnc         []byte
+	notesEnc        []byte
+	rawEnc          []byte
 }
 
 // decrypt opens the three encrypted fields and reassembles the public
@@ -498,6 +683,14 @@ func (tx *Transaction) decrypt(dek []byte) error {
 	if tx.scan.offsetGroupID.Valid {
 		s := tx.scan.offsetGroupID.String
 		tx.OffsetGroupID = &s
+	}
+	if tx.scan.transferGroupID.Valid {
+		s := tx.scan.transferGroupID.String
+		tx.TransferGroupID = &s
+	}
+	if tx.scan.externalOrigin.Valid {
+		s := tx.scan.externalOrigin.String
+		tx.ExternalOrigin = &s
 	}
 	return nil
 }
@@ -773,6 +966,85 @@ func (s *TransactionStore) Aggregate(ctx context.Context, userID string, from, t
 	return out, nil
 }
 
+// SavingsSum is one (account, calendar year) bucket of SavingsSums:
+// the signed cents sum of the user's posted transactions per
+// external_origin. Contribution is the external_origin IS NULL bucket
+// (a normal user contribution); the other fields are the 0019
+// vocabulary. Year is the calendar year of date_posted.
+type SavingsSum struct {
+	AccountID       string
+	Year            int
+	Contribution    int64
+	Employer        int64
+	GovernmentGrant int64
+	Inherited       int64
+	Other           int64
+}
+
+// SavingsSums returns the per-(account, calendar year) external-origin
+// sums of the caller's posted transactions — one ownership-scoped
+// query (no account join, no date range). Amounts are signed integer
+// cents: the numeric sums are scanned as strings and converted with
+// parseNumericToCents, never float64 (pgx's numeric render is not
+// scale-preserving, and float64 loses cent precision).
+func (s *TransactionStore) SavingsSums(ctx context.Context, userID string) ([]SavingsSum, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.account_id,
+		       (EXTRACT(YEAR FROM t.date_posted))::int,
+		       COALESCE(SUM(CASE WHEN t.external_origin IS NULL THEN t.amount END), 0),
+		       COALESCE(SUM(CASE WHEN t.external_origin = 'employer' THEN t.amount END), 0),
+		       COALESCE(SUM(CASE WHEN t.external_origin = 'government_grant' THEN t.amount END), 0),
+		       COALESCE(SUM(CASE WHEN t.external_origin = 'inherited' THEN t.amount END), 0),
+		       COALESCE(SUM(CASE WHEN t.external_origin = 'other' THEN t.amount END), 0)
+		FROM transactions t
+		WHERE t.user_id = $1
+		GROUP BY t.account_id, (EXTRACT(YEAR FROM t.date_posted))::int
+		ORDER BY 1, 2`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("repo: savings sums: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SavingsSum, 0, 8)
+	for rows.Next() {
+		var (
+			g         SavingsSum
+			contrib   string
+			employer  string
+			grant     string
+			inherited string
+			other     string
+		)
+		if err := rows.Scan(&g.AccountID, &g.Year, &contrib, &employer, &grant, &inherited, &other); err != nil {
+			return nil, fmt.Errorf("repo: scan savings sums: %w", err)
+		}
+		g.Contribution, err = parseNumericToCents(contrib)
+		if err != nil {
+			return nil, err
+		}
+		g.Employer, err = parseNumericToCents(employer)
+		if err != nil {
+			return nil, err
+		}
+		g.GovernmentGrant, err = parseNumericToCents(grant)
+		if err != nil {
+			return nil, err
+		}
+		g.Inherited, err = parseNumericToCents(inherited)
+		if err != nil {
+			return nil, err
+		}
+		g.Other, err = parseNumericToCents(other)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("repo: savings sums: %w", err)
+	}
+	return out, nil
+}
+
 // Update applies the non-nil fields of p to one of the user's
 // transactions and returns the updated row. A patch that changes
 // description, amount, or date_posted recomputes dedup_hash; the new
@@ -908,15 +1180,39 @@ func (s *TransactionStore) Update(ctx context.Context, userID, id string, p Tran
 	return s.Get(ctx, userID, id, dek)
 }
 
-// Delete removes one of the user's transactions.
+// Delete removes one of the user's transactions. When the row is one
+// leg of a transfer (transfer_group_id set), the partner leg survives:
+// in the same database transaction its transfer_group_id is set to
+// NULL, keeping its amount, dates, and description unchanged.
 func (s *TransactionStore) Delete(ctx context.Context, userID, id string) error {
-	cmdTag, err := s.pool.Exec(ctx, `
-		DELETE FROM transactions WHERE user_id = $1 AND id = $2`, userID, id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		return fmt.Errorf("repo: begin delete transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op after Commit
+	var group sql.NullString
+	err = tx.QueryRow(ctx, `
+		DELETE FROM transactions WHERE user_id = $1 AND id = $2
+		RETURNING transfer_group_id`, userID, id).Scan(&group)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrTransactionNotFound
+		}
 		return fmt.Errorf("repo: delete transaction: %w", err)
 	}
-	if cmdTag.RowsAffected() == 0 {
-		return ErrTransactionNotFound
+	if group.Valid {
+		// Ungroup the surviving partner leg(s); the leg itself is
+		// untouched apart from the group pointer.
+		if _, err := tx.Exec(ctx, `
+			UPDATE transactions
+			SET transfer_group_id = NULL, updated_at = now()
+			WHERE transfer_group_id = $1 AND id <> $2 AND user_id = $3`,
+			group.String, id, userID); err != nil {
+			return fmt.Errorf("repo: clear transfer group: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("repo: commit delete transaction: %w", err)
 	}
 	return nil
 }

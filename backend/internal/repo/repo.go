@@ -21,6 +21,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -135,4 +137,52 @@ func parseBirthYear(s string) (int, error) {
 		return 0, errors.New("birth year must be between 1900 and the current year")
 	}
 	return y, nil
+}
+
+// parseNumericToCents converts a postgres numeric rendered as a string
+// into integer cents. It accepts the same grammar as canonicalAmount
+// (optional sign, at most two fractional digits, optional surrounding
+// whitespace) and rejects anything else: empty, no digits, more than
+// two fractional digits, non-digits, or a value outside int64 range.
+// Sums over numeric columns are rendered by pgx without scale
+// preservation ("0.00" -> "0", "100.5" -> "100.5"), so this is the
+// only safe numeric -> cents path for aggregate results (never
+// float64).
+func parseNumericToCents(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("numeric %q is empty", s)
+	}
+	neg := false
+	switch s[0] {
+	case '-':
+		neg = true
+		s = s[1:]
+	case '+':
+		s = s[1:]
+	}
+	intPart, fracPart := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		intPart, fracPart = s[:i], s[i+1:]
+	}
+	if len(intPart)+len(fracPart) == 0 {
+		return 0, fmt.Errorf("numeric %q is not a valid decimal", s)
+	}
+	if !allDigits(intPart) || !allDigits(fracPart) {
+		return 0, fmt.Errorf("numeric %q is not a valid decimal", s)
+	}
+	if len(fracPart) > 2 {
+		return 0, fmt.Errorf("numeric %q has more than 2 decimal places", s)
+	}
+	for len(fracPart) < 2 {
+		fracPart += "0"
+	}
+	cents, err := strconv.ParseInt(intPart+fracPart, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("numeric %q is out of range: %w", s, err)
+	}
+	if neg {
+		cents = -cents
+	}
+	return cents, nil
 }
