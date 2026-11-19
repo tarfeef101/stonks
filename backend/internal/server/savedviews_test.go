@@ -137,7 +137,7 @@ func newSVServer(t *testing.T, sv SavedViewStore) (http.Handler, jwk.Key) {
 	return New(
 		fakeReady{}, BuildInfo{}, liveAuth(t, key), b,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, sv, nil, nil, false, nil, nil, nil, nil,
+		nil, nil, sv, nil, nil, false, nil, nil, nil, nil, nil, nil, nil,
 	), key
 }
 

@@ -600,6 +600,12 @@ func (m *memTxStore) TrendAggregate(_ context.Context, userID, period string, fr
 	return out, nil
 }
 
+// SavingsSums is the savings-plan rollup; the transaction and summary
+// routes never call it (the savings routes do, in a later step).
+func (m *memTxStore) SavingsSums(_ context.Context, _ string) ([]repo.SavingsSum, error) {
+	return nil, nil
+}
+
 // newTxServer builds a full router with a live token verifier, an
 // in-memory bootstrap, and the given stores (nil allowed — that is the
 // 503 path). The key is returned so tests can mint tokens for several
@@ -611,7 +617,7 @@ func newTxServer(t *testing.T, tx TransactionStore, cats CategoryStore, budgets 
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, cats, tx, budgets, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, cats, tx, budgets, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil), key
 }
 
 // setOne adds id to a user's ownership set, creating the set if needed.
@@ -1332,7 +1338,7 @@ func TestTransactionErrors(t *testing.T) {
 func TestTransactionAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, &memTxStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, &memTxStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil)
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/transactions", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

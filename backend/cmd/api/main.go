@@ -245,7 +245,7 @@ func main() {
 		savedViews = repo.NewSavedViewStore(pool)
 	}
 
-	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, savedViews, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions, fxClient)
+	router := server.New(ready, server.BuildInfo{Version: version, Commit: commit}, verifier, bootstrap, settings, accounts, categories, transactions, budgets, notifications, schemas, imports, jobs, review, reprompt, llmCreds, dashboards, widgets, savedViews, repo.NewMortgageStore(pool), mailer, mailEnabled, repo.NewInstitutionStore(pool), repo.NewFICredentialStore(pool), transactions, fxClient, repo.NewUserStore(pool), repo.NewSnapshotStore(pool), repo.NewPlanStore(pool))
 	// WrapHandle is nil-safe and a no-op while the agent is disabled.
 	// Route-accurate transaction naming can replace the static pattern in
 	// a later step.

@@ -91,7 +91,7 @@ func newOffsetServer(t *testing.T, store OffsetStore) (http.Handler, jwk.Key) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, store, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, store, nil, nil, nil, nil), key
 }
 
 // offsetTx is a canned repo.Transaction leg with only the fields the

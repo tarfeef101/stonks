@@ -118,6 +118,9 @@ type handler struct {
 	fiCredentials FICredentialStore
 	offsets       OffsetStore
 	fx            FX
+	users         SavingsUserStore
+	snapshots     SnapshotStore
+	plans         PlanStore
 	m             *httpMetrics
 }
 
@@ -177,7 +180,7 @@ type handler struct {
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
 // reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore, fx FX) http.Handler {
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore, fx FX, users SavingsUserStore, snapshots SnapshotStore, plans PlanStore) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -207,6 +210,9 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		fiCredentials: fiCredentials,
 		offsets:       offsets,
 		fx:            fx,
+		users:         users,
+		snapshots:     snapshots,
+		plans:         plans,
 		m:             newHTTPMetrics(),
 	}
 
@@ -271,6 +277,11 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// Summary (step 3.2): per-period aggregation with the active
 		// budget targets and category names joined in.
 		r.Get("/v1/summary", h.summary)
+		// Savings room (52a1): per-plan room cards and the
+		// registered/investment rollups for one calendar year, plus the
+		// holder birth-year setter the RRIF minimum depends on.
+		r.Get("/v1/savings/room", h.savingsRoom)
+		r.Patch("/v1/me/birth-year", h.patchBirthYear)
 		// Budgets (step 3.3). No single-GET route (the List covers it);
 		// period is immutable (absent from the PATCH body).
 		r.Get("/v1/budgets", h.budgetsList)

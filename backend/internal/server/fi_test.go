@@ -175,7 +175,7 @@ func newFIServer(t *testing.T, inst InstitutionStore, creds FICredentialStore) (
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, inst, creds, nil, nil)
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, inst, creds, nil, nil, nil, nil, nil)
 	return h, key
 }
 

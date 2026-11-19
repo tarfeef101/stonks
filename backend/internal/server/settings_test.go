@@ -155,7 +155,7 @@ func newSettingsServerWithMail(t *testing.T, sub string, store SettingsStore, ma
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, mailer, mailEnabled, nil, nil, nil, nil)
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, mailer, mailEnabled, nil, nil, nil, nil, nil, nil, nil)
 	return h, mintIdentityToken(t, key, sub, sub+"@localhost", sub, sub)
 }
 
@@ -425,7 +425,7 @@ func TestSettingsNotConfigured(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := mintKey(t)
-			h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), tc.bootstrap, tc.settings, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil)
+			h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), tc.bootstrap, tc.settings, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil)
 			token := mintIdentityToken(t, key, "nc-sub", "n@localhost", "N", "n")
 			code, body := doReq(t, h, http.MethodGet, "/api/v1/settings", "",
 				map[string]string{"Authorization": "Bearer " + token})
