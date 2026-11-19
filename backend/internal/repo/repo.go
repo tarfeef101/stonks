@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -76,6 +77,13 @@ var (
 	ErrOffsetGroupNotFound      = errors.New("repo: offset group not found")
 	ErrOffsetAlreadyGrouped     = errors.New("repo: a transaction is already in an offset group")
 	ErrOffsetNotBalanced        = errors.New("repo: the offset transactions do not net to zero")
+
+	// Savings / registered plans (round 51, migration 0019).
+	ErrSnapshotNotFound      = errors.New("repo: snapshot not found")
+	ErrSnapshotConflict      = errors.New("repo: a snapshot already exists for this account and as-of date")
+	ErrLimitOverrideNotFound = errors.New("repo: limit override not found")
+	ErrAdjustmentNotFound    = errors.New("repo: room adjustment not found")
+	ErrUserNotFound          = errors.New("repo: user not found")
 )
 
 // hashName computes the §5 plaintext name_hash.
@@ -105,4 +113,26 @@ func pgErrCode(err error) string {
 		return pgErr.Code
 	}
 	return ""
+}
+
+// parseBirthYear validates and parses a birth year supplied by the user:
+// exactly 4 digits with 1900 ≤ y ≤ the current UTC year. The year is
+// personal data and is stored only in sealed form (see the *_encrypted
+// columns added by migration 0019); this validator is shared by the
+// account beneficiary and the user's own birth year.
+func parseBirthYear(s string) (int, error) {
+	if len(s) != 4 {
+		return 0, errors.New("birth year must be exactly 4 digits")
+	}
+	y := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, errors.New("birth year must be exactly 4 digits")
+		}
+		y = y*10 + int(r-'0')
+	}
+	if y < 1900 || y > time.Now().UTC().Year() {
+		return 0, errors.New("birth year must be between 1900 and the current year")
+	}
+	return y, nil
 }
