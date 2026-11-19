@@ -25,8 +25,10 @@ import (
 )
 
 // TransactionStore is the persistence surface the transaction handlers
-// need. *repo.TransactionStore satisfies it (its extra Get is unused
-// here); route tests use an in-memory implementation. Upsert is the
+// need. *repo.TransactionStore satisfies it in full; route tests use
+// an in-memory implementation. Get backs the PATCH-time transfer-leg
+// lookup and CreateTransfer persists both legs of a transfer under one
+// shared group. Upsert is the
 // dedup-aware single-row insert; UpsertBatch is the dedup-aware batch
 // insert the 4.6 import runner calls once per run (perRow[i] is true
 // iff ins[i] landed, false when its dedup identity already existed).
@@ -41,6 +43,8 @@ type TransactionStore interface {
 	Aggregate(ctx context.Context, userID string, from, to time.Time, accountIDs []string) ([]repo.CategorySpend, error)
 	TrendAggregate(ctx context.Context, userID, period string, from, to time.Time, accountIDs []string) ([]repo.TrendBucket, error)
 	SavingsSums(ctx context.Context, userID string) ([]repo.SavingsSum, error)
+	Get(ctx context.Context, userID, id string, dek []byte) (repo.Transaction, error)
+	CreateTransfer(ctx context.Context, userID string, in repo.TransferIn, dek []byte) (fromLeg, toLeg repo.Transaction, err error)
 }
 
 // Wire DTOs. transactionOut excludes DedupHash (re-import identity) and
@@ -61,6 +65,8 @@ type transactionOut struct {
 	Notes             *string `json:"notes"`
 	Raw               *string `json:"raw"`
 	ReviewPending     bool    `json:"review_pending"`
+	TransferGroupID   *string `json:"transfer_group_id"`
+	ExternalOrigin    *string `json:"external_origin"`
 }
 
 func toTransactionOut(tx repo.Transaction) transactionOut {
@@ -70,16 +76,18 @@ func toTransactionOut(tx repo.Transaction) transactionOut {
 		executed = &s
 	}
 	return transactionOut{
-		ID:            tx.ID,
-		AccountID:     tx.AccountID,
-		DateExecuted:  executed,
-		DatePosted:    dateOnly(tx.DatePosted),
-		Amount:        tx.Amount,
-		CategoryID:    strOrNil(tx.CategoryID),
-		Description:   tx.Description,
-		Notes:         strOrNil(tx.Notes),
-		Raw:           strOrNil(tx.Raw),
-		ReviewPending: tx.ReviewPending,
+		ID:              tx.ID,
+		AccountID:       tx.AccountID,
+		DateExecuted:    executed,
+		DatePosted:      dateOnly(tx.DatePosted),
+		Amount:          tx.Amount,
+		CategoryID:      strOrNil(tx.CategoryID),
+		Description:     tx.Description,
+		Notes:           strOrNil(tx.Notes),
+		Raw:             strOrNil(tx.Raw),
+		ReviewPending:   tx.ReviewPending,
+		TransferGroupID: tx.TransferGroupID,
+		ExternalOrigin:  tx.ExternalOrigin,
 	}
 }
 
@@ -97,6 +105,14 @@ type transactionIn struct {
 	Notes         *string `json:"notes"`
 	Raw           *string `json:"raw"`
 	ReviewPending bool    `json:"review_pending"`
+	// TransferFromAccountID present (non-null) makes the POST a
+	// transfer between the two accounts; the answer is the two legs
+	// keyed "from" (source debit) and "to" (destination credit)
+	// instead of one row. Null or "" is a normal single-row create.
+	TransferFromAccountID *string `json:"transfer_from_account_id"`
+	// ExternalOrigin names where an external contribution came from
+	// (the 0019 vocabulary); null or "" = a normal user contribution.
+	ExternalOrigin *string `json:"external_origin"`
 }
 
 // transactionPatch is the PATCH body. Plain pointers are null = absent
@@ -146,6 +162,16 @@ func afterDateOnly(a, b time.Time) bool {
 	return dateOnly(a) > dateOnly(b)
 }
 
+// externalOriginSet is the 0019 origin vocabulary (the handler's own
+// copy of the repo's set: buildTxIn pre-validates so a bad value is a
+// 400, not a 500 through transactionError).
+var externalOriginSet = map[string]bool{
+	"employer":         true,
+	"government_grant": true,
+	"inherited":        true,
+	"other":            true,
+}
+
 // buildTxIn converts the POST body to repo input, running every check
 // the repo would otherwise surface as a 500 (malformed ids, dates,
 // amounts) with the repo's exact messages; all problems are collected
@@ -192,16 +218,69 @@ func buildTxIn(b transactionIn) (repo.TransactionIn, error) {
 	if b.Raw != nil && *b.Raw != "" {
 		in.Raw = b.Raw
 	}
-	if _, err := repo.CanonicalAmount(b.Amount); err != nil {
-		problems = append(problems, err.Error())
+	canonical, canErr := repo.CanonicalAmount(b.Amount)
+	if canErr != nil {
+		problems = append(problems, canErr.Error())
 	}
 	if postedOK && in.DateExecuted != nil && afterDateOnly(*in.DateExecuted, in.DatePosted) {
 		problems = append(problems, "date_executed must not be after date_posted")
+	}
+	if b.ExternalOrigin != nil && *b.ExternalOrigin != "" {
+		if !externalOriginSet[*b.ExternalOrigin] {
+			problems = append(problems, "external_origin must be one of: employer, government_grant, inherited, other")
+		} else if canErr != nil || canonical == "0.00" || strings.HasPrefix(canonical, "-") {
+			problems = append(problems, "external_origin requires a positive amount")
+		} else {
+			o := *b.ExternalOrigin
+			in.ExternalOrigin = &o
+		}
 	}
 	if len(problems) > 0 {
 		return repo.TransactionIn{}, errors.New(strings.Join(problems, "; "))
 	}
 	return in, nil
+}
+
+// buildTransferIn converts a transfer POST body (transfer_from_account_id
+// present) to repo.TransferIn. The shared checks already ran in
+// buildTxIn (account shape, dates, canonical amount, the date rule);
+// this adds the transfer-specific rules with the repo's exact messages:
+// the source must be a valid UUID different from the destination, the
+// amount must be positive, and category/origin are not transfer fields.
+// All problems are collected and joined with "; " (house style).
+func buildTransferIn(b transactionIn, repoIn repo.TransactionIn) (repo.TransferIn, error) {
+	var problems []string
+	from := *b.TransferFromAccountID
+	if !uuidShapeOK(from) {
+		problems = append(problems, "transfer_from_account_id must be a valid UUID")
+	}
+	if from == repoIn.AccountID {
+		problems = append(problems, "transfer source and destination must be different accounts")
+	}
+	canonical, canErr := repo.CanonicalAmount(repoIn.Amount)
+	if canErr == nil && (canonical == "0.00" || strings.HasPrefix(canonical, "-")) {
+		problems = append(problems, "transfer amount must be positive")
+	}
+	if b.CategoryID != nil {
+		problems = append(problems, "category_id is not allowed on a transfer")
+	}
+	if b.ExternalOrigin != nil && *b.ExternalOrigin != "" {
+		problems = append(problems, "external_origin is not allowed on a transfer")
+	}
+	if len(problems) > 0 {
+		return repo.TransferIn{}, errors.New(strings.Join(problems, "; "))
+	}
+	return repo.TransferIn{
+		FromAccountID: from,
+		ToAccountID:   repoIn.AccountID,
+		DateExecuted:  repoIn.DateExecuted,
+		DatePosted:    repoIn.DatePosted,
+		Amount:        repoIn.Amount,
+		Description:   repoIn.Description,
+		Notes:         repoIn.Notes,
+		Raw:           repoIn.Raw,
+		ReviewPending: repoIn.ReviewPending,
+	}, nil
 }
 
 // buildTxPatch converts the PATCH body to repo input. Wrong tri-state
@@ -441,6 +520,23 @@ func (h *handler) transactionsCreate(w http.ResponseWriter, r *http.Request) {
 	repoIn, err := buildTxIn(in)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+		return
+	}
+	if in.TransferFromAccountID != nil {
+		tIn, err := buildTransferIn(in, repoIn)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
+			return
+		}
+		fromLeg, toLeg, err := h.transactions.CreateTransfer(r.Context(), c.row.ID, tIn, c.dek)
+		if err != nil {
+			h.transactionError(w, "create-transfer", err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]transactionOut{
+			"from": toTransactionOut(fromLeg),
+			"to":   toTransactionOut(toLeg),
+		})
 		return
 	}
 	tx, err := h.transactions.Create(r.Context(), c.row.ID, repoIn, c.dek)

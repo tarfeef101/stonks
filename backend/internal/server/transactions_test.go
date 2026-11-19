@@ -55,8 +55,9 @@ type memTxRow struct {
 // handler's error mapping (real failures need a DB).
 type memTxStore struct {
 	rows           []memTxRow
-	accounts       map[string]map[string]bool // userID -> owned account ids
-	categories     map[string]map[string]bool // userID -> owned category ids
+	accounts       map[string]map[string]bool   // userID -> owned account ids
+	categories     map[string]map[string]bool   // userID -> owned category ids
+	accountNames   map[string]map[string]string // userID -> accountID -> name (transfer auto memos)
 	listErr        error
 	createErr      error
 	updateErr      error
@@ -108,6 +109,31 @@ func (m *memTxStore) markCategory(userID, id string) {
 		m.categories = map[string]map[string]bool{}
 	}
 	m.categories[userID] = setOne(m.categories[userID], id)
+}
+
+// markAccountNamed records ownership plus the account's name (the
+// transfer auto memos name the counterparty).
+func (m *memTxStore) markAccountNamed(userID, id, name string) {
+	m.markAccount(userID, id)
+	if m.accountNames == nil {
+		m.accountNames = map[string]map[string]string{}
+	}
+	if m.accountNames[userID] == nil {
+		m.accountNames[userID] = map[string]string{}
+	}
+	m.accountNames[userID][id] = name
+}
+
+// accountName mirrors the repo's CreateTransfer name lookup: an
+// unowned account is ErrAccountNotFound — existence not disclosed.
+func (m *memTxStore) accountName(userID, id string) (string, error) {
+	if !m.ownAccount(userID, id) {
+		return "", repo.ErrAccountNotFound
+	}
+	if m.accountNames == nil {
+		return "", nil
+	}
+	return m.accountNames[userID][id], nil
 }
 
 func (m *memTxStore) find(userID, id string) int {
@@ -170,22 +196,118 @@ func (m *memTxStore) Create(_ context.Context, userID string, in repo.Transactio
 	}
 	now := time.Now().UTC()
 	tx := repo.Transaction{
-		ID:            nextTestID(),
-		AccountID:     in.AccountID,
-		DateExecuted:  in.DateExecuted,
-		DatePosted:    in.DatePosted,
-		Amount:        amount,
-		CategoryID:    cat,
-		Description:   in.Description,
-		Notes:         notes,
-		Raw:           raw,
-		DedupHash:     hash,
-		ReviewPending: in.ReviewPending,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:             nextTestID(),
+		AccountID:      in.AccountID,
+		DateExecuted:   in.DateExecuted,
+		DatePosted:     in.DatePosted,
+		Amount:         amount,
+		CategoryID:     cat,
+		Description:    in.Description,
+		Notes:          notes,
+		Raw:            raw,
+		DedupHash:      hash,
+		ExternalOrigin: in.ExternalOrigin,
+		ReviewPending:  in.ReviewPending,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	m.rows = append(m.rows, memTxRow{userID: userID, tx: tx})
 	return tx, nil
+}
+
+// Get returns one of the user's rows (the repo's single-row read; the
+// PATCH guard in 52b2b uses it to fetch the leg before patching).
+func (m *memTxStore) Get(_ context.Context, userID, id string, _ []byte) (repo.Transaction, error) {
+	i := m.find(userID, id)
+	if i < 0 {
+		return repo.Transaction{}, repo.ErrTransactionNotFound
+	}
+	return m.rows[i].tx, nil
+}
+
+// CreateTransfer mirrors the repo's transfer semantics in the repo's
+// check order: from==to, both account names (ErrAccountNotFound),
+// canonical amount, positive-only, executed-not-after-posted; then the
+// verbatim-or-auto memos (a blank description names the counterparty on
+// each leg), one shared group id, NULL category and origin on both
+// legs, per-leg dedup (a conflict on either leg means neither persists),
+// and the debit(-)/credit(+) signs.
+func (m *memTxStore) CreateTransfer(_ context.Context, userID string, in repo.TransferIn, _ []byte) (repo.Transaction, repo.Transaction, error) {
+	if in.FromAccountID == in.ToAccountID {
+		return repo.Transaction{}, repo.Transaction{}, errors.New("transfer source and destination must be different accounts")
+	}
+	fromName, err := m.accountName(userID, in.FromAccountID)
+	if err != nil {
+		return repo.Transaction{}, repo.Transaction{}, err
+	}
+	toName, err := m.accountName(userID, in.ToAccountID)
+	if err != nil {
+		return repo.Transaction{}, repo.Transaction{}, err
+	}
+	amount, err := repo.CanonicalAmount(in.Amount)
+	if err != nil {
+		return repo.Transaction{}, repo.Transaction{}, err
+	}
+	if amount == "0.00" || strings.HasPrefix(amount, "-") {
+		return repo.Transaction{}, repo.Transaction{}, errors.New("transfer amount must be positive")
+	}
+	if in.DateExecuted != nil && dateOnly(*in.DateExecuted) > dateOnly(in.DatePosted) {
+		return repo.Transaction{}, repo.Transaction{}, repo.ErrDateRule
+	}
+	fromDesc, toDesc := in.Description, in.Description
+	if strings.TrimSpace(in.Description) == "" {
+		fromDesc = "Transfer to " + toName
+		toDesc = "Transfer from " + fromName
+	}
+	groupID := nextTestID()
+	notes, raw := "", ""
+	if in.Notes != nil {
+		notes = *in.Notes
+	}
+	if in.Raw != nil {
+		raw = *in.Raw
+	}
+	fromHash := memDedupHash(in.FromAccountID, in.DatePosted, "-"+amount, fromDesc)
+	toHash := memDedupHash(in.ToAccountID, in.DatePosted, amount, toDesc)
+	for _, r := range m.rows {
+		if r.userID == userID && (r.tx.DedupHash == fromHash || r.tx.DedupHash == toHash) {
+			return repo.Transaction{}, repo.Transaction{}, repo.ErrDedupConflict
+		}
+	}
+	now := time.Now().UTC()
+	g := groupID
+	fromLeg := repo.Transaction{
+		ID:              nextTestID(),
+		AccountID:       in.FromAccountID,
+		DateExecuted:    in.DateExecuted,
+		DatePosted:      in.DatePosted,
+		Amount:          "-" + amount,
+		TransferGroupID: &g,
+		Description:     fromDesc,
+		Notes:           notes,
+		Raw:             raw,
+		DedupHash:       fromHash,
+		ReviewPending:   in.ReviewPending,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	toLeg := repo.Transaction{
+		ID:              nextTestID(),
+		AccountID:       in.ToAccountID,
+		DateExecuted:    in.DateExecuted,
+		DatePosted:      in.DatePosted,
+		Amount:          amount,
+		TransferGroupID: &g,
+		Description:     toDesc,
+		Notes:           notes,
+		Raw:             raw,
+		DedupHash:       toHash,
+		ReviewPending:   in.ReviewPending,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	m.rows = append(m.rows, memTxRow{userID: userID, tx: fromLeg}, memTxRow{userID: userID, tx: toLeg})
+	return fromLeg, toLeg, nil
 }
 
 func (m *memTxStore) Update(_ context.Context, userID, id string, p repo.TransactionPatch, _ []byte) (repo.Transaction, error) {
@@ -258,6 +380,9 @@ func (m *memTxStore) Update(_ context.Context, userID, id string, p repo.Transac
 	return tx, nil
 }
 
+// Delete mirrors the repo: the row's partner transfer leg (if any)
+// survives with its transfer_group_id cleared; its amount, dates, and
+// description are untouched.
 func (m *memTxStore) Delete(_ context.Context, userID, id string) error {
 	if m.deleteErr != nil {
 		return m.deleteErr
@@ -266,7 +391,19 @@ func (m *memTxStore) Delete(_ context.Context, userID, id string) error {
 	if i < 0 {
 		return repo.ErrTransactionNotFound
 	}
+	group := m.rows[i].tx.TransferGroupID
 	m.rows = append(m.rows[:i], m.rows[i+1:]...)
+	if group != nil {
+		g := *group
+		now := time.Now().UTC()
+		for j, r := range m.rows {
+			if r.userID == userID && r.tx.TransferGroupID != nil && *r.tx.TransferGroupID == g {
+				r.tx.TransferGroupID = nil
+				r.tx.UpdatedAt = now
+				m.rows[j] = r
+			}
+		}
+	}
 	return nil
 }
 

@@ -100,6 +100,12 @@ func (f *fakeTxns) TrendAggregate(ctx context.Context, userID, period string, fr
 func (f *fakeTxns) SavingsSums(ctx context.Context, userID string) ([]repo.SavingsSum, error) {
 	return f.sums, nil
 }
+func (f *fakeTxns) Get(ctx context.Context, userID, id string, dek []byte) (repo.Transaction, error) {
+	return repo.Transaction{}, nil
+}
+func (f *fakeTxns) CreateTransfer(ctx context.Context, userID string, in repo.TransferIn, dek []byte) (repo.Transaction, repo.Transaction, error) {
+	return repo.Transaction{}, repo.Transaction{}, nil
+}
 
 type fakeSnaps struct {
 	snapshots map[string][]repo.Snapshot
