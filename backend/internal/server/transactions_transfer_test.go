@@ -353,3 +353,153 @@ func TestOriginCreate(t *testing.T) {
 		}
 	})
 }
+
+// TestTransferPatchImmutability pins the 52b2b guard: a transfer leg
+// answers 409 for any patch to amount/date_posted/date_executed (both
+// legs, exact message), while description-only patches and patches on
+// ordinary rows still succeed, and a missing row still 404s through
+// the guard's Get.
+func TestTransferPatchImmutability(t *testing.T) {
+	store := &memTxStore{}
+	h, key := newTxServer(t, store, nil, nil)
+	tok := mintIdentityToken(t, key, "tf-b", "tf-b@localhost", "T", "B")
+	user := "id-tf-b"
+	fromAcc := nextTestID()
+	toAcc := nextTestID()
+	store.markAccount(user, fromAcc)
+	store.markAccount(user, toAcc)
+	hdr := authHdr(tok)
+
+	body := `{"account_id":"` + toAcc + `","date_posted":"2026-03-05","amount":"40","description":"m","transfer_from_account_id":"` + fromAcc + `"}`
+	code, out := doReq(t, h, http.MethodPost, "/api/v1/transactions", body, hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", code, out)
+	}
+	var legs transferOut
+	if err := json.Unmarshal([]byte(out), &legs); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+	patch := func(id, body string) (int, string) {
+		return doReq(t, h, http.MethodPatch, "/api/v1/transactions/"+id, body, hdr)
+	}
+
+	for _, tc := range []struct{ field string }{
+		{"amount"},
+		{"date_posted"},
+		{"date_executed"},
+	} {
+		t.Run(tc.field+" is 409", func(t *testing.T) {
+			var body string
+			switch tc.field {
+			case "amount":
+				body = `{"amount":"99.99"}`
+			case "date_posted":
+				body = `{"date_posted":"2026-03-06"}`
+			case "date_executed":
+				body = `{"date_executed":"2026-03-04"}`
+			}
+			code, out := patch(legs.From.ID, body)
+			if code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409 (body %s)", code, out)
+			}
+			if c, m := apiErr(t, out); c != codeConflict || m != "transfer legs cannot be modified: amount, date_posted and date_executed are immutable" {
+				t.Errorf("error = %s/%q", c, m)
+			}
+		})
+	}
+
+	t.Run("the to leg is guarded too", func(t *testing.T) {
+		code, out := patch(legs.To.ID, `{"amount":"1"}`)
+		if code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 (body %s)", code, out)
+		}
+	})
+
+	t.Run("description-only patch still allowed", func(t *testing.T) {
+		code, out := patch(legs.From.ID, `{"description":"renamed leg"}`)
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", code, out)
+		}
+		var row transactionOut
+		if err := json.Unmarshal([]byte(out), &row); err != nil {
+			t.Fatalf("decode: %v (body %s)", err, out)
+		}
+		if row.Description != "renamed leg" || row.TransferGroupID == nil {
+			t.Errorf("row = %+v", row)
+		}
+	})
+
+	t.Run("a normal row amount patch is untouched by the guard", func(t *testing.T) {
+		normal := seedTx(t, store, user, fromAcc, "", "2026-03-06", "-5.00", "plain", "")
+		code, out := patch(normal.ID, `{"amount":"-6.00"}`)
+		if code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", code, out)
+		}
+	})
+
+	t.Run("404 on a missing row is not shadowed", func(t *testing.T) {
+		code, out := patch(nextTestID(), `{"amount":"1"}`)
+		if code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (body %s)", code, out)
+		}
+		if c, m := apiErr(t, out); c != codeNotFound || m != "transaction not found" {
+			t.Errorf("error = %s/%q", c, m)
+		}
+	})
+}
+
+// TestTransferDeletePartner pins the delete path: removing one leg
+// answers 204, the partner leg survives with its transfer_group_id
+// cleared (the round-52b2a fake mirrors the repo's ungrouping), and
+// the survivor's amount, dates, and memo are untouched.
+func TestTransferDeletePartner(t *testing.T) {
+	store := &memTxStore{}
+	h, key := newTxServer(t, store, nil, nil)
+	tok := mintIdentityToken(t, key, "tf-c", "tf-c@localhost", "T", "C")
+	user := "id-tf-c"
+	fromAcc := nextTestID()
+	toAcc := nextTestID()
+	store.markAccountNamed(user, fromAcc, "Chequings")
+	store.markAccountNamed(user, toAcc, "TFSA")
+	hdr := authHdr(tok)
+
+	body := `{"account_id":"` + toAcc + `","date_posted":"2026-03-07","amount":"30","transfer_from_account_id":"` + fromAcc + `"}`
+	code, out := doReq(t, h, http.MethodPost, "/api/v1/transactions", body, hdr)
+	if code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", code, out)
+	}
+	var legs transferOut
+	if err := json.Unmarshal([]byte(out), &legs); err != nil {
+		t.Fatalf("decode: %v (body %s)", err, out)
+	}
+
+	code, out = doReq(t, h, http.MethodDelete, "/api/v1/transactions/"+legs.From.ID, "", hdr)
+	if code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (body %s)", code, out)
+	}
+
+	code, out = doReq(t, h, http.MethodGet, "/api/v1/transactions", "", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("list: status = %d (body %s)", code, out)
+	}
+	rows := txList(t, out)
+	var survivor *transactionOut
+	for _, r := range rows {
+		if r.ID == legs.To.ID {
+			c := r
+			survivor = &c
+		}
+		if r.ID == legs.From.ID {
+			t.Errorf("deleted leg still listed: %+v", r)
+		}
+	}
+	if survivor == nil {
+		t.Fatalf("survivor leg missing from list: %s", out)
+	}
+	if survivor.TransferGroupID != nil {
+		t.Errorf("group = %v, want null (the partner was deleted)", *survivor.TransferGroupID)
+	}
+	if survivor.Amount != "30.00" || survivor.DatePosted != "2026-03-07" || survivor.Description != "Transfer from Chequings" {
+		t.Errorf("survivor mutated: %+v", survivor)
+	}
+}

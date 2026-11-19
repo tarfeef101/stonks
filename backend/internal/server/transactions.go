@@ -550,7 +550,9 @@ func (h *handler) transactionsCreate(w http.ResponseWriter, r *http.Request) {
 // transactionsUpdate serves PATCH /api/v1/transactions/{id}. A
 // malformed id answers 404 (not_found) instead of reaching the DB; a
 // well-formed id the caller does not own is also 404 (existence is not
-// disclosed).
+// disclosed). A transfer leg answers 409 for any patch to its amount
+// or dates: the legs share one group, and editing either would desync
+// its partner (the repo has no such rule, so the handler enforces it).
 func (h *handler) transactionsUpdate(w http.ResponseWriter, r *http.Request) {
 	if h.transactions == nil {
 		notConfigured(w)
@@ -579,6 +581,17 @@ func (h *handler) transactionsUpdate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, err.Error())
 		return
+	}
+	if repoP.Amount != nil || repoP.DatePosted != nil || repoP.DateExecuted != nil {
+		cur, err := h.transactions.Get(r.Context(), c.row.ID, id, c.dek)
+		if err != nil {
+			h.transactionError(w, "get", err)
+			return
+		}
+		if cur.TransferGroupID != nil {
+			writeAPIError(w, http.StatusConflict, codeConflict, "transfer legs cannot be modified: amount, date_posted and date_executed are immutable")
+			return
+		}
 	}
 	tx, err := h.transactions.Update(r.Context(), c.row.ID, id, repoP, c.dek)
 	if err != nil {
