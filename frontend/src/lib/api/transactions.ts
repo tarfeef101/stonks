@@ -17,11 +17,18 @@ export interface Transaction {
 	date_executed: string | null;
 	date_posted: string;
 	amount: string;
+	currency: string;
+	/** The amount in the user's default currency — populated in list
+	 * responses only; "" when the backend did not convert the row. */
+	amount_converted: string;
+	converted_currency: string;
 	category_id: string | null;
 	description: string;
 	notes: string | null;
 	raw: string | null;
 	review_pending: boolean;
+	transfer_group_id: string | null;
+	external_origin: string | null;
 }
 
 /** The POST /v1/transactions body. Absent optionals are OMITTED from
@@ -41,13 +48,24 @@ export interface CreateTransactionInput {
 	/** YYYY-MM-DD; must not be after date_posted. */
 	date_executed?: string;
 	notes?: string;
+	/** Present, the POST creates a transfer: both legs are stored and
+	 * the response is {from, to} instead of a single row. */
+	transfer_from_account_id?: string;
+	/** Where an external contribution came from. Requires a positive
+	 * amount; not allowed on a transfer. */
+	external_origin?: 'employer' | 'government_grant' | 'inherited' | 'other';
 }
 
-/** Creates a transaction (201 + the row). A row with the same dedup key
- * (account, posted date, amount, normalized description) answers 409
- * (conflict). */
-export function createTransaction(input: CreateTransactionInput): Promise<Transaction> {
-	return api<Transaction>('/v1/transactions', { method: 'POST', body: input });
+/** Creates a transaction. When transfer_from_account_id is present the
+ * backend creates both transfer legs and answers {from, to} instead of
+ * a single row. */
+export function createTransaction(
+	input: CreateTransactionInput
+): Promise<Transaction | { from: Transaction; to: Transaction }> {
+	return api<Transaction | { from: Transaction; to: Transaction }>('/v1/transactions', {
+		method: 'POST',
+		body: input
+	});
 }
 
 /** List filters for GET /v1/transactions (step 3.2), AND-combined on the

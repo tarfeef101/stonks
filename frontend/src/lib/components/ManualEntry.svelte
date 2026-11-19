@@ -87,7 +87,10 @@
 		created = null;
 		const input = buildInput();
 		try {
-			const tx: Transaction = await createTransaction(input);
+			// This form never creates transfers, so the response is a
+			// single row.
+			const result = await createTransaction(input);
+			const tx: Transaction = 'id' in result ? result : result.to;
 			notifyDataChanged();
 			created = { id: tx.id, amount: input.amount, datePosted: input.date_posted };
 			// Reset the entry fields; the account + category keep their

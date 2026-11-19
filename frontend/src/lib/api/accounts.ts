@@ -16,17 +16,30 @@ export interface Account {
 	subtype: string | null;
 	currency: string;
 	default_schema_id: string | null;
+	beneficiary_name: string | null;
+	beneficiary_birth_year: number | null;
+	/** Canonical 2-decimal string. */
+	opening_balance: string;
+	/** "YYYY-MM-DD" or null. */
+	opened_at: string | null;
 }
 
-/** The 6 account types (the 0002 accounts.type vocabulary; the backend
- * rejects anything else with a 400). */
+/** The 12 account types (the repo.AccountTypes vocabulary; the backend
+ * rejects anything else with a 400). The last six are the registered
+ * plan types (round 53). */
 export const ACCOUNT_TYPES = [
 	'bank',
 	'cash',
 	'credit_card',
 	'mortgage',
 	'investment',
-	'other'
+	'other',
+	'rrsp',
+	'tfsa',
+	'fhsa',
+	'rrif',
+	'resp',
+	'rdsp'
 ] as const;
 
 /** An account type (one of ACCOUNT_TYPES). */
@@ -45,8 +58,12 @@ export function createAccount(input: {
 	type: string;
 	currency: string;
 	subtype?: string;
+	beneficiary_name?: string;
+	beneficiary_birth_year?: string;
+	opening_balance?: string;
+	opened_at?: string;
 }): Promise<Account> {
-	// JSON.stringify omits the undefined subtype, so a create without one
+	// JSON.stringify omits undefined optionals, so a create without them
 	// is just {name, type, currency} on the wire.
 	return api<Account>('/v1/accounts', { method: 'POST', body: input });
 }
@@ -59,6 +76,11 @@ export interface AccountPatch {
 	type?: string;
 	subtype?: string | null;
 	currency?: string;
+	/** Round 53 tri-state fields: absent = no-op, null = clear. */
+	beneficiary_name?: string | null;
+	beneficiary_birth_year?: string | null;
+	opening_balance?: string | null;
+	opened_at?: string | null;
 }
 
 /** Updates an account (200 → the updated row). 404 when unknown, 409 on a
