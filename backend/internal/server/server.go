@@ -282,6 +282,13 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		// holder birth-year setter the RRIF minimum depends on.
 		r.Get("/v1/savings/room", h.savingsRoom)
 		r.Patch("/v1/me/birth-year", h.patchBirthYear)
+		// Savings limit overrides and room adjustments (52a2).
+		r.Get("/v1/savings/limits", h.savingsLimitsList)
+		r.Put("/v1/savings/limits", h.savingsLimitsUpsert)
+		r.Delete("/v1/savings/limits/{id}", h.savingsLimitsDelete)
+		r.Get("/v1/savings/adjustments", h.savingsAdjustmentsList)
+		r.Post("/v1/savings/adjustments", h.savingsAdjustmentsCreate)
+		r.Delete("/v1/savings/adjustments/{id}", h.savingsAdjustmentsDelete)
 		// Budgets (step 3.3). No single-GET route (the List covers it);
 		// period is immutable (absent from the PATCH body).
 		r.Get("/v1/budgets", h.budgetsList)

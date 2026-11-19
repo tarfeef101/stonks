@@ -404,3 +404,295 @@ func nonNilStrings(ss []string) []string {
 	}
 	return ss
 }
+
+// --- savings limit overrides and room adjustments (52a2) ---------------------
+
+// limitOverrideDTO is the wire form of repo.LimitOverride.
+type limitOverrideDTO struct {
+	ID          string    `json:"id"`
+	PlanType    string    `json:"plan_type"`
+	Year        int       `json:"year"`
+	AnnualLimit string    `json:"annual_limit"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// roomAdjustmentDTO is the wire form of repo.RoomAdjustment.
+type roomAdjustmentDTO struct {
+	ID        string    `json:"id"`
+	PlanType  string    `json:"plan_type"`
+	Year      int       `json:"year"`
+	Amount    string    `json:"amount"`
+	Note      string    `json:"note"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func toLimitOverrideDTO(lo repo.LimitOverride) limitOverrideDTO {
+	return limitOverrideDTO{
+		ID:          lo.ID,
+		PlanType:    lo.PlanType,
+		Year:        lo.Year,
+		AnnualLimit: lo.AnnualLimit,
+		CreatedAt:   lo.CreatedAt.UTC(),
+		UpdatedAt:   lo.UpdatedAt.UTC(),
+	}
+}
+
+func toRoomAdjustmentDTO(a repo.RoomAdjustment) roomAdjustmentDTO {
+	return roomAdjustmentDTO{
+		ID:        a.ID,
+		PlanType:  a.PlanType,
+		Year:      a.Year,
+		Amount:    a.Amount,
+		Note:      a.Note,
+		CreatedAt: a.CreatedAt.UTC(),
+	}
+}
+
+// parseYearQuery parses a query-string year value as a base-10 integer;
+// callers apply the range policy (1900..2100) where it applies.
+func parseYearQuery(s string) (int, bool) {
+	y, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return y, true
+}
+
+// pathID returns the last path segment (the chi {id}) of r.
+func pathID(r *http.Request) string {
+	i := strings.LastIndex(r.URL.Path, "/")
+	if i < 0 || i == len(r.URL.Path)-1 {
+		return ""
+	}
+	return r.URL.Path[i+1:]
+}
+
+// savingsLimitsList serves GET /api/v1/savings/limits: the caller's
+// annual limit overrides, optionally filtered by plan_type and year
+// (the store treats ""/0 as "any").
+func (h *handler) savingsLimitsList(w http.ResponseWriter, r *http.Request) {
+	if h.plans == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	planType := q.Get("plan_type")
+	if planType != "" && !plans.IsPlanType(planType) {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "plan_type must be a known plan type")
+		return
+	}
+	year := 0
+	if s := q.Get("year"); s != "" {
+		y, ok := parseYearQuery(s)
+		if !ok || y < 1900 || y > 2100 {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "year must be an integer between 1900 and 2100")
+			return
+		}
+		year = y
+	}
+	los, err := h.plans.ListLimitOverrides(r.Context(), c.row.ID, planType, year)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "listing limit overrides failed")
+		return
+	}
+	out := make([]limitOverrideDTO, 0, len(los))
+	for _, lo := range los {
+		out = append(out, toLimitOverrideDTO(lo))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// limitOverrideIn is the PUT /api/v1/savings/limits body.
+type limitOverrideIn struct {
+	PlanType    string `json:"plan_type"`
+	Year        int    `json:"year"`
+	AnnualLimit string `json:"annual_limit"`
+}
+
+// savingsLimitsUpsert serves PUT /api/v1/savings/limits: create or update
+// the caller's annual limit override for (plan_type, year). Only rrsp,
+// tfsa and fhsa plans have an annual limit (resp/rdsp have none, rrif
+// has a minimum instead).
+func (h *handler) savingsLimitsUpsert(w http.ResponseWriter, r *http.Request) {
+	if h.plans == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var in limitOverrideIn
+	if err := decodeBody(r, &in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "invalid request body")
+		return
+	}
+	pt := plans.PlanType(in.PlanType)
+	if pt != plans.PlanRRSP && pt != plans.PlanTFSA && pt != plans.PlanFHSA {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "annual limits are only supported for rrsp, tfsa and fhsa plans")
+		return
+	}
+	if in.Year < 1900 || in.Year > 2100 {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "year must be between 1900 and 2100")
+		return
+	}
+	cents, ok := toCents(in.AnnualLimit)
+	if !ok || cents < 0 {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "annual_limit must be a decimal amount of at least 0.00")
+		return
+	}
+	lo, err := h.plans.UpsertLimitOverride(r.Context(), c.row.ID, in.PlanType, in.Year, centsToString(cents))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "saving limit override failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, toLimitOverrideDTO(lo))
+}
+
+// savingsLimitsDelete serves DELETE /api/v1/savings/limits/{id} and
+// answers 204 (no content) on success.
+func (h *handler) savingsLimitsDelete(w http.ResponseWriter, r *http.Request) {
+	if h.plans == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	id := pathID(r)
+	if err := h.plans.DeleteLimitOverride(r.Context(), c.row.ID, id); err != nil {
+		if errors.Is(err, repo.ErrLimitOverrideNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "limit override not found")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "deleting limit override failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// savingsAdjustmentsList serves GET /api/v1/savings/adjustments: the
+// caller's room adjustments, optionally filtered by plan_type (store)
+// and year (in memory; the store has no year parameter).
+func (h *handler) savingsAdjustmentsList(w http.ResponseWriter, r *http.Request) {
+	if h.plans == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	planType := q.Get("plan_type")
+	if planType != "" && !plans.IsPlanType(planType) {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "plan_type must be a known plan type")
+		return
+	}
+	year := 0
+	haveYear := false
+	if s := q.Get("year"); s != "" {
+		y, ok := parseYearQuery(s)
+		if !ok {
+			writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "year must be an integer")
+			return
+		}
+		year = y
+		haveYear = true
+	}
+	ras, err := h.plans.ListRoomAdjustments(r.Context(), c.row.ID, planType, c.dek)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "listing room adjustments failed")
+		return
+	}
+	out := make([]roomAdjustmentDTO, 0, len(ras))
+	for _, a := range ras {
+		if haveYear && a.Year != year {
+			continue
+		}
+		out = append(out, toRoomAdjustmentDTO(a))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// roomAdjustmentIn is the POST /api/v1/savings/adjustments body.
+type roomAdjustmentIn struct {
+	PlanType string `json:"plan_type"`
+	Year     int    `json:"year"`
+	Amount   string `json:"amount"`
+	Note     string `json:"note"`
+}
+
+// maxAdjustmentNoteLen bounds room adjustments.note.
+const maxAdjustmentNoteLen = 500
+
+// savingsAdjustmentsCreate serves POST /api/v1/savings/adjustments:
+// record a manual adjustment to a plan's room for a year (e.g. room
+// reclaimed from an under-contribution year).
+func (h *handler) savingsAdjustmentsCreate(w http.ResponseWriter, r *http.Request) {
+	if h.plans == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var in roomAdjustmentIn
+	if err := decodeBody(r, &in); err != nil {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "invalid request body")
+		return
+	}
+	if !plans.IsPlanType(in.PlanType) {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "plan_type must be a known plan type")
+		return
+	}
+	if in.Year < 1900 || in.Year > 2100 {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "year must be between 1900 and 2100")
+		return
+	}
+	cents, ok := toCents(in.Amount)
+	if !ok || cents == 0 {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, "amount must be a non-zero decimal amount")
+		return
+	}
+	if len(in.Note) > maxAdjustmentNoteLen {
+		writeAPIError(w, http.StatusBadRequest, codeInvalidRequest, fmt.Sprintf("note must be at most %d characters", maxAdjustmentNoteLen))
+		return
+	}
+	a, err := h.plans.CreateRoomAdjustment(r.Context(), c.row.ID, in.PlanType, in.Year, centsToString(cents), in.Note, c.dek)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "saving room adjustment failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, toRoomAdjustmentDTO(a))
+}
+
+// savingsAdjustmentsDelete serves DELETE /api/v1/savings/adjustments/{id}
+// and answers 204 (no content) on success.
+func (h *handler) savingsAdjustmentsDelete(w http.ResponseWriter, r *http.Request) {
+	if h.plans == nil {
+		notConfigured(w)
+		return
+	}
+	c, ok := h.requireUser(w, r)
+	if !ok {
+		return
+	}
+	id := pathID(r)
+	if err := h.plans.DeleteRoomAdjustment(r.Context(), c.row.ID, id); err != nil {
+		if errors.Is(err, repo.ErrAdjustmentNotFound) {
+			writeAPIError(w, http.StatusNotFound, codeNotFound, "room adjustment not found")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, codeInternal, "deleting room adjustment failed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
