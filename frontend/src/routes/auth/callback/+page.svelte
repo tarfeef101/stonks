@@ -47,7 +47,7 @@
 			// as a plain pathname to prefix with the base path.
 			const st = await loadSettings();
 			const target = (st && st.onboarded_at === null ? '/onboarding' : (returnTo ?? '/')) as
-				Exclude<RouteId, '/dashboards/[id]'>;
+				Exclude<RouteId, '/dashboards/[id]' | '/savings/[accountId]'>;
 			clearReturnTo();
 			goto(resolve(target), { replace: true });
 		} catch (e) {

@@ -17,6 +17,7 @@
 		type RoomAdjustment
 	} from '#lib/api/savings';
 	import { listAccounts, type Account } from '#lib/api/accounts';
+	import { resolve } from '$app/paths';
 	import { settings } from '#lib/settings';
 
 	const cardClass =
@@ -634,10 +635,9 @@
 				<ul class="mt-3 space-y-1.5">
 					{#each planAccounts as a (a.id)}
 						<li>
-							<!-- /savings/[id] lands in a later round; the link
-								     can switch to resolve('/savings/[accountId]',
-								     { accountId }) once the route is typed. -->
-							<a href={'/savings/' + a.id} class={linkClass}>
+							<!-- Typed detail route (round 53d): resolves
+								     /savings/[accountId] to the account's page. -->
+							<a href={resolve('/savings/[accountId]', { accountId: a.id })} class={linkClass}>
 								{a.name}
 							</a>
 						</li>
