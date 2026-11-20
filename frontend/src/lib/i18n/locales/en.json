@@ -169,7 +169,17 @@
 		"height_n": "{n} rows",
 		"handle_width": "Drag to change the widget's width",
 		"handle_height": "Drag to change the widget's height",
-		"handle_corner": "Drag to change the widget's width and height"
+		"handle_corner": "Drag to change the widget's width and height",
+		"kind_savings": "Savings",
+		"widget_add_savings": "Savings",
+		"widget_savings_view_label": "View",
+		"widget_savings_view_room": "Room",
+		"widget_savings_view_appreciation": "Appreciation",
+		"widget_savings_account_label": "Account",
+		"widget_savings_account_placeholder": "Choose an account…",
+		"widget_savings_account_required": "Pick an account for the appreciation view.",
+		"widget_savings_loading": "Loading savings…",
+		"widget_savings_plan_label": "Plan"
 	},
 	"budgets": {
 		"heading": "Budgets",

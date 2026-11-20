@@ -17,8 +17,10 @@ export interface Dashboard {
 	widget_count: number;
 }
 
-/** Widget kinds: an embedded Explore view or a markdown text note. */
-export type WidgetKind = 'explore' | 'markdown';
+/** Widget kinds: an embedded Explore view, a markdown text note,
+ * or a savings view (the registered-plan room, or one account's
+ * equity series — content is '' or {view, account_id} JSON). */
+export type WidgetKind = 'explore' | 'markdown' | 'savings';
 
 /** One widget row (backend widgetOut). content = the raw stored text
  * (explore: the canonical serialized explore state, '' = the default

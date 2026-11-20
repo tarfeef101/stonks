@@ -17,6 +17,8 @@
 		type WidgetKind
 	} from '#lib/api/dashboards';
 	import { listSavedViews, type SavedView } from '#lib/api/savedviews';
+	import { listAccounts, type Account } from '#lib/api/accounts';
+	import { PLAN_TYPES } from '#lib/api/savings';
 	import { loadCatalogs } from '#lib/explore/catalogs';
 	import {
 		EXPLORE_STATE_KEY,
@@ -27,6 +29,7 @@
 	} from '#lib/explore/state';
 	import { renderMarkdown } from '#lib/markdown';
 	import ExploreView from '#lib/explore/ExploreView.svelte';
+	import SavingsWidget from '#lib/dashboards/SavingsWidget.svelte';
 
 	// Dashboard editor (rounds 6–7): one dashboard's 12-col × N-row
 	// widget grid (fixed 120px row pitch at md+ — the card bodies
@@ -229,6 +232,14 @@
 	let addContent = $state('');
 	let addError = $state<string | null>(null);
 	let addSavedViews = $state<SavedView[]>([]);
+	let addSavingsView = $state<'room' | 'appreciation'>('room');
+	let addSavingsAccount = $state('');
+	let accounts = $state<Account[]>([]);
+	// The caller's plan accounts (PLAN_TYPES only) — the appreciation
+	// widget's account picker lists exactly these.
+	const planAccounts = $derived(
+		accounts.filter((a) => (PLAN_TYPES as readonly string[]).includes(a.type))
+	);
 	let addViewsSeq = 0;
 
 	// --- Load --------------------------------------------------------------
@@ -252,10 +263,11 @@
 				notFound = true;
 				return;
 			}
-			const [ws, n] = await Promise.all([listWidgets(id), loadCatalogs()]);
+			const [ws, n, accts] = await Promise.all([listWidgets(id), loadCatalogs(), listAccounts()]);
 			if (s !== seq) return; // stale
 			widgets = ws;
 			names = n;
+			accounts = accts;
 			loading = false;
 		} catch (e) {
 			if (s !== seq) return; // stale
@@ -740,6 +752,8 @@
 		addName = '';
 		addContent = '';
 		addError = null;
+		addSavingsView = 'room';
+		addSavingsAccount = '';
 		void loadAddSavedViews();
 	}
 
@@ -763,11 +777,16 @@
 		}
 	}
 
-	/** The picker's select changed. Only 'markdown' needs the name /
-	 * content fields — leaving it clears them so a stale note can't
-	 * leak into a later markdown tile. */
+	/** The picker's select changed. 'markdown' needs the name /
+	 * content fields, 'savings' its name + view/account fields —
+	 * leaving a choice clears its fields so a stale value can't
+	 * leak into a later tile of that kind. */
 	function onAddChoiceChange(e: Event): void {
 		const sel = e.currentTarget as HTMLSelectElement;
+		if (addChoice === 'savings' && sel.value !== 'savings') {
+			addSavingsView = 'room';
+			addSavingsAccount = '';
+		}
 		addChoice = sel.value;
 		if (addChoice !== 'markdown') {
 			addName = '';
@@ -795,6 +814,10 @@
 	 * returns (the caller saves the view + the tile there). */
 	async function submitAdd(): Promise<void> {
 		if (addChoice === '') return;
+		if (addChoice === 'savings' && addSavingsView === 'appreciation' && addSavingsAccount === '') {
+			addError = $_('dashboards.widget_savings_account_required');
+			return;
+		}
 		addError = null;
 		try {
 			if (addChoice === 'newview') {
@@ -821,6 +844,16 @@
 				// the cards' range.
 				kind = 'explore';
 				content = withoutRange(rememberedExploreState());
+			} else if (addChoice === 'savings') {
+				// '' content = the room view; the appreciation view
+				// stores {view, account_id} as JSON (the widget
+				// re-parses it to decide which view to render).
+				name = addName;
+				kind = 'savings';
+				content =
+					addSavingsView === 'appreciation'
+						? JSON.stringify({ view: 'appreciation', account_id: addSavingsAccount })
+						: '';
 			} else {
 				// A saved view: the tile takes the view's name and
 				// its OWN copy of the view's state — a copy, not a
@@ -837,6 +870,8 @@
 			widgets = [...widgets, w];
 			if (dashboard !== null)
 				dashboard = { ...dashboard, widget_count: dashboard.widget_count + 1 };
+			addSavingsView = 'room';
+			addSavingsAccount = '';
 			cancelAdd();
 		} catch (e) {
 			addError = envelopeMessage(e);
@@ -1007,6 +1042,8 @@
 								>
 									{w.kind === 'explore'
 										? $_('dashboards.kind_explore')
+										: w.kind === 'savings'
+											? $_('dashboards.kind_savings')
 										: $_('dashboards.kind_markdown')}
 								</span>
 							{/if}
@@ -1177,7 +1214,9 @@
 								rangeFrom={rangeFrom}
 								rangeTo={rangeTo}
 							/>
-						{:else}
+						{:else if w.kind === 'savings'}
+							<SavingsWidget content={w.content} />
+						{:else if w.kind === 'markdown'}
 							<article class="prose prose-sm dark:prose-invert">{@html renderMarkdown(w.content)}</article>
 						{/if}
 					</div>
@@ -1271,6 +1310,8 @@
 						>
 							{draggedWidget.kind === 'explore'
 								? $_('dashboards.kind_explore')
+								: draggedWidget.kind === 'savings'
+									? $_('dashboards.kind_savings')
 								: $_('dashboards.kind_markdown')}
 						</span>
 					{/if}
@@ -1314,6 +1355,7 @@
 						<option value="current">{$_('dashboards.widget_add_current')}</option>
 						<option value="newview">{$_('dashboards.widget_add_new_view')}</option>
 						<option value="markdown">{$_('dashboards.widget_add_markdown')}</option>
+						<option value="savings">{$_('dashboards.widget_add_savings')}</option>
 					</select>
 					<button
 						class="rounded-md border border-zinc-300 dark:border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
@@ -1350,6 +1392,48 @@
 							bind:value={addContent}
 							placeholder={$_('dashboards.widget_content_placeholder')}
 						></textarea>
+					</div>
+				{/if}
+				{#if addChoice === 'savings'}
+					<!-- The room view stores '' content; the
+					     appreciation view stores {view, account_id} as
+					     JSON (the widget re-parses it to pick its view). -->
+					<div class="space-y-3">
+						<input
+							class="w-64 rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-sm"
+							bind:value={addName}
+							placeholder={$_('dashboards.widget_name_placeholder')}
+							use:autofocus
+							onkeydown={(e) => {
+								if (e.key === 'Enter') void submitAdd();
+							}}
+						/>
+						<div class="flex flex-wrap items-center gap-3">
+							<label class="flex items-center gap-1.5">
+								<span class="font-medium">{$_('dashboards.widget_savings_view_label')}</span>
+								<select
+									class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+									bind:value={addSavingsView}
+								>
+									<option value="room">{$_('dashboards.widget_savings_view_room')}</option>
+									<option value="appreciation">{$_('dashboards.widget_savings_view_appreciation')}</option>
+								</select>
+							</label>
+							{#if addSavingsView === 'appreciation'}
+								<label class="flex items-center gap-1.5">
+									<span class="font-medium">{$_('dashboards.widget_savings_account_label')}</span>
+									<select
+										class="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+										bind:value={addSavingsAccount}
+									>
+										<option value="" disabled>{$_('dashboards.widget_savings_account_placeholder')}</option>
+										{#each planAccounts as a (a.id)}
+											<option value={a.id}>{a.name} ({a.currency})</option>
+										{/each}
+									</select>
+								</label>
+							{/if}
+						</div>
 					</div>
 				{/if}
 			</div>
