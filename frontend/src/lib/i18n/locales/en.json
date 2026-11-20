@@ -689,7 +689,13 @@
 			"credit_card": "Credit card",
 			"mortgage": "Mortgage",
 			"investment": "Investment",
-			"other": "Other"
+			"other": "Other",
+			"rrsp": "RRSP",
+			"tfsa": "TFSA",
+			"fhsa": "FHSA",
+			"rrif": "RRIF",
+			"resp": "RESP",
+			"rdsp": "RDSP"
 		},
 		"acct_currency_label": "Currency",
 		"acct_subtype_label": "Subtype",
@@ -699,6 +705,16 @@
 		"acct_edit": "Edit",
 		"acct_delete": "Delete",
 		"acct_deleting": "Deleting…",
-		"acct_delete_confirm": "Delete account “{name}”? Its transactions, import jobs, and mortgages are removed too."
+		"acct_delete_confirm": "Delete account “{name}”? Its transactions, import jobs, and mortgages are removed too.",
+		"acct_beneficiary_label": "Beneficiary",
+		"acct_beneficiary_placeholder": "e.g. Jane Doe",
+		"acct_birth_year_label": "Birth year",
+		"acct_birth_year_placeholder": "e.g. 2015",
+		"acct_balance_label": "Opening balance",
+		"acct_balance_placeholder": "e.g. 10000.00",
+		"acct_opened_label": "Opened",
+		"acct_balance_invalid": "Enter a balance of 0.00 or more.",
+		"acct_opened_invalid": "The date must be today or earlier.",
+		"acct_birth_invalid": "Enter a 4-digit year between 1900 and 2099."
 	}
 }

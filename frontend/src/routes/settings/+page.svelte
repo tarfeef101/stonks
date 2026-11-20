@@ -29,6 +29,7 @@
 		type Account,
 		type AccountType
 	} from '#lib/api/accounts';
+	import { PLAN_TYPES } from '#lib/api/savings';
 	import { CURRENCIES, loadSettings, settings, updateSettings } from '#lib/settings';
 
 	// LLM credentials (step 5.6): at most one credential per provider
@@ -224,6 +225,10 @@
 	let newAccountType = $state<AccountType>('bank');
 	let newAccountSubtype = $state('');
 	let newAccountCurrency = $state('');
+	let newAccountBeneficiary = $state('');
+	let newAccountBirthYear = $state('');
+	let newAccountBalance = $state('');
+	let newAccountOpened = $state('');
 	let accountAdding = $state(false);
 	let accountAddError = $state<string | null>(null);
 
@@ -232,6 +237,10 @@
 	let accountEditType = $state<AccountType>('bank');
 	let accountEditSubtype = $state('');
 	let accountEditCurrency = $state('');
+	let accountEditBeneficiary = $state('');
+	let accountEditBirthYear = $state('');
+	let accountEditBalance = $state('');
+	let accountEditOpened = $state('');
 	let accountSaving = $state(false);
 	let accountSaveError = $state<string | null>(null);
 
@@ -259,9 +268,34 @@
 		}
 	});
 
+	/** Local YYYY-MM-DD (opened-date max + validation). */
+	const today = (() => {
+		const d = new Date();
+		const m = String(d.getMonth() + 1).padStart(2, '0');
+		const day = String(d.getDate()).padStart(2, '0');
+		return `${d.getFullYear()}-${m}-${day}`;
+	})();
+
 	async function addAccount(): Promise<void> {
 		const name = newAccountName.trim();
 		if (accountAdding || name === '' || newAccountCurrency === '') return;
+		const plan = isPlanType(newAccountType);
+		const beneficiary = newAccountBeneficiary.trim();
+		const birthYear = newAccountBirthYear.trim();
+		const balance = newAccountBalance.trim();
+		const opened = newAccountOpened.trim();
+		if (plan && birthYear !== '' && !/^(19|20)\d{2}$/.test(birthYear)) {
+			accountAddError = $_('settings.acct_birth_invalid');
+			return;
+		}
+		if (plan && balance !== '' && !/^\d{1,7}(\.\d{1,2})?$/.test(balance)) {
+			accountAddError = $_('settings.acct_balance_invalid');
+			return;
+		}
+		if (plan && opened !== '' && opened > today) {
+			accountAddError = $_('settings.acct_opened_invalid');
+			return;
+		}
 		accountAdding = true;
 		accountAddError = null;
 		try {
@@ -270,12 +304,20 @@
 				name,
 				type: newAccountType,
 				currency: newAccountCurrency,
-				subtype: subtype === '' ? undefined : subtype
+				subtype: subtype === '' ? undefined : subtype,
+				beneficiary_name: plan && beneficiary !== '' ? beneficiary : undefined,
+				beneficiary_birth_year: plan && birthYear !== '' ? birthYear : undefined,
+				opening_balance: plan && balance !== '' ? balance : undefined,
+				opened_at: plan && opened !== '' ? opened : undefined
 			});
 			accounts = [...accounts, acct];
 			newAccountName = '';
 			newAccountSubtype = '';
 			newAccountCurrency = '';
+			newAccountBeneficiary = '';
+			newAccountBirthYear = '';
+			newAccountBalance = '';
+			newAccountOpened = '';
 		} catch (e) {
 			accountAddError = envelopeMessage(e);
 		} finally {
@@ -289,12 +331,34 @@
 		accountEditType = acct.type as AccountType;
 		accountEditSubtype = acct.subtype ?? '';
 		accountEditCurrency = acct.currency;
+		accountEditBeneficiary = acct.beneficiary_name ?? '';
+		accountEditBirthYear =
+			acct.beneficiary_birth_year === null ? '' : String(acct.beneficiary_birth_year);
+		accountEditBalance = acct.opening_balance;
+		accountEditOpened = acct.opened_at ?? '';
 		accountSaveError = null;
 	}
 
 	async function commitAccountEdit(): Promise<void> {
 		const name = accountEditName.trim();
 		if (accountSaving || accountEditingId === null || name === '') return;
+		const plan = isPlanType(accountEditType);
+		const beneficiary = accountEditBeneficiary.trim();
+		const birthYear = accountEditBirthYear.trim();
+		const balance = accountEditBalance.trim();
+		const opened = accountEditOpened.trim();
+		if (plan && birthYear !== '' && !/^(19|20)\d{2}$/.test(birthYear)) {
+			accountSaveError = $_('settings.acct_birth_invalid');
+			return;
+		}
+		if (plan && balance !== '' && !/^\d{1,7}(\.\d{1,2})?$/.test(balance)) {
+			accountSaveError = $_('settings.acct_balance_invalid');
+			return;
+		}
+		if (plan && opened !== '' && opened > today) {
+			accountSaveError = $_('settings.acct_opened_invalid');
+			return;
+		}
 		accountSaving = true;
 		accountSaveError = null;
 		try {
@@ -304,7 +368,13 @@
 				type: accountEditType,
 				currency: accountEditCurrency,
 				// Tri-state: an empty field clears the subtype.
-				subtype: subtype === '' ? null : subtype
+				subtype: subtype === '' ? null : subtype,
+				// Tri-state: the UI is the only gate for the plan fields —
+				// a non-plan type clears them, and so does an empty field.
+				beneficiary_name: plan ? (beneficiary === '' ? null : beneficiary) : null,
+				beneficiary_birth_year: plan ? (birthYear === '' ? null : birthYear) : null,
+				opening_balance: plan ? (balance === '' ? null : balance) : null,
+				opened_at: plan ? (opened === '' ? null : opened) : null
 			});
 			accounts = accounts.map((a) => (a.id === updated.id ? updated : a));
 			accountEditingId = null;
@@ -337,6 +407,11 @@
 	/** The type's display label (settings.acct_type.<type>). */
 	function accountTypeLabel(t: string): string {
 		return $_('settings.acct_type.' + t);
+	}
+
+	/** The six registered plan types (PLAN_TYPES from #lib/api/savings). */
+	function isPlanType(t: string): boolean {
+		return (PLAN_TYPES as readonly string[]).includes(t);
 	}
 
 	/** The currency picker offers the curated list; a currency outside it
@@ -847,6 +922,64 @@
 											if (e.key === 'Escape') cancelEditAccount();
 										}}
 									/>
+									{#if accountEditType === 'resp' || accountEditType === 'rdsp'}
+										<input
+											class="w-32 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+											maxlength="255"
+											value={accountEditBeneficiary}
+											oninput={(e) => {
+												accountEditBeneficiary = e.currentTarget.value;
+												accountSaveError = null;
+											}}
+											onkeydown={(e) => {
+												if (e.key === 'Enter') void commitAccountEdit();
+												if (e.key === 'Escape') cancelEditAccount();
+											}}
+										/>
+										<input
+											class="w-20 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+											inputmode="numeric"
+											maxlength="4"
+											value={accountEditBirthYear}
+											oninput={(e) => {
+												accountEditBirthYear = e.currentTarget.value;
+												accountSaveError = null;
+											}}
+											onkeydown={(e) => {
+												if (e.key === 'Enter') void commitAccountEdit();
+												if (e.key === 'Escape') cancelEditAccount();
+											}}
+										/>
+									{/if}
+									{#if isPlanType(accountEditType)}
+										<input
+											class="w-24 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+											inputmode="decimal"
+											value={accountEditBalance}
+											oninput={(e) => {
+												accountEditBalance = e.currentTarget.value;
+												accountSaveError = null;
+											}}
+											onkeydown={(e) => {
+												if (e.key === 'Enter') void commitAccountEdit();
+												if (e.key === 'Escape') cancelEditAccount();
+											}}
+										/>
+										<input
+											class="w-32 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+											type="date"
+											max={today}
+											value={accountEditOpened}
+											oninput={(e) => {
+												accountEditOpened = e.currentTarget.value;
+												accountSaveError = null;
+											}}
+											onkeydown={(e) => {
+												if (e.key === 'Enter') void commitAccountEdit();
+												if (e.key === 'Escape') cancelEditAccount();
+											}}
+										/>
+									{/if}
 									<div class="flex gap-2">
 										<button
 											class="rounded-md bg-zinc-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
@@ -873,6 +1006,8 @@
 										<span class="text-zinc-500 dark:text-zinc-400">
 											({accountTypeLabel(acct.type)} · {acct.currency}{#if acct.subtype}
 												· {acct.subtype}
+											{/if}{#if acct.beneficiary_name}
+												· {acct.beneficiary_name}
 											{/if})</span>
 									</span>
 									<div class="flex gap-2">
@@ -949,6 +1084,47 @@
 							bind:value={newAccountSubtype}
 						/>
 					</label>
+					{#if newAccountType === 'resp' || newAccountType === 'rdsp'}
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('settings.acct_beneficiary_label')}</span>
+							<input
+								class="w-40 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+								maxlength="255"
+								placeholder={$_('settings.acct_beneficiary_placeholder')}
+								bind:value={newAccountBeneficiary}
+							/>
+						</label>
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('settings.acct_birth_year_label')}</span>
+							<input
+								class="w-24 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+								inputmode="numeric"
+								maxlength="4"
+								placeholder={$_('settings.acct_birth_year_placeholder')}
+								bind:value={newAccountBirthYear}
+							/>
+						</label>
+					{/if}
+					{#if isPlanType(newAccountType)}
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('settings.acct_balance_label')}</span>
+							<input
+								class="w-28 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+								inputmode="decimal"
+								placeholder={$_('settings.acct_balance_placeholder')}
+								bind:value={newAccountBalance}
+							/>
+						</label>
+						<label class="block text-sm">
+							<span class="mb-1 block font-medium">{$_('settings.acct_opened_label')}</span>
+							<input
+								class="w-36 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-1.5"
+								type="date"
+								max={today}
+								bind:value={newAccountOpened}
+							/>
+						</label>
+					{/if}
 					<button
 						class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-700 disabled:opacity-50"
 						disabled={accountAdding || newAccountName.trim() === '' || newAccountCurrency === ''}
