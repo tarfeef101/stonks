@@ -2,7 +2,20 @@
 	import { _ } from 'svelte-i18n';
 	import { user } from '#lib/auth/client';
 	import { ApiError } from '#lib/api/client';
-	import { getRoom, setBirthYear, PLAN_TYPES, type RoomView } from '#lib/api/savings';
+	import {
+		getRoom,
+		setBirthYear,
+		PLAN_TYPES,
+		listLimits,
+		putLimit,
+		deleteLimit,
+		listAdjustments,
+		createAdjustment,
+		deleteAdjustment,
+		type RoomView,
+		type LimitOverride,
+		type RoomAdjustment
+	} from '#lib/api/savings';
 	import { listAccounts, type Account } from '#lib/api/accounts';
 	import { settings } from '#lib/settings';
 
@@ -29,6 +42,51 @@
 	let birthSaving = $state(false);
 	let birthNote = $state('');
 	let birthError = $state('');
+	let limits = $state<LimitOverride[]>([]);
+	let adjustments = $state<RoomAdjustment[]>([]);
+	let limitInputs = $state<Record<string, string>>({
+		rrsp: '',
+		tfsa: '',
+		fhsa: '',
+		rrif: '',
+		resp: '',
+		rdsp: ''
+	});
+	let amountInputs = $state<Record<string, string>>({
+		rrsp: '',
+		tfsa: '',
+		fhsa: '',
+		rrif: '',
+		resp: '',
+		rdsp: ''
+	});
+	let noteInputs = $state<Record<string, string>>({
+		rrsp: '',
+		tfsa: '',
+		fhsa: '',
+		rrif: '',
+		resp: '',
+		rdsp: ''
+	});
+	let limitErrors = $state<Record<string, string>>({
+		rrsp: '',
+		tfsa: '',
+		fhsa: '',
+		rrif: '',
+		resp: '',
+		rdsp: ''
+	});
+	let adjErrors = $state<Record<string, string>>({
+		rrsp: '',
+		tfsa: '',
+		fhsa: '',
+		rrif: '',
+		resp: '',
+		rdsp: ''
+	});
+	let limitBusy = $state<string | null>(null);
+	let adjBusy = $state<string | null>(null);
+	let actionNote = $state('');
 
 	function envelopeMessage(e: unknown): string {
 		if (e instanceof ApiError) {
@@ -53,15 +111,36 @@
 		loading = true;
 		loadError = '';
 		try {
-			const [v, accts] = await Promise.all([getRoom(year), listAccounts()]);
+			const [v, accts, lims, adjs] = await Promise.all([
+				getRoom(year),
+				listAccounts(),
+				listLimits(undefined, year),
+				listAdjustments(undefined, year)
+			]);
 			if (s !== seq) return;
 			view = v;
 			accounts = accts;
+			limits = lims;
+			adjustments = adjs;
+			for (const pt of ['rrsp', 'tfsa', 'fhsa'] as const) {
+				limitInputs[pt] =
+					lims.find((l) => l.plan_type === pt)?.annual_limit ??
+					v.cards.find((c) => c.plan_type === pt)?.annual_limit ??
+					'';
+			}
+			for (const pt of PLAN_TYPES) {
+				amountInputs[pt] = '';
+				noteInputs[pt] = '';
+				limitErrors[pt] = '';
+				adjErrors[pt] = '';
+			}
 			loading = false;
 		} catch (e) {
 			if (s !== seq) return;
 			loading = false;
 			loadError = envelopeMessage(e);
+			limits = [];
+			adjustments = [];
 		}
 	}
 
@@ -120,6 +199,13 @@
 		return out === k ? code : out;
 	}
 
+	function flashNote(key: string): void {
+		actionNote = $_(key);
+		setTimeout(() => {
+			actionNote = '';
+		}, 2500);
+	}
+
 	async function saveBirth(): Promise<void> {
 		if (birthSaving) return;
 		if (!/^\d{4}$/.test(birthInput) || Number(birthInput) > new Date().getFullYear()) {
@@ -138,6 +224,77 @@
 			birthError = envelopeMessage(e);
 		} finally {
 			birthSaving = false;
+		}
+	}
+
+	async function saveLimit(pt: string): Promise<void> {
+		const value = limitInputs[pt].trim();
+		if (!/^\d{1,7}(\.\d{1,2})?$/.test(value)) {
+			limitErrors[pt] = $_('savings.override_format_error');
+			return;
+		}
+		limitErrors[pt] = '';
+		limitBusy = pt;
+		try {
+			await putLimit({ plan_type: pt, year, annual_limit: value });
+			await load();
+			flashNote('savings.override_saved');
+		} catch (e) {
+			limitErrors[pt] = envelopeMessage(e);
+		} finally {
+			limitBusy = null;
+		}
+	}
+
+	async function removeLimit(pt: string): Promise<void> {
+		const row = limits.find((l) => l.plan_type === pt);
+		if (!row) return;
+		limitBusy = pt;
+		try {
+			await deleteLimit(row.id);
+			await load();
+			flashNote('savings.override_removed');
+		} catch (e) {
+			limitErrors[pt] = envelopeMessage(e);
+		} finally {
+			limitBusy = null;
+		}
+	}
+
+	async function addAdjustment(pt: string): Promise<void> {
+		const value = amountInputs[pt].trim();
+		const magnitude = value.startsWith('-') ? value.slice(1) : value;
+		if (!/^\d{1,7}(\.\d{1,2})?$/.test(magnitude)) {
+			adjErrors[pt] = $_('savings.adjustment_format_error');
+			return;
+		}
+		limitErrors[pt] = '';
+		adjBusy = pt;
+		try {
+			await createAdjustment({
+				plan_type: pt,
+				year,
+				amount: value,
+				note: noteInputs[pt].trim()
+			});
+			await load();
+			flashNote('savings.adjustment_added');
+		} catch (e) {
+			adjErrors[pt] = envelopeMessage(e);
+		} finally {
+			adjBusy = null;
+		}
+	}
+
+	async function removeAdjustment(id: string, pt: string): Promise<void> {
+		adjBusy = pt;
+		try {
+			await deleteAdjustment(id);
+			await load();
+		} catch (e) {
+			adjErrors[pt] = envelopeMessage(e);
+		} finally {
+			adjBusy = null;
 		}
 	}
 </script>
@@ -223,6 +380,8 @@
 
 		<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
 			{#each view.cards as card (card.plan_type)}
+				{@const overrideRow = limits.find((l) => l.plan_type === card.plan_type)}
+				{@const cardAdjustments = adjustments.filter((a) => a.plan_type === card.plan_type)}
 				<div class={cardClass}>
 					<h2 class="text-lg font-semibold">
 						{$_('savings.plan_' + card.plan_type)}
@@ -351,6 +510,113 @@
 							</ul>
 						</div>
 					{/if}
+					{#if card.plan_type === 'rrsp' || card.plan_type === 'tfsa' || card.plan_type === 'fhsa'}
+						<div class="mt-3 border-t border-zinc-200 dark:border-zinc-800 pt-3">
+							<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+								{$_('savings.override_title')}
+							</p>
+							<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+								{$_('savings.override_hint')}
+							</p>
+							<div class="mt-2 flex flex-wrap items-center gap-2">
+								<input
+									type="text"
+									inputmode="decimal"
+									bind:value={limitInputs[card.plan_type]}
+									placeholder={$_('savings.override_placeholder')}
+									class={inputClass + ' w-24'}
+								/>
+								<button
+									class={buttonClass}
+									disabled={limitBusy === card.plan_type}
+									onclick={() => void saveLimit(card.plan_type)}
+								>
+									{limitBusy === card.plan_type
+										? $_('savings.override_saving')
+										: $_('savings.override_save')}
+								</button>
+								{#if card.limit_source === 'override'}
+									<button
+										class={buttonClass}
+										disabled={limitBusy === card.plan_type}
+										onclick={() => void removeLimit(card.plan_type)}
+									>
+										{$_('savings.override_remove')}
+									</button>
+								{/if}
+							</div>
+							{#if limitErrors[card.plan_type]}
+								<p class="mt-2 text-sm text-red-600 dark:text-red-400">
+									{limitErrors[card.plan_type]}
+								</p>
+							{/if}
+						</div>
+					{/if}
+					<div class="mt-3 border-t border-zinc-200 dark:border-zinc-800 pt-3">
+						<p class="text-xs font-medium text-zinc-500 dark:text-zinc-400 uppercase">
+							{$_('savings.adjustments_title')}
+						</p>
+						<p class="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+							{$_('savings.adjustments_hint')}
+						</p>
+						{#if cardAdjustments.length === 0}
+							<p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">
+								{$_('savings.adjustments_empty')}
+							</p>
+						{:else}
+							<ul class="mt-2 space-y-1">
+								{#each cardAdjustments as adj (adj.id)}
+									<li class="flex items-baseline justify-between gap-3">
+										<span>
+											<span class="text-sm tabular-nums">{adj.amount}</span>
+											{#if adj.note !== ''}
+												<span class="text-xs text-zinc-500 dark:text-zinc-400">
+													— {adj.note}
+												</span>
+											{/if}
+										</span>
+										<button
+											class={linkClass}
+											disabled={adjBusy === card.plan_type}
+											onclick={() => void removeAdjustment(adj.id, card.plan_type)}
+										>
+											{$_('savings.adjustment_delete')}
+										</button>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+						<div class="mt-2 flex flex-wrap items-center gap-2">
+							<input
+								type="text"
+								inputmode="decimal"
+								bind:value={amountInputs[card.plan_type]}
+								placeholder={$_('savings.adjustment_amount_placeholder')}
+								class={inputClass + ' w-24'}
+							/>
+							<input
+								type="text"
+								bind:value={noteInputs[card.plan_type]}
+								maxlength={500}
+								placeholder={$_('savings.adjustment_note_placeholder')}
+								class={inputClass}
+							/>
+							<button
+								class={buttonClass}
+								disabled={adjBusy === card.plan_type}
+								onclick={() => void addAdjustment(card.plan_type)}
+							>
+								{adjBusy === card.plan_type
+									? $_('savings.adjustment_adding')
+									: $_('savings.adjustment_add')}
+							</button>
+						</div>
+						{#if adjErrors[card.plan_type]}
+							<p class="mt-2 text-sm text-red-600 dark:text-red-400">
+								{adjErrors[card.plan_type]}
+							</p>
+						{/if}
+					</div>
 				</div>
 			{/each}
 		</div>
@@ -382,6 +648,9 @@
 
 		{#if birthNote}
 			<p class="text-sm text-emerald-600 dark:text-emerald-400">{birthNote}</p>
+		{/if}
+		{#if actionNote}
+			<p class="text-sm text-emerald-600 dark:text-emerald-400">{actionNote}</p>
 		{/if}
 	{/if}
 </section>
