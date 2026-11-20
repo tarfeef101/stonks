@@ -719,7 +719,7 @@
 		},
 		"acct_currency_label": "Currency",
 		"acct_subtype_label": "Subtype",
-		"acct_subtype_placeholder": "e.g. Visa, TFSA",
+		"acct_subtype_placeholder": "e.g. chequing, Visa",
 		"acct_add": "Add",
 		"acct_adding": "Adding…",
 		"acct_edit": "Edit",
