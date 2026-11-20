@@ -24,6 +24,7 @@
 		{ href: '/review', key: 'nav.review' },
 		{ href: '/notifications', key: 'nav.notifications' },
 		{ href: '/mortgage', key: 'nav.mortgage' },
+		{ href: '/savings', key: 'nav.savings' },
 		{ href: '/settings', key: 'nav.settings' }
 	] as const;
 
