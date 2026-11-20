@@ -31,6 +31,8 @@
 	let categoryId = $state(''); // '' = no category
 	let description = $state('');
 	let notes = $state('');
+	let transferFromId = $state('');
+	let externalOrigin = $state<'' | 'employer' | 'government_grant' | 'inherited' | 'other'>('');
 
 	let submitting = $state(false);
 	let missing = $state(false);
@@ -42,6 +44,7 @@
 	/** Only the active categories are offered; '' is the "no category"
 	 * option. */
 	const activeCategories = $derived(categories.filter((c) => c.active));
+	const transferFromAccounts = $derived(accounts.filter((a) => a.id !== accountId));
 
 	// The account + category pickers' data. (The parent renders this
 	// component only while signed in, so a 401 here would be unexpected;
@@ -65,8 +68,11 @@
 			amount: amount.trim(),
 			date_posted: datePosted
 		};
+		const isTransfer = transferFromId !== '';
 		if (dateExecuted !== '') input.date_executed = dateExecuted;
-		if (categoryId !== '') input.category_id = categoryId;
+		if (categoryId !== '' && !isTransfer) input.category_id = categoryId;
+		if (transferFromId !== '') input.transfer_from_account_id = transferFromId;
+		if (externalOrigin !== '' && !isTransfer) input.external_origin = externalOrigin;
 		const desc = description.trim();
 		if (desc !== '') input.description = desc;
 		const n = notes.trim();
@@ -82,13 +88,16 @@
 			return;
 		}
 		missing = false;
+		if (transferFromId !== '' && transferFromId === accountId) {
+			error = $_('manual_entry.transfer_same_account');
+			return;
+		}
 		submitting = true;
 		error = null;
 		created = null;
 		const input = buildInput();
 		try {
-			// This form never creates transfers, so the response is a
-			// single row.
+			// A transfer answers {from, to}; everything else answers a single row.
 			const result = await createTransaction(input);
 			const tx: Transaction = 'id' in result ? result : result.to;
 			notifyDataChanged();
@@ -101,6 +110,8 @@
 			categoryId = '';
 			description = '';
 			notes = '';
+			transferFromId = '';
+			externalOrigin = '';
 		} catch (e) {
 			error = envelopeMessage(e);
 		} finally {
@@ -145,7 +156,15 @@
 			<div class="block text-sm">
 				<label class="block text-sm">
 					<span class="mb-1 block font-medium">{$_('manual_entry.account_label')}</span>
-					<select bind:value={accountId} class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5">
+					<select
+						bind:value={accountId}
+						class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+						oninput={(e) => {
+							if (transferFromId !== '' && e.currentTarget.value === transferFromId) {
+								transferFromId = '';
+							}
+						}}
+					>
 						<option value="">{$_('manual_entry.account_placeholder')}</option>
 						{#each accounts as a (a.id)}
 							<option value={a.id}>{a.name} ({a.currency})</option>
@@ -160,17 +179,57 @@
 				</a>
 			</div>
 			<label class="block text-sm">
-				<span class="mb-1 block font-medium">{$_('manual_entry.category_label')}</span>
+				<span class="mb-1 block font-medium">{$_('manual_entry.transfer_from_label')}</span>
 				<select
-					bind:value={categoryId}
+					bind:value={transferFromId}
 					class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+					oninput={(e) => {
+						if (e.currentTarget.value !== '') {
+							categoryId = '';
+							externalOrigin = '';
+						}
+					}}
 				>
-					<option value="">{$_('manual_entry.category_none')}</option>
-					{#each activeCategories as c (c.id)}
-						<option value={c.id}>{c.name}</option>
+					<option value="">{$_('manual_entry.transfer_from_placeholder')}</option>
+					{#each transferFromAccounts as a (a.id)}
+						<option value={a.id}>{a.name} ({a.currency})</option>
 					{/each}
 				</select>
 			</label>
+			{#if transferFromId === ''}
+				<label class="block text-sm">
+					<span class="mb-1 block font-medium">{$_('manual_entry.category_label')}</span>
+					<select
+						bind:value={categoryId}
+						class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+					>
+						<option value="">{$_('manual_entry.category_none')}</option>
+						{#each activeCategories as c (c.id)}
+							<option value={c.id}>{c.name}</option>
+						{/each}
+					</select>
+				</label>
+			{/if}
+			{#if transferFromId === ''}
+				<label class="block text-sm">
+					<span class="mb-1 block font-medium">{$_('manual_entry.external_origin_label')}</span>
+					<select
+						bind:value={externalOrigin}
+						class="w-full rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5"
+					>
+						<option value="">{$_('manual_entry.external_origin_none')}</option>
+						<option value="employer">{$_('manual_entry.external_origin_employer')}</option>
+						<option value="government_grant">
+							{$_('manual_entry.external_origin_government_grant')}
+						</option>
+						<option value="inherited">{$_('manual_entry.external_origin_inherited')}</option>
+						<option value="other">{$_('manual_entry.external_origin_other')}</option>
+					</select>
+					<span class="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">
+						{$_('manual_entry.external_origin_note')}
+					</span>
+				</label>
+			{/if}
 			<label class="block text-sm">
 				<span class="mb-1 block font-medium">{$_('manual_entry.date_posted_label')}</span>
 				<input

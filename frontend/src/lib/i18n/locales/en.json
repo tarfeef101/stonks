@@ -537,7 +537,17 @@
 		"submit": "Add transaction",
 		"submitting": "Adding…",
 		"missing": "An account, a posted date, and an amount are required.",
-		"success": "Added {amount} on {date} (id {id})."
+		"success": "Added {amount} on {date} (id {id}).",
+		"transfer_from_label": "Transfer from",
+		"transfer_from_placeholder": "Not a transfer",
+		"transfer_same_account": "The transfer source and destination must be different accounts.",
+		"external_origin_label": "External origin",
+		"external_origin_none": "None",
+		"external_origin_employer": "Employer",
+		"external_origin_government_grant": "Government grant",
+		"external_origin_inherited": "Inherited",
+		"external_origin_other": "Other",
+		"external_origin_note": "Government grants and inheritances never count toward registered-plan limits."
 	},
 	"review": {
 		"title": "Review queue",
