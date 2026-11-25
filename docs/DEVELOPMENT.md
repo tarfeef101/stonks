@@ -145,7 +145,7 @@ claim assertions — 16 checks, all passing. The click-through equivalent:
    issuer shows the callback page's "Sign-in failed" state (with a
    **Go home** button) instead of redirecting.
 
-Env gotcha: `PUBLIC_AUTH0_*` are read by the vite dev server at boot (and
+Env gotcha: `PUBLIC_OIDC_*` are read by the vite dev server at boot (and
 baked into production builds at build time). After changing them, do
 `make dev-down && make dev` — a bare `docker compose restart` does not
 re-read `.env`.

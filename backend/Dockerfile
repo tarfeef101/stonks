@@ -20,10 +20,12 @@ RUN CGO_ENABLED=0 GOOS=linux \
 # The goose CLI is image tooling, not a library dependency of our code:
 # install it by module version (go install pkg@version) so go.mod/go.sum
 # stay library-only instead of carrying the CLI's full driver graph.
-# Every driver goose ships is pure Go, so CGO stays off.
+# Every driver goose ships is pure Go, so CGO stays off. v3.30.2 is the
+# first release whose module graph pins golang.org/x/net >= v0.62.0
+# (CVE-2026-78661, x/net/html DoS — trivy gate, round 58).
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go install github.com/pressly/goose/v3/cmd/goose@v3.29.0 \
+    CGO_ENABLED=0 GOOS=linux go install github.com/pressly/goose/v3/cmd/goose@v3.30.2 \
  && cp /go/bin/goose /out/goose
 
 FROM alpine:3.23

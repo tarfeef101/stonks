@@ -43,6 +43,10 @@ RUN npm run build \
     && CSP_ISSUER="$PUBLIC_OIDC_ISSUER" node scripts/generate-csp.mjs
 
 FROM nginx:alpine
+# The nginx:alpine base ships distro packages with known CVEs (brotli,
+# curl, libexpat, libxml2, libxslt — trivy gate, round 58); all are fixed
+# in the current alpine 3.24 repo, so upgrade at build time.
+RUN apk upgrade --no-cache
 # SPA + security config: our own main conf (no user directive — the
 # container runs as the unprivileged nginx user), our server block
 # (port 8080, per-location header includes), and the per-build CSP
