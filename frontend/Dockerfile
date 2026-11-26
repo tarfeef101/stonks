@@ -17,6 +17,10 @@
 #                             CSP frame-src (default
 #                             http://localhost:18081/realms/finance,
 #                             i.e. the src/lib/auth/client.ts fallback)
+#   PUBLIC_OIDC_CLIENT_ID     public SPA client id (default finance-spa,
+#                             i.e. the src/lib/auth/client.ts fallback)
+#   PUBLIC_OIDC_AUDIENCE      access-token audience (default finance-api,
+#                             i.e. the src/lib/auth/client.ts fallback)
 
 FROM node:26.13.0 AS build
 WORKDIR /src
@@ -27,10 +31,14 @@ ARG PUBLIC_API_BASE=/api
 ARG PUBLIC_NR_LICENSE_KEY=
 ARG PUBLIC_NR_APPLICATION_ID=
 ARG PUBLIC_OIDC_ISSUER=http://localhost:18081/realms/finance
+ARG PUBLIC_OIDC_CLIENT_ID=finance-spa
+ARG PUBLIC_OIDC_AUDIENCE=finance-api
 ENV PUBLIC_API_BASE=$PUBLIC_API_BASE \
     PUBLIC_NR_LICENSE_KEY=$PUBLIC_NR_LICENSE_KEY \
     PUBLIC_NR_APPLICATION_ID=$PUBLIC_NR_APPLICATION_ID \
-    PUBLIC_OIDC_ISSUER=$PUBLIC_OIDC_ISSUER
+    PUBLIC_OIDC_ISSUER=$PUBLIC_OIDC_ISSUER \
+    PUBLIC_OIDC_CLIENT_ID=$PUBLIC_OIDC_CLIENT_ID \
+    PUBLIC_OIDC_AUDIENCE=$PUBLIC_OIDC_AUDIENCE
 # Build, then derive the CSP include from the built index.html. The
 # NR connect-src origin is only added when the agent is compiled in
 # (a license key was provided at build time).

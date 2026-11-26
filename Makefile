@@ -153,16 +153,32 @@ dev-llm-clean: ## Remove the downloaded LLM model volume (ftrk-llm-model); next 
 	$(COMPOSE) -f docker-compose.dev.yml volume rm ftrk-llm-model
 
 # ---------- images (D-033: ghcr.io/tarfeef101/stonks-*) ----------
+# Frontend build-time values (baked into the SPA bundle — see the
+# frontend/Dockerfile header; defaults mirror src/lib/auth/client.ts).
+# Override for production, e.g.:
+#   PUBLIC_OIDC_ISSUER=https://... PUBLIC_OIDC_CLIENT_ID=... make images
+# NR args are only passed when set: an explicit empty value would defeat
+# the `?? fallback` in client.ts (?? is nullish, not falsy).
+PUBLIC_OIDC_ISSUER ?= http://localhost:18081/realms/finance
+PUBLIC_OIDC_CLIENT_ID ?= finance-spa
+PUBLIC_OIDC_AUDIENCE ?= finance-api
+PUBLIC_NR_LICENSE_KEY ?=
+PUBLIC_NR_APPLICATION_ID ?=
+FRONTEND_BUILD_ARGS = --build-arg PUBLIC_OIDC_ISSUER=$(PUBLIC_OIDC_ISSUER) \
+    --build-arg PUBLIC_OIDC_CLIENT_ID=$(PUBLIC_OIDC_CLIENT_ID) \
+    --build-arg PUBLIC_OIDC_AUDIENCE=$(PUBLIC_OIDC_AUDIENCE) \
+    $(if $(PUBLIC_NR_LICENSE_KEY),--build-arg PUBLIC_NR_LICENSE_KEY=$(PUBLIC_NR_LICENSE_KEY)) \
+    $(if $(PUBLIC_NR_APPLICATION_ID),--build-arg PUBLIC_NR_APPLICATION_ID=$(PUBLIC_NR_APPLICATION_ID))
 
 .PHONY: images
 images: ## Build production container images locally (no push), tagged :$(IMAGE_TAG)
 	docker build -t $(REGISTRY)/stonks-backend:$(IMAGE_TAG) backend/; \
-	docker build -t $(REGISTRY)/stonks-frontend:$(IMAGE_TAG) frontend/
+	docker build $(FRONTEND_BUILD_ARGS) -t $(REGISTRY)/stonks-frontend:$(IMAGE_TAG) frontend/
 
 .PHONY: images-push
 images-push: ## Build + push both images to $(REGISTRY) — OPERATOR-GATED (gh token needs write:packages)
 	docker buildx build --platform linux/amd64 -t $(REGISTRY)/stonks-backend:$(IMAGE_TAG) --push backend/; \
-	docker buildx build --platform linux/amd64 -t $(REGISTRY)/stonks-frontend:$(IMAGE_TAG) --push frontend/
+	docker buildx build --platform linux/amd64 $(FRONTEND_BUILD_ARGS) -t $(REGISTRY)/stonks-frontend:$(IMAGE_TAG) --push frontend/
 
 .PHONY: images-scan
 images-scan: ## Trivy scan of both local images after `make images` (HIGH,CRITICAL, exit 1; first run downloads the vuln DB)

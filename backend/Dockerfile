@@ -1,8 +1,9 @@
 # Personal Finance Tracker — backend image.
 #
-# One image carries the api + worker binaries and the goose CLI; the
-# compose service / chart selects the entrypoint (the compose migrate
-# service and the Phase 10 k8s migration Job run `goose`). Multi-stage,
+# One image carries the api + worker binaries, the goose CLI and the SQL
+# migrations; the compose service / chart selects the entrypoint (the
+# compose migrate service and the Phase 10 k8s migration Job run `goose`,
+# reading /migrations from the image — prod has no host mount). Multi-stage,
 # non-root runtime, container-level healthcheck.
 
 FROM golang:1.27.3 AS build
@@ -33,6 +34,9 @@ RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -g 10001 ftrk \
  && adduser -D -H -u 10001 -G ftrk ftrk
 COPY --from=build /out/api /out/worker /out/goose /usr/local/bin/
+# Migrations ship in the image: the k8s migration Job runs goose in-image
+# (no host mount in prod; compose bind-mounts ./backend/migrations instead).
+COPY --from=build /src/migrations/ /migrations/
 USER ftrk
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
