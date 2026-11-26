@@ -159,17 +159,17 @@ dev-llm-clean: ## Remove the downloaded LLM model volume (ftrk-llm-model); next 
 
 .PHONY: images
 images: ## Build production container images locally (no push), tagged :$(IMAGE_TAG)
-	docker build -t $(REGISTRY)/stonks-backend:$(IMAGE_TAG) backend/; \
+	docker build -t $(REGISTRY)/stonks-backend:$(IMAGE_TAG) backend/ && \
 	docker build -t $(REGISTRY)/stonks-frontend:$(IMAGE_TAG) frontend/
 
 .PHONY: images-push
 images-push: ## Build + push both images to $(REGISTRY) — OPERATOR-GATED (gh token needs write:packages)
-	docker buildx build --platform linux/amd64 -t $(REGISTRY)/stonks-backend:$(IMAGE_TAG) --push backend/; \
+	docker buildx build --platform linux/amd64 -t $(REGISTRY)/stonks-backend:$(IMAGE_TAG) --push backend/ && \
 	docker buildx build --platform linux/amd64 -t $(REGISTRY)/stonks-frontend:$(IMAGE_TAG) --push frontend/
 
 .PHONY: images-scan
 images-scan: ## Trivy scan of both local images after `make images` (HIGH,CRITICAL, exit 1; first run downloads the vuln DB)
-	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock $(TRIVY_IMG) image --severity HIGH,CRITICAL --exit-code 1 $(REGISTRY)/stonks-backend:$(IMAGE_TAG); \
+	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock $(TRIVY_IMG) image --severity HIGH,CRITICAL --exit-code 1 $(REGISTRY)/stonks-backend:$(IMAGE_TAG) && \
 	docker run --rm -v /var/run/docker.sock:/var/run/docker.sock $(TRIVY_IMG) image --severity HIGH,CRITICAL --exit-code 1 $(REGISTRY)/stonks-frontend:$(IMAGE_TAG)
 
 # ---------- helm 4.3.1 (no official image: alpine + sha256-verified tarball) ----------
