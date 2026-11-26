@@ -33,6 +33,8 @@ spec:
         - name: frontend
           image: "{{ .Values.images.frontend.repository }}:{{ .Values.images.frontend.tag }}"
           imagePullPolicy: {{ .Values.images.frontend.pullPolicy }}
+          env:
+            {{- include "stonks.frontendEnv" . | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080

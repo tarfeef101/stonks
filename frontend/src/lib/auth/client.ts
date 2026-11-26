@@ -6,17 +6,17 @@
 // /authorize, /oauth/token and /v2/logout paths (no endpoint override) and
 // normalises the expected issuer to https://, so it cannot talk to the local
 // Keycloak dev IdP (plan §0 bars dev HTTPS). This wrapper is
-// issuer-agnostic via plain OIDC discovery: pointing PUBLIC_OIDC_ISSUER /
-// PUBLIC_OIDC_CLIENT_ID at a real Auth0 tenant later is env-only (Auth0
-// serves the same .well-known discovery document).
+// issuer-agnostic via plain OIDC discovery: pointing the backend at a
+// real Auth0 tenant later is env-only (OIDC_* on the backend — the SPA
+// reads the same values from /api/v1/public-config; Auth0 serves the
+// same .well-known discovery document).
 //
-// Env (build-time, PUBLIC_ prefix — plan §6 canonical names):
-//   PUBLIC_OIDC_ISSUER      issuer URL (dev: Keycloak realm 'finance')
-//   PUBLIC_OIDC_CLIENT_ID   public SPA client id (realm: 'finance-spa')
-//   PUBLIC_OIDC_AUDIENCE    access-token audience — frontend-specific
-//                           extension of the §6 names (the realm's audience
-//                           mapper adds it to the access token); default
-//                           'finance-api'
+// Config (runtime, round 64): issuer / client id / audience come from
+// GET /api/v1/public-config (src/lib/public-config.ts) — the backend
+// serves its OWN OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_AUDIENCE env, the
+// single source of truth; the old build-time frontend env vars are gone
+// (round 64). Absence of `audience` in the response means the deployment
+// has none: the param is omitted from the authorize request entirely.
 //
 // Session persistence: WebStorageStateStore over localStorage — the user
 // (incl. id_token/refresh_token) survives reloads and is restored by
@@ -29,10 +29,7 @@
 import { writable } from 'svelte/store';
 import { UserManager, WebStorageStateStore, type User } from 'oidc-client-ts';
 import { setTokenProvider, setUnauthorizedHandler } from '#lib/api/client';
-
-const ISSUER = import.meta.env.PUBLIC_OIDC_ISSUER ?? 'http://localhost:18081/realms/finance';
-const CLIENT_ID = import.meta.env.PUBLIC_OIDC_CLIENT_ID ?? 'finance-spa';
-const AUDIENCE = import.meta.env.PUBLIC_OIDC_AUDIENCE ?? 'finance-api';
+import { getPublicConfig } from '#lib/public-config';
 
 /** Reactive current user (null when signed out). */
 export const user = writable<User | null>(null);
@@ -59,11 +56,16 @@ function setStoreUser(next: User | null): void {
 
 let manager: UserManager | undefined;
 
-function client(): UserManager {
+async function client(): Promise<UserManager> {
 	if (!manager) {
+		const cfg = await getPublicConfig();
+		// extraQueryParams only when the deployment provides an
+		// audience: an explicit `audience: undefined` would still reach
+		// the authorize query string (as an empty param).
+		const options = cfg.oidc.audience ? { extraQueryParams: { audience: cfg.oidc.audience } } : {};
 		manager = new UserManager({
-			authority: ISSUER,
-			client_id: CLIENT_ID,
+			authority: cfg.oidc.issuer,
+			client_id: cfg.oidc.client_id,
 			redirect_uri: `${window.location.origin}/auth/callback`,
 			post_logout_redirect_uri: `${window.location.origin}/`,
 			response_type: 'code', // authorization code + PKCE (S256 default)
@@ -74,7 +76,7 @@ function client(): UserManager {
 			// default client scopes — no extra /userinfo round trip.
 			loadUserInfo: false,
 			automaticSilentRenew: true,
-			extraQueryParams: { audience: AUDIENCE }
+			...options
 		});
 	}
 	return manager;
@@ -85,7 +87,7 @@ function client(): UserManager {
  * from the root layout's onMount.
  */
 export async function initSession(): Promise<void> {
-	const c = client();
+	const c = await client();
 	setStoreUser(await c.getUser());
 	c.events.addUserLoaded((u) => setStoreUser(u));
 	c.events.addUserUnloaded(() => setStoreUser(null));
@@ -178,10 +180,16 @@ export function login(returnTo?: string): void {
 	}, 5000);
 	stashReturnTo(returnTo);
 	client()
-		.signinRedirect({
+		.then(async (c) => {
 			// Per-call so the audience is guaranteed on the authorize
-			// request regardless of settings-merge semantics.
-			extraQueryParams: { audience: AUDIENCE }
+			// request regardless of settings-merge semantics — and only
+			// when set (an explicit `audience: undefined` would reach
+			// the query string as an empty param). getPublicConfig() is
+			// memoized — client() above already awaited it, so this is
+			// not an extra request.
+			const cfg = await getPublicConfig();
+			const options = cfg.oidc.audience ? { extraQueryParams: { audience: cfg.oidc.audience } } : {};
+			return c.signinRedirect(options);
 		})
 		.catch(() => {
 			redirectInFlight = false;
@@ -204,7 +212,7 @@ let suppressUntil = 0;
 
 /** Finish the redirect flow — called from the /auth/callback page. */
 export async function signInCallback(): Promise<void> {
-	const c = client();
+	const c = await client();
 	signInInFlight = true;
 	try {
 		// signinCallback, NOT signinRedirectCallback: this same URL also
@@ -246,7 +254,7 @@ export async function signInCallback(): Promise<void> {
  * the cleared user never rehydrates from stale state.
  */
 export async function logout(): Promise<void> {
-	const c = client();
+	const c = await client();
 	const u = await c.getUser();
 	setStoreUser(null);
 	void c.signoutRedirect({

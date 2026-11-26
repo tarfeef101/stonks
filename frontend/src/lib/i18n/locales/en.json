@@ -456,7 +456,10 @@
 		"complete_onboarding": "Complete onboarding",
 		"session_expired_title": "Session expired",
 		"session_expired_body": "Your session has expired. Sign in again to continue.",
-		"session_expired_dismiss": "Not now"
+		"session_expired_dismiss": "Not now",
+		"config_load_failed_title": "Couldn't load app settings",
+		"config_load_failed_body": "The app couldn't reach its configuration endpoint. Check that the backend is running, then retry.",
+		"retry": "Retry"
 	},
 	"onboarding": {
 		"title": "Onboarding",

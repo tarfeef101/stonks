@@ -109,6 +109,9 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-http://keycloak:8080/realms/finance}
       NR_LICENSE_KEY: ${NR_LICENSE_KEY:-}
+      # NR browser agent application ID — served to the SPA at runtime
+      # via GET /api/v1/public-config (round 64); empty = agent off.
+      NR_APPLICATION_ID: ${NR_APPLICATION_ID:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,9 +151,10 @@ services:
       # frontend dependency), so disable it rather than fake a route.
       disable: true
 
-  # Dev server (not the nginx image): SvelteKit PUBLIC_* vars are read at
-  # runtime by the dev server, so .env changes apply on restart without a
-  # rebuild (they are baked in for the static production build).
+  # Dev server (not the nginx image). The SPA takes NO build-time config:
+  # it loads its OIDC + NR settings at RUNTIME from the backend's
+  # GET /api/v1/public-config via vite's /api proxy, so the only env var
+  # it needs is the proxy target (vite.config.ts). (Round 64.)
   frontend:
     image: node:26.13.0
     working_dir: /app
@@ -158,19 +162,6 @@ services:
     ports:
       - "18082:5173"
     environment:
-      PUBLIC_API_BASE: /api
-      PUBLIC_NR_LICENSE_KEY: ${NR_LICENSE_KEY:-}
-      PUBLIC_NR_APPLICATION_ID: ${PUBLIC_NR_APPLICATION_ID:-}
-      # OIDC (step 1.2) — build-time vars read by the vite dev server at
-      # boot (restart the container after changing .env). PUBLIC_ names
-      # are the frontend-specific spelling of the plan §6 canonical vars.
-      # NOTE (D-016, refined by D-021): PUBLIC_OIDC_ISSUER is the BROWSER
-      # horizon and equals the token's `iss`; the backend verifier validates
-      # `iss` against OIDC_ISSUER (same value) but discovers JWKS against
-      # OIDC_DISCOVERY_URL (container horizon).
-      PUBLIC_OIDC_ISSUER: ${PUBLIC_OIDC_ISSUER:-http://localhost:18081/realms/finance}
-      PUBLIC_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-finance-spa}
-      PUBLIC_OIDC_AUDIENCE: ${OIDC_AUDIENCE:-finance-api}
       # Target of the /api vite dev proxy (vite.config.ts) — compose
       # service name; standalone dev servers default to localhost:18080.
       VITE_API_PROXY_TARGET: http://backend:8080

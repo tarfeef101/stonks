@@ -53,9 +53,9 @@ locals {
   parameter_names = [
     "KEK",
     "DATABASE_URL",
-    "AUTH0_ISSUER",
-    "AUTH0_CLIENT_ID",
-    "AUTH0_CLIENT_SECRET",
+    "OIDC_ISSUER",
+    "OIDC_CLIENT_ID",
+    "OIDC_CLIENT_SECRET",
     "NR_LICENSE_KEY",
     "SMTP_HOST",
     "SMTP_PORT",
@@ -66,6 +66,7 @@ locals {
     "LLM_BASE_URL",
     "LLM_API_KEY",
     "LLM_MODEL",
+    "NR_APPLICATION_ID",
   ]
 }
 
@@ -125,7 +126,7 @@ resource "aws_iam_policy" "secretsync" {
 }
 
 output "parameter_names" {
-  description = "The 15 SSM parameter paths the app / secretsync Job expect."
+  description = "The 16 SSM parameter paths the app / secretsync Job expect."
   value = [
     for n in local.parameter_names : "${local.parameter_prefix}/${n}"
   ]

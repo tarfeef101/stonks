@@ -47,9 +47,9 @@
 #
 # Env (all have dev defaults; see .env.example for the full story):
 #   oidc flow:
-#   PUBLIC_OIDC_ISSUER          default http://localhost:18081/realms/finance
-#   PUBLIC_OIDC_CLIENT_ID       default finance-spa
-#   PUBLIC_OIDC_AUDIENCE        default finance-api
+#   FTRK_OIDC_ISSUER            default http://localhost:18081/realms/finance
+#   FTRK_OIDC_CLIENT_ID         default finance-spa
+#   FTRK_OIDC_AUDIENCE          default finance-api
 #   FTRK_TEST_USER              default test
 #   FTRK_TEST_USER_PASSWORD     default test1234
 #   authn flow:
@@ -150,9 +150,9 @@ PY
 
 run_oidc() {
 	local KC CLIENT_ID AUDIENCE REDIRECT_URI USERNAME PASSWORD KC_HOST
-	KC="${PUBLIC_OIDC_ISSUER:-http://localhost:18081/realms/finance}"
-	CLIENT_ID="${PUBLIC_OIDC_CLIENT_ID:-finance-spa}"
-	AUDIENCE="${PUBLIC_OIDC_AUDIENCE:-finance-api}"
+	KC="${FTRK_OIDC_ISSUER:-http://localhost:18081/realms/finance}"
+	CLIENT_ID="${FTRK_OIDC_CLIENT_ID:-finance-spa}"
+	AUDIENCE="${FTRK_OIDC_AUDIENCE:-finance-api}"
 	REDIRECT_URI="http://localhost:18082/auth/callback"
 	USERNAME="${FTRK_TEST_USER:-test}"
 	PASSWORD="${FTRK_TEST_USER_PASSWORD:-test1234}"

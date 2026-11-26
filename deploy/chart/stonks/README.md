@@ -38,12 +38,16 @@ all backendRefs are same-namespace (no ReferenceGrants needed).
    | `POSTGRES_USER` / `POSTGRES_DB` / `POSTGRES_PASSWORD` | yes | postgres StatefulSet |
    | `OIDC_AUDIENCE`, `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL` | no | empty = graceful |
    | `NR_LICENSE_KEY` | no | empty = no telemetry |
+   | `NR_APPLICATION_ID` | no | empty = no telemetry — the browser agent needs both NR values |
    | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` / `SMTP_TLS_POLICY` | no | empty = mail off |
    | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | no | empty = LLM off |
 
    Missing **required** keys fail pod startup (no `optional:` flag on
    those refs). Optional keys render empty when absent, which the app
-   treats as "feature disabled".
+   treats as "feature disabled". The frontend Deployment consumes
+   `OIDC_ISSUER` (required — its entrypoint renders the runtime security
+   headers/CSP from it) and the two NR keys (optional — they gate the NR
+   browser agent in that CSP) at container start, from the same secret.
 
 2. **Image tags**: `images.backend.tag` / `images.frontend.tag` MUST be
    overridden with the git short SHA the images were pushed from — the

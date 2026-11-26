@@ -9,10 +9,11 @@ deployment change is then env-only (`OIDC_ISSUER` / `OIDC_CLIENT_ID`).
 
 Since D-030 the env-var names are IdP-agnostic (`OIDC_*`, not `AUTH0_*`):
 dev Keycloak and prod Auth0 use the SAME names, so swapping IdPs is a value
-change, not a rename. Exception: the SSM parameter names in `infra/aws-ssm`
-still carry the legacy `AUTH0_*` spelling (that template predates D-030 and
-is validate-only) — the `secretsync` Job maps them onto the current `OIDC_*`
-env names (see the note in the SSM section below).
+change, not a rename. The SSM parameter names in `infra/aws-ssm` now match
+the app's `OIDC_*` env names (no exception: the module creates
+`OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`), so the
+`secretsync` Job maps each parameter onto the same-named app env var
+(see the note in the SSM section below).
 
 `make tf-validate` keeps every template green (per directory: `terraform
 init -backend=false`, `validate`, `fmt -check`).
@@ -23,7 +24,7 @@ init -backend=false`, `validate`, `fmt -check`).
 |-----------------------------|-------------------------------------------------------------------------------------|
 | `infra/auth0/environments/test` | A test tenant's settings: SPA `finance-spa` (OIDC conformant, PKCE), API `finance-api` (RS256) + `email`/`profile` scopes |
 | `infra/auth0/environments/prod` | Same, on a **separate prod tenant**                                                 |
-| `infra/aws-ssm`             | Gated (`enabled`, default `false`): 15 SecureString params `/finance-tracker/<NAME>` (plan §6 names) + `finance-tracker-secretsync` IAM policy |
+| `infra/aws-ssm`             | Gated (`enabled`, default `false`): 16 SecureString params `/finance-tracker/<NAME>` (plan §6 names) + `finance-tracker-secretsync` IAM policy |
 
 Outputs per Auth0 environment: `issuer` (`https://<tenant domain>`),
 `client_id`, `domain`.
@@ -107,7 +108,7 @@ of plain k8s Secrets; the opt-in `secretsync` Job fetches them).
    terraform apply
    ```
 
-   This creates the 15 `/finance-tracker/<NAME>` SecureString parameters
+   This creates the 16 `/finance-tracker/<NAME>` SecureString parameters
    **without values** plus the `finance-tracker-secretsync` IAM policy
    (exact per-parameter ARNs; `kms:Decrypt`/`GenerateDataKey` only when
    `kms_key_arn` is set).
@@ -118,20 +119,30 @@ of plain k8s Secrets; the opt-in `secretsync` Job fetches them).
    read -rs KEK_VALUE && printf '\n'   # no echo, no shell history
    aws ssm put-parameter --name /finance-tracker/KEK \
      --type SecureString --value "$KEK_VALUE"
-   # ... repeat for DATABASE_URL, AUTH0_ISSUER, AUTH0_CLIENT_ID,
-   # AUTH0_CLIENT_SECRET, NR_LICENSE_KEY, SMTP_*, LLM_*
+   # ... repeat for DATABASE_URL, OIDC_ISSUER, OIDC_CLIENT_ID,
+   # OIDC_CLIENT_SECRET, NR_LICENSE_KEY, NR_APPLICATION_ID, SMTP_*, LLM_*
    ```
 
    Copy the Auth0 `issuer`/`client_id` outputs into
-   `/finance-tracker/AUTH0_ISSUER` and `/finance-tracker/AUTH0_CLIENT_ID`
+   `/finance-tracker/OIDC_ISSUER` and `/finance-tracker/OIDC_CLIENT_ID`
    the same way.
 
-   **Note (D-030):** the parameter names above keep the legacy `AUTH0_*`
-   spelling — `infra/aws-ssm/main.tf` predates the rename and is
-   validate-only, so the parameter names are the app's old env names. The
-   `secretsync` Job (lands with the deployment work) maps each SSM
-   parameter onto the app's current `OIDC_*` env-var name, so the app
-   never reads `AUTH0_*` from its environment.
+   **Note (D-036, round 64):** the SSM parameters were renamed
+   `AUTH0_*` → `OIDC_*` to match the app's env names, and
+   `NR_APPLICATION_ID` was added (16 total). **MIGRATION STEP** for
+   operators who applied the old template: the module now creates NEW
+   empty `OIDC_*` parameters (`ignore_changes = [value]` preserves
+   operator-set values), so copy your already-set values to the new
+   names, then delete the old `AUTH0_*` parameters:
+
+   ```sh
+   aws ssm put-parameter --name /finance-tracker/OIDC_ISSUER \
+     --type SecureString --value '<old AUTH0_ISSUER value>'
+   # ... same for OIDC_CLIENT_ID and OIDC_CLIENT_SECRET
+   aws ssm delete-parameter --name /finance-tracker/AUTH0_ISSUER
+   aws ssm delete-parameter --name /finance-tracker/AUTH0_CLIENT_ID
+   aws ssm delete-parameter --name /finance-tracker/AUTH0_CLIENT_SECRET
+   ```
 
    **Caveat:** whether SSM accepts an *empty* SecureString value on
    creation is not verified (AWS docs don't say). If `apply` is rejected

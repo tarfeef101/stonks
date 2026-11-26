@@ -58,6 +58,12 @@ Usage: {{ include "stonks.appEnv" . }}
       name: {{ .Values.secrets.existingSecret }}
       key: NR_LICENSE_KEY
       optional: true
+- name: NR_APPLICATION_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.existingSecret }}
+      key: NR_APPLICATION_ID
+      optional: true
 - name: SMTP_HOST
   valueFrom:
     secretKeyRef:
@@ -111,5 +117,30 @@ Usage: {{ include "stonks.appEnv" . }}
     secretKeyRef:
       name: {{ .Values.secrets.existingSecret }}
       key: LLM_MODEL
+      optional: true
+{{- end -}}
+{{/*
+Application environment for the frontend Deployment: the container
+entrypoint renders the runtime CSP from OIDC_ISSUER (required) and gates
+the New Relic browser agent in that CSP on the two NR keys; the SPA itself
+reads OIDC settings at runtime from the backend's GET /api/v1/public-config.
+*/}}
+{{- define "stonks.frontendEnv" -}}
+- name: OIDC_ISSUER
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.existingSecret }}
+      key: OIDC_ISSUER
+- name: NR_LICENSE_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.existingSecret }}
+      key: NR_LICENSE_KEY
+      optional: true
+- name: NR_APPLICATION_ID
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secrets.existingSecret }}
+      key: NR_APPLICATION_ID
       optional: true
 {{- end -}}

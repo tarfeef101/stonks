@@ -32,12 +32,12 @@ module "auth0" {
 }
 
 output "issuer" {
-  description = "OIDC issuer for the prod environment (copy to AUTH0_ISSUER)."
+  description = "OIDC issuer for the prod environment (copy to OIDC_ISSUER)."
   value       = module.auth0.issuer
 }
 
 output "client_id" {
-  description = "SPA client ID for the prod environment (copy to AUTH0_CLIENT_ID)."
+  description = "SPA client ID for the prod environment (copy to OIDC_CLIENT_ID)."
   value       = module.auth0.client_id
 }
 

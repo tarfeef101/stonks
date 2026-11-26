@@ -1,13 +1,14 @@
 // Typed API client: thin fetch wrapper around the backend API.
 //
-// - Base URL from PUBLIC_API_BASE (build-time; default '/api' — the vite dev
-//   server and nginx both proxy /api to the backend).
+// - Base URL is '/api' — same-origin in every environment: the vite dev
+//   server (dev) and the ingress HTTPRoute (prod) both proxy /api to the
+//   backend.
 // - Bearer token injection via a pluggable provider. Step 1.2 wires the
 //   OIDC session's access token here: src/lib/auth/client.ts calls
 //   setTokenProvider on module load. Until the user has signed in the
 //   provider returns null — unauthenticated requests.
 
-const API_BASE = import.meta.env.PUBLIC_API_BASE ?? '/api';
+const API_BASE = '/api';
 
 type TokenProvider = () => string | null;
 
