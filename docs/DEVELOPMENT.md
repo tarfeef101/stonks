@@ -195,6 +195,39 @@ backend (target overridable via `VITE_API_PROXY_TARGET`, default
 `http://localhost:18080` inside the compose network). The nginx image from
 step 0.3 is the production serving path and is not used in dev.
 
+## Helm chart (production deploy)
+
+The production chart is `deploy/chart/stonks` (Phase 10; D-033/D-034/D-035).
+All helm work runs in a container pinned to **Helm 4.3.1** — there is no
+official helm image, so the Makefile uses `alpine:3.22` and verifies the
+get.helm.sh tarball by sha256 on every run. **None of the targets below
+needs a cluster.**
+
+```sh
+make helm-version    # smoke-test: expect v4.3.1
+make helm-lint       # lint deploy/chart/stonks
+make helm-template   # render release "stonks" to stdout
+make chart-push      # package + push oci://ghcr.io/tarfeef101/stonks-chart
+```
+
+- The chart is consumed by Terraform `helm_release`
+  (`chart = "oci://ghcr.io/tarfeef101/stonks-chart"`,
+  `create_namespace: true` — the chart creates no Namespace).
+  `helm-template` is therefore run without `-n`; the rendered `default`
+  namespace is a local-rendering artifact, not a chart property.
+- The chart takes the Secret **name** only (`secrets.existingSecret`,
+  default `stonks-secrets`, created by Terraform from SSM). Secret values
+  never enter helm values — they would land in the release Secret in etcd
+  (D-033). Key contract: `deploy/chart/stonks/README.md`.
+- `images.*.tag` defaults to `latest`, a **sentinel** that never exists in
+  the registry — Terraform MUST override it with the git short SHA the
+  images were pushed from.
+- `chart-push` is OPERATOR-GATED: the gh auth token needs `write:packages`
+  plus a `docker login` to ghcr.io. The first push creates the
+  `stonks-chart` package on GHCR; afterwards it must be linked to the
+  `tarfeef101/stonks` repo in the GitHub UI (packages → edit → link to
+  repo) so it stays public / anonymously pullable.
+
 ## Troubleshooting
 
 - **A port is already in use** — `docker compose -f docker-compose.dev.yml ps`
