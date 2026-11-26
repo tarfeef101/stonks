@@ -1,0 +1,110 @@
+# stonks — Postgres backup CronJob (plan §10.5; D-037)
+#
+# OPERATOR-APPLIED — deliberately NOT part of the Helm chart (D-035
+# precedent: ops topology stays out of the public chart). Apply with:
+#
+#   kubectl apply -f deploy/ops/pg-backup-cronjob.yaml
+#
+# Assumptions (adjust to match YOUR release):
+#   - release name `stonks` in namespace `stonks` (the chart README default)
+#   - the release Secret is named `stonks-secrets` (= values.secrets.
+#     existingSecret) and holds POSTGRES_USER / POSTGRES_PASSWORD /
+#     POSTGRES_DB (the chart's required keys)
+#   - the dump image major must be >= the server major: keep `image:` in
+#     sync with `postgres.image.tag` in your helm values (the verified
+#     minor is recorded in docs/OPERATOR.md §2.1)
+#
+# Each run writes one plain-SQL gzipped dump to the `stonks-backups` PVC
+# and keeps the 14 newest. The PVC lives ON the cluster (Longhorn,
+# node-replicated) — it does NOT survive total cluster loss. If you want
+# an off-cluster copy, add your own transport (the files are portable
+# plain-SQL gzips, e.g. an `s3 cp` step after each run).
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: stonks-backups
+  namespace: stonks
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stonks-pg-backup
+  namespace: stonks
+  labels:
+    app.kubernetes.io/name: stonks
+    app.kubernetes.io/component: ops
+spec:
+  # 03:00 UTC daily (CronJob schedules run in the apiserver's local time;
+  # k3s defaults to UTC). RPO = 24h.
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: pg-dump
+              # Keep in sync with `postgres.image.tag` in the helm values.
+              image: postgres:18.6
+              imagePullPolicy: IfNotPresent
+              # Runs as root on purpose: a custom command bypasses the
+              # postgres image's entrypoint (which would drop privileges),
+              # and a fresh Longhorn PVC is root-owned. One-shot, internal,
+              # holds only a psql client + the dump output.
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  d=$(date -u +%Y%m%dT%H%M%SZ)
+                  tmp="/backups/.dump-$d.sql.part"
+                  out="/backups/stonks-$d.sql.gz"
+                  pg_dump -h stonks-postgres -p 5432 -U "$PGUSER" -d "$PGDATABASE" \
+                    --format=plain --no-owner --no-privileges > "$tmp"
+                  gzip -c "$tmp" > "$out"
+                  rm -f "$tmp"
+                  echo "backup written: $out ($(du -h "$out" | cut -f1))"
+                  # rolling retention: remove everything past the 14 newest
+                  for f in $(ls -1t /backups/stonks-*.sql.gz 2>/dev/null | tail -n +15); do
+                    rm -f -- "$f"
+                  done
+              env:
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: stonks-secrets # = values.secrets.existingSecret
+                      key: POSTGRES_USER
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: stonks-secrets
+                      key: POSTGRES_DB
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: stonks-secrets
+                      key: POSTGRES_PASSWORD
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: stonks-backups

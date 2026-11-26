@@ -6,7 +6,10 @@ budgets, dashboards, and a mortgage what-if tool. Per-user encryption at rest.
 
 - Requirements: [DESIGN.md](DESIGN.md)
 - Decisions log: [docs/TECH-DECISIONS.md](docs/TECH-DECISIONS.md)
-- Dev setup: `docs/DEVELOPMENT.md` (lands in step 0.4)
+- Dev setup: `docs/DEVELOPMENT.md`
+- Production deploy: `docs/OPERATOR.md` (operator runbook: install, NR opt-in,
+  backups/restore, KEK rotation, upgrade/rollback) + `docs/AUTH0-SETUP.md`
+  (IdP + SSM provisioning)
 
 ## Quickstart (once the dev stack lands — step 0.4)
 

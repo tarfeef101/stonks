@@ -36,7 +36,8 @@ all backendRefs are same-namespace (no ReferenceGrants needed).
    | `OIDC_ISSUER` | yes | Auth0 issuer URL |
    | `OIDC_CLIENT_ID` | yes | first-party SPA client |
    | `POSTGRES_USER` / `POSTGRES_DB` / `POSTGRES_PASSWORD` | yes | postgres StatefulSet |
-   | `OIDC_AUDIENCE`, `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL` | no | empty = graceful |
+   | `OIDC_AUDIENCE` | yes* | required by the backend at boot — `authn.New` fails fast on an empty audience; the chart renders this ref `optional: true`, so a missing key does not block pod start, but the backend then crash-loops |
+   | `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL` | no | empty = graceful (PKCE public client; discovery defaults to `OIDC_ISSUER`) |
    | `NR_LICENSE_KEY` | no | empty = no telemetry |
    | `NR_APPLICATION_ID` | no | empty = no telemetry — the browser agent needs both NR values |
    | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` / `SMTP_TLS_POLICY` | no | empty = mail off |
@@ -44,7 +45,9 @@ all backendRefs are same-namespace (no ReferenceGrants needed).
 
    Missing **required** keys fail pod startup (no `optional:` flag on
    those refs). Optional keys render empty when absent, which the app
-   treats as "feature disabled". The frontend Deployment consumes
+   treats as "feature disabled" — with one exception: `OIDC_AUDIENCE`
+   (the `*` above) renders `optional: true` but is required by the
+   backend at boot. The frontend Deployment consumes
    `OIDC_ISSUER` (required — its entrypoint renders the runtime security
    headers/CSP from it) and the two NR keys (optional — they gate the NR
    browser agent in that CSP) at container start, from the same secret.
