@@ -10,5 +10,8 @@ description: >-
   SPA, Postgres, migration hook Job, and the two HTTPRoutes for
   stonks.tareef.tech. All secrets are consumed by name, never carried.
 type: application
-version: 0.1.0
+# 0.1.0 (2026-11-25) failed server-side validation: requestRedirect.path.type
+# "Preserve" is not a Gateway API value (see httproute-redirect.yaml). 0.1.1
+# is the first installable revision.
+version: 0.1.1
 appVersion: "0.1.0"

@@ -24,8 +24,10 @@ spec:
       filters:
         - type: RequestRedirect
           requestRedirect:
+            statusCode: 301
             scheme: https
             hostname: {{ .Values.ingress.hostname }}
             port: {{ .Values.ingress.redirectPort }}
-            path:
-              type: Preserve
+            # NOTE: no `path` field — Gateway API requestRedirect only supports
+            # ReplaceFullPath/ReplacePrefixMatch (there is no "Preserve");
+            # omitting the field is what preserves the request path.
