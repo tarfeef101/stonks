@@ -1,18 +1,24 @@
 {{/*
-Application environment for the backend and worker pods. Every value
-comes from the pre-existing Secret named by secrets.existingSecret —
-this chart carries no secret values (public repo).
+Application environment for the backend and worker pods. Two sources —
+this chart is PUBLIC and never carries secret VALUES:
 
-Required keys have NO `optional:` flag: if the key (or the Secret) is
-missing, the pod fails at startup with a clear CreateContainerConfigError
-instead of running misconfigured. Optional keys get `optional: true` and
-render as empty strings when absent, which the app treats as "feature
-disabled" (see backend/internal/config/config.go).
+- The pre-existing Secret named by secrets.existingSecret carries only
+  the genuinely secret values: KEK, DATABASE_URL, POSTGRES_PASSWORD, and
+  the optional OIDC_CLIENT_SECRET / NR_LICENSE_KEY / SMTP_PASS /
+  LLM_API_KEY. Required secret refs have NO `optional:` flag (a missing
+  key fails pod startup with a clear CreateContainerConfigError);
+  optional refs get `optional: true` and render as empty strings when
+  absent.
+- values.yaml carries everything non-secret (OIDC_ISSUER, SMTP_HOST,
+  ...). Required value keys fail the RENDER when empty (`required`);
+  optional ones render as empty strings, which the app treats as "feature
+  disabled" (backend/internal/config/config.go uses os.Getenv — a
+  missing env var IS the empty string).
 
 Usage: {{ include "stonks.appEnv" . }}
 */}}
 {{- define "stonks.appEnv" -}}
-# --- required (fail-fast on missing) ---
+# --- required: secret (fail-fast pod startup) ---
 - name: KEK
   valueFrom:
     secretKeyRef:
@@ -23,64 +29,25 @@ Usage: {{ include "stonks.appEnv" . }}
     secretKeyRef:
       name: {{ .Values.secrets.existingSecret }}
       key: DATABASE_URL
+# --- required: non-secret values (fail-fast render) ---
 - name: OIDC_ISSUER
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: OIDC_ISSUER
+  value: {{ required "oidc.issuer is required (the OIDC issuer URL)" .Values.oidc.issuer | quote }}
 - name: OIDC_CLIENT_ID
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: OIDC_CLIENT_ID
-# --- optional (empty = feature disabled) ---
+  value: {{ required "oidc.clientId is required (the first-party SPA client ID)" .Values.oidc.clientId | quote }}
 - name: OIDC_AUDIENCE
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: OIDC_AUDIENCE
-      optional: true
+  value: {{ required "oidc.audience is required (the resource server identifier)" .Values.oidc.audience | quote }}
+# --- optional: secret (absent key = empty = feature disabled) ---
 - name: OIDC_CLIENT_SECRET
   valueFrom:
     secretKeyRef:
       name: {{ .Values.secrets.existingSecret }}
       key: OIDC_CLIENT_SECRET
       optional: true
-- name: OIDC_DISCOVERY_URL
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: OIDC_DISCOVERY_URL
-      optional: true
 - name: NR_LICENSE_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Values.secrets.existingSecret }}
       key: NR_LICENSE_KEY
-      optional: true
-- name: NR_APPLICATION_ID
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: NR_APPLICATION_ID
-      optional: true
-- name: SMTP_HOST
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: SMTP_HOST
-      optional: true
-- name: SMTP_PORT
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: SMTP_PORT
-      optional: true
-- name: SMTP_USER
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: SMTP_USER
       optional: true
 - name: SMTP_PASS
   valueFrom:
@@ -88,49 +55,42 @@ Usage: {{ include "stonks.appEnv" . }}
       name: {{ .Values.secrets.existingSecret }}
       key: SMTP_PASS
       optional: true
-- name: SMTP_FROM
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: SMTP_FROM
-      optional: true
-- name: SMTP_TLS_POLICY
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: SMTP_TLS_POLICY
-      optional: true
-- name: LLM_BASE_URL
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: LLM_BASE_URL
-      optional: true
 - name: LLM_API_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Values.secrets.existingSecret }}
       key: LLM_API_KEY
       optional: true
+# --- optional: non-secret values (empty = feature disabled) ---
+- name: OIDC_DISCOVERY_URL
+  value: {{ .Values.oidc.discoveryUrl | quote }}
+- name: NR_APPLICATION_ID
+  value: {{ .Values.newrelic.applicationId | quote }}
+- name: SMTP_HOST
+  value: {{ .Values.smtp.host | quote }}
+- name: SMTP_PORT
+  value: {{ .Values.smtp.port | quote }}
+- name: SMTP_USER
+  value: {{ .Values.smtp.user | quote }}
+- name: SMTP_FROM
+  value: {{ .Values.smtp.from | quote }}
+- name: SMTP_TLS_POLICY
+  value: {{ .Values.smtp.tlsPolicy | quote }}
+- name: LLM_BASE_URL
+  value: {{ .Values.llm.baseUrl | quote }}
 - name: LLM_MODEL
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: LLM_MODEL
-      optional: true
+  value: {{ .Values.llm.model | quote }}
 {{- end -}}
 {{/*
 Application environment for the frontend Deployment: the container
-entrypoint renders the runtime CSP from OIDC_ISSUER (required) and gates
-the New Relic browser agent in that CSP on the two NR keys; the SPA itself
-reads OIDC settings at runtime from the backend's GET /api/v1/public-config.
+entrypoint renders the runtime CSP from OIDC_ISSUER (required value) and
+gates the New Relic browser agent in that CSP on the two NR keys (secret
++ value); the SPA itself reads OIDC settings at runtime from the
+backend's GET /api/v1/public-config.
 */}}
 {{- define "stonks.frontendEnv" -}}
 - name: OIDC_ISSUER
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: OIDC_ISSUER
+  value: {{ required "oidc.issuer is required (the OIDC issuer URL)" .Values.oidc.issuer | quote }}
 - name: NR_LICENSE_KEY
   valueFrom:
     secretKeyRef:
@@ -138,9 +98,5 @@ reads OIDC settings at runtime from the backend's GET /api/v1/public-config.
       key: NR_LICENSE_KEY
       optional: true
 - name: NR_APPLICATION_ID
-  valueFrom:
-    secretKeyRef:
-      name: {{ .Values.secrets.existingSecret }}
-      key: NR_APPLICATION_ID
-      optional: true
+  value: {{ .Values.newrelic.applicationId | quote }}
 {{- end -}}

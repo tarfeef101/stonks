@@ -26,53 +26,52 @@ Certificate / Issuer / ReferenceGrant (D-034).
 
 ## 1. Prerequisites
 
-1. **IdP.** Production Auth0 tenant stood up via `infra/auth0` (see
-   `docs/AUTH0-SETUP.md`) — the module creates the SPA `finance-spa`
-   (PKCE) and the API `finance-api`, whose identifier is literally
-   `finance-api`; that identifier is the value of `OIDC_AUDIENCE` (the
-   backend requires it at boot — §1.2). Note the tenant `issuer` URL
-   and the SPA `client_id` from the Terraform outputs.
-2. **Secrets.** SSM parameters created (`infra/aws-ssm`, `enabled = true`)
-   and **values set out-of-band** per `docs/AUTH0-SETUP.md` — 16
-   SecureStrings under `/finance-tracker/`:
+1. **IdP.** The Terraform module (§2.2) manages the production Auth0
+   tenant — the SPA `finance-spa` (PKCE) and the API `finance-api`,
+   whose identifier is literally `finance-api`; that identifier is the
+   `oidc.audience` chart value (the backend requires it at boot — §1.2).
+   The tenant `issuer` URL and the SPA `client_id` come straight from
+   the Auth0 provider into the `oidc.issuer` / `oidc.clientId` chart
+   values — no manual copying (D-038). The legacy `infra/auth0`
+   templates (`docs/AUTH0-SETUP.md`) remain for the manual path.
+2. **Secrets.** Only the genuinely secret values are SSM parameters —
+   7 SecureStrings under `/finance-tracker/` (the module creates them as
+   placeholders when `ssm_enabled = true`; **values are set out-of-band**
+   with `aws ssm put-parameter` — Terraform never clobbers them):
 
    ```
-   KEK  DATABASE_URL  OIDC_ISSUER  OIDC_CLIENT_ID  OIDC_CLIENT_SECRET
-   NR_LICENSE_KEY  NR_APPLICATION_ID
-   SMTP_HOST  SMTP_PORT  SMTP_USER  SMTP_PASS  SMTP_FROM  SMTP_TLS_POLICY
-   LLM_BASE_URL  LLM_API_KEY  LLM_MODEL
+   KEK  DATABASE_URL  POSTGRES_PASSWORD
+   OIDC_CLIENT_SECRET  NR_LICENSE_KEY  SMTP_PASS  LLM_API_KEY
    ```
 
-   Then create the k8s Secret **`stonks-secrets`** in namespace `stonks`
-   from those values (the chart takes the *name* only, never values —
-   D-033). Four keys are **not** SSM parameters: the
-   `POSTGRES_USER` / `POSTGRES_DB` / `POSTGRES_PASSWORD` triple (choose
-   strong values) and `OIDC_AUDIENCE` (the `finance-api` identifier from
-   §1.1 — the backend fails to start without it):
+   That set is **exactly the k8s Secret's key set** (chart 0.1.3 —
+   D-038). The module creates the Secret **`stonks-secrets`** in
+   namespace `stonks` from its own variables: always the 3 required keys
+   (`KEK`, `DATABASE_URL`, `POSTGRES_PASSWORD`), plus each of the 4
+   optional keys **only when its variable is non-empty** (absent =
+   feature off; the chart renders those refs `optional: true`).
+   Everything non-secret — `oidc.issuer` / `oidc.clientId` /
+   `oidc.audience`, `newrelic.applicationId`,
+   `smtp.{host,port,user,from,tlsPolicy}`, `llm.{baseUrl,model}`,
+   `postgres.{user,db}` — is a chart value (§2.2), not a Secret entry.
+
+   Manual alternative (no module, no SSM):
 
    ```sh
    kubectl create namespace stonks
    kubectl -n stonks create secret generic stonks-secrets \
      --from-literal=KEK="$(make gen-kek)" \
      --from-literal=DATABASE_URL='postgres://ftrk:PASSWORD@<pg-host>:5432/ftrk' \
-     --from-literal=OIDC_ISSUER='https://<tenant>.auth0.com/' \
-     --from-literal=OIDC_CLIENT_ID='<spa-client-id>' \
-     --from-literal=OIDC_AUDIENCE='finance-api' \
+     --from-literal=POSTGRES_PASSWORD='PASSWORD' \
      --from-literal=OIDC_CLIENT_SECRET='' \
-     --from-literal=NR_LICENSE_KEY='' --from-literal=NR_APPLICATION_ID='' \
-     --from-literal=SMTP_HOST='' --from-literal=SMTP_PORT='' \
-     --from-literal=SMTP_USER='' --from-literal=SMTP_PASS='' \
-     --from-literal=SMTP_FROM='' --from-literal=SMTP_TLS_POLICY='' \
-     --from-literal=LLM_BASE_URL='' --from-literal=LLM_API_KEY='' \
-     --from-literal=LLM_MODEL='' \
-     --from-literal=POSTGRES_USER=ftrk \
-     --from-literal=POSTGRES_DB=ftrk \
-     --from-literal=POSTGRES_PASSWORD='PASSWORD'
+     --from-literal=NR_LICENSE_KEY='' \
+     --from-literal=SMTP_PASS='' \
+     --from-literal=LLM_API_KEY=''
    ```
 
-   (Empty values = feature off. A Terraform-managed
-   SSM→Secret sync is fine too — the chart does not care how the Secret
-   is maintained, only that the keys exist.) The full key contract is in
+   (Optional keys may be omitted entirely — absent = feature off. The
+   chart takes the Secret *name* only, never values, and does not care
+   how the Secret is maintained — D-033.) The full contract is in
    `deploy/chart/stonks/README.md`.
 3. **Edge.** Public IP with **80 and 16443** forwarded to the Envoy
    NodePorts 30080/30443 on the cluster (the 16443→30443 forward is an
@@ -90,30 +89,51 @@ Certificate / Issuer / ReferenceGrant (D-034).
 | Component | Verified value | When |
 |---|---|---|
 | Postgres minor (image `postgres:18` resolves to) | **18.6** | 2026-11-26 (`docker run --rm postgres:18 postgres --version`) |
-| Chart version | **0.1.2** (`oci://ghcr.io/tarfeef101/stonks-chart`, digest `sha256:ae6079cfea4e6786e0be0a2d0a8c977289d57f99a38cd7e72d08aefff72cdfb7`) | 2026-11-26 |
+| Chart version | **0.1.3** (`oci://ghcr.io/tarfeef101/stonks-chart`, digest `sha256:c85c77db36824fe373bfdb744d864917c0d38a548a24398b6a43dc0a38fd86f1`) | 2026-11-26 |
 
-Pin `postgres.image.tag: "18.6"` in the release values (re-verify and
-bump the pin at each deploy if `postgres:18` moved; keep the backup
-CronJob's `image:` in sync — §4.1), and pin the chart `version` in the
-Terraform block below.
+Both pins are module variables with these defaults
+(`postgres_image_tag = "18.6"`, `chart_version = "0.1.3"`) — re-verify
+and bump at each deploy if `postgres:18` moved (keep the backup
+CronJob's `image:` in sync — §4.1).
 
 ### 2.2 Terraform
 
-```hcl
-resource "helm_release" "stonks" {
-  name             = "stonks"
-  chart            = "oci://ghcr.io/tarfeef101/stonks-chart"
-  version          = "0.1.2"
-  create_namespace = true
-  namespace        = "stonks"
+Provisioning is one child module — `infra/terraform/modules/stonks` in
+the app repo (D-038). It declares **no provider blocks of its own**; the
+root configures the four providers and passes them down:
 
-  # SENTINEL OVERRIDE — both MUST be the git short SHA the images were
-  # built + pushed from (the chart's `latest` defaults never exist).
-  set { name = "images.backend.tag"  value = "<git-short-sha>" }
-  set { name = "images.frontend.tag" value = "<git-short-sha>" }
-  set { name = "postgres.image.tag"  value = "18.6" }
+```hcl
+module "stonks" {
+  source = "./modules/stonks"  # app repo: infra/terraform/modules/stonks
+
+  providers = {
+    aws        = aws
+    auth0      = auth0
+    kubernetes = kubernetes
+    helm       = helm
+  }
+
+  # Required (no committed defaults — pass via TF_VAR_* / -var-file):
+  app_origin        = "https://stonks.tareef.tech:16443"
+  image_tag         = "<git-short-sha>"  # images built + pushed from this SHA
+  kek               = var.kek
+  postgres_password = var.postgres_password
+
+  # Optional (defaults in the module): chart_version "0.1.3",
+  # oidc_audience "finance-api", postgres_image_tag "18.6",
+  # postgres_user / postgres_db "ftrk", ssm_enabled true — and the
+  # feature vars default to "" (nr_application_id, smtp_host/port/user/
+  # from/tls_policy, smtp_pass, llm_base_url, llm_model, llm_api_key,
+  # nr_license_key, oidc_client_secret).
 }
 ```
+
+The module creates the Auth0 SPA + API, the 7 SSM placeholders, the
+`stonks-secrets` Secret (required keys, plus optional keys when their
+variables are set), and the `helm_release` — including the SENTINEL
+image-tag `set`s (both image tags MUST be the git short SHA the images
+were built + pushed from; the chart's `latest` defaults never exist)
+and `postgres.image.tag`.
 
 `terraform apply` runs the full install: namespace → 15 chart objects →
 the `<release>-migrate` **post-install** hook Job (`goose up`, retries
@@ -173,34 +193,42 @@ from beaconing with it.
    that method keeps the generated JavaScript on the Browser → Settings
    page). At the end of the setup the generated JS snippet shows the
    `licenseKey` and the `applicationID` — copy both.
-2. `NR_LICENSE_KEY` = the snippet's `licenseKey`; `NR_APPLICATION_ID`
-   = the snippet's `applicationID`. Per NR docs the browser agent's
-   license key is the account's **browser monitoring key** — distinct
-   from the ingest license key in the API keys UI. The app uses this
-   one value for BOTH layers (go-agent + browser agent); if the NR UI
-   later shows RUM but no APM data, the account's ingest key differs
-   and that is why.
-3. Set both SSM parameters (out-of-band, never via Terraform):
+2. `NR_LICENSE_KEY` (a Secret key + SSM parameter) = the snippet's
+   `licenseKey`; the **chart value** `newrelic.applicationId` (module
+   var `nr_application_id` — no longer an SSM parameter, D-038) = the
+   snippet's `applicationID`. Per NR docs the browser agent's license
+   key is the account's **browser monitoring key** — distinct from the
+   ingest license key in the API keys UI. The app uses this one value
+   for BOTH layers (go-agent + browser agent); if the NR UI later shows
+   RUM but no APM data, the account's ingest key differs and that is
+   why.
+3. Set the SSM parameter out-of-band, then re-apply the module with
+   both values (the module puts `NR_LICENSE_KEY` into `stonks-secrets`
+   and `newrelic.applicationId` into the release values — no manual
+   `kubectl patch`):
 
    ```sh
    aws ssm put-parameter --name /finance-tracker/NR_LICENSE_KEY \
      --type SecureString --value '<key>' --overwrite
-   aws ssm put-parameter --name /finance-tracker/NR_APPLICATION_ID \
-     --type SecureString --value '<id>' --overwrite
-   kubectl -n stonks patch secret stonks-secrets --type merge \
-     -p "{\"data\":{\"NR_LICENSE_KEY\":\"$(printf '%s' '<key>' | base64 -w0)\",\"NR_APPLICATION_ID\":\"$(printf '%s' '<id>' | base64 -w0)\"}}"
+   export TF_VAR_nr_license_key='<key>'
+   terraform apply -var nr_application_id='<id>'
    ```
 
-4. `kubectl -n stonks rollout restart deploy stonks-backend stonks-frontend`
+4. The module's `apply` already rolled the release (env change →
+   `helm upgrade`). Manual path only: `kubectl -n stonks rollout
+   restart deploy stonks-backend stonks-frontend`
 5. Verify: backend log shows the New Relic agent connecting; the browser
    Network tab shows a `bam.nr-data.net` beacon on page load;
    `curl -sSI $R https://stonks.tareef.tech/ | grep -i content-security-policy`
    contains `bam.nr-data.net` in `connect-src`; the NR UI shows RUM + APM
    data within a few minutes.
 
-**Turn off:** blank both values (SSM + Secret), `rollout restart` both
-deployments — the agent stops and the CSP entry disappears on the next
-container start.
+**Turn off:** blank the SSM parameter and re-apply without
+`TF_VAR_nr_license_key` / `nr_application_id` (the module drops the
+`NR_LICENSE_KEY` Secret key and blanks the `newrelic` values; manual
+path: blank the Secret key and `--set` value), `rollout restart` both
+deployments if not already rolled — the agent stops and the CSP entry
+disappears on the next container start.
 
 ## 4. Backups
 
@@ -461,10 +489,11 @@ Runbook (≈15 min of zero API availability; pick a quiet window):
 
 ## 6. LLM model update
 
-The app's default model is configured through the `LLM_*` keys of
-`stonks-secrets` (`LLM_BASE_URL` = the server's OpenAI-compatible base,
-`LLM_API_KEY`, `LLM_MODEL` = the **full model id the server reports** in
-`/v1/models`, not a filename). Per-user credentials, when set in the UI,
+The app's default model is configured by the `llm.baseUrl` / `llm.model`
+chart values (module vars `llm_base_url` / `llm_model`) plus the
+`LLM_API_KEY` Secret key (and SSM parameter) — D-038: only the key is
+secret. `llm.model` = the **full model id the server reports** in
+`/v1/models`, not a filename. Per-user credentials, when set in the UI,
 override these.
 
 - **Dev:** `make dev-llm-clean && make dev-llm` — wipes the
@@ -473,19 +502,19 @@ override these.
   `llama-init` URL in `docker-compose.dev.yml` first and re-verify the
   sha256.
 - **Prod:** put the new model on the server (operator-owned, off-cluster
-  or in-cluster as you run it), then update `LLM_MODEL` (and
-  `LLM_BASE_URL` if the endpoint moved): SSM parameter →
-  `kubectl -n stonks patch secret stonks-secrets …` →
-  `kubectl -n stonks rollout restart deploy stonks-backend stonks-worker`.
-  Verify with one categorisation from the UI and the worker logs.
+  or in-cluster as you run it), then re-apply the module with the new
+  `llm_model` (and `llm_base_url` if the endpoint moved) vars — a
+  `helm upgrade` rolls `stonks-backend` + `stonks-worker`. If the server
+  (and hence API key) changed, update the `LLM_API_KEY` SSM parameter
+  out-of-band and pass `TF_VAR_llm_api_key` in the same apply. Verify
+  with one categorisation from the UI and the worker logs.
 
 ## 7. Upgrades & rollbacks
 
 **Upgrade** = bump the SHA, re-apply:
 
-```hcl
-  set { name = "images.backend.tag"  value = "<new-git-short-sha>" }
-  set { name = "images.frontend.tag" value = "<new-git-short-sha>" }
+```sh
+terraform apply -var image_tag=<new-git-short-sha>
 ```
 
 `terraform apply` triggers a `helm upgrade`: rolling deploy per workload
@@ -495,8 +524,8 @@ forward-only — the chart never runs `goose down`), and `/readyz` holds
 traffic off until the schema is current. Then run the §2.3 battery
 against the new images.
 
-**Rollback** = set the `images.*.tag` back to the previous SHA and
-re-apply (old tags stay in GHCR — they are never deleted), or
+**Rollback** = set the module's `image_tag` back to the previous SHA
+and re-apply (old tags stay in GHCR — they are never deleted), or
 `helm rollback stonks <rev> -n stonks` if you are outside Terraform.
 Caveat: rolling back the images does NOT roll back the schema — if the
 upgrade already applied a migration that the old code cannot tolerate,

@@ -7,6 +7,17 @@ the only IdP** (see `docs/DEVELOPMENT.md`). This runbook is what the
 operator follows later, when swapping to a real Auth0 tenant — a
 deployment change is then env-only (`OIDC_ISSUER` / `OIDC_CLIENT_ID`).
 
+**Current path (2026-11-26, D-038):** provisioning is done by the
+Terraform child module `infra/terraform/modules/stonks` — one module
+manages the Auth0 tenant settings + SPA + API, the 7 SSM SecureStrings
+(exactly the k8s Secret's key set), the `stonks-secrets` Secret
+(genuinely secret values only), and the Helm release (chart 0.1.3 —
+everything non-secret is a chart value). The `infra/auth0` /
+`infra/aws-ssm` templates documented below are the legacy validate-only
+templates — the module's 7-parameter SSM set is canonical, and the module
+passes `oidc.issuer` / `oidc.clientId` to the chart directly (no manual
+copying).
+
 Since D-030 the env-var names are IdP-agnostic (`OIDC_*`, not `AUTH0_*`):
 dev Keycloak and prod Auth0 use the SAME names, so swapping IdPs is a value
 change, not a rename. The SSM parameter names in `infra/aws-ssm` now match

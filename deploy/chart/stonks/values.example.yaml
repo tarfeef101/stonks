@@ -1,0 +1,16 @@
+# Non-secret example values — used by `make helm-lint` / `make helm-template`
+# (no cluster or real tenant needed). Contains NO secrets: the real deploy
+# passes its own values (the Terraform module builds them from module input
+# variables + Auth0 outputs) and the Secret's keys are consumed by name only.
+oidc:
+  issuer: "https://example-tenant.auth0.com/"
+  clientId: "example-spa-client-id"
+  audience: "finance-api"
+postgres:
+  user: "finance"
+  db: "finance"
+images:
+  backend:
+    tag: "0000000"
+  frontend:
+    tag: "0000000"

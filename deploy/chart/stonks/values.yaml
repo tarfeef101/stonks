@@ -18,8 +18,41 @@ images:
     pullPolicy: IfNotPresent
 
 # Pre-existing Secret in the release namespace — key table in README.md.
+# 0.1.3+: it carries ONLY genuinely secret values; everything non-secret
+# below is a chart value.
 secrets:
   existingSecret: stonks-secrets
+
+# Non-secret OIDC configuration (0.1.3+). `issuer` / `clientId` /
+# `audience` are REQUIRED — the template fails the render when one is
+# empty (the backend itself fails fast on an empty issuer/audience).
+oidc:
+  issuer: ""
+  clientId: ""
+  audience: ""
+  # Optional: empty = discovery runs against `issuer` (one-horizon IdPs
+  # like Auth0).
+  discoveryUrl: ""
+
+# New Relic browser agent (0.1.3+): needs the license key from the
+# existing Secret AND this application ID — either empty = no telemetry.
+newrelic:
+  applicationId: ""
+
+# SMTP (0.1.3+): all empty = mail off. Only `SMTP_PASS` stays in the
+# existing Secret.
+smtp:
+  host: ""
+  port: ""
+  user: ""
+  from: ""
+  tlsPolicy: ""
+
+# LLM (0.1.3+): all empty = LLM off. Only `LLM_API_KEY` stays in the
+# existing Secret.
+llm:
+  baseUrl: ""
+  model: ""
 
 replicas:
   backend: 2
@@ -57,6 +90,11 @@ autoscaling:
     targetCPUUtilizationPercentage: 70
 
 postgres:
+  # Required: database user + name for the StatefulSet (the Secret's
+  # DATABASE_URL must name the same user/db/instance).
+  # `POSTGRES_PASSWORD` stays in the existing Secret.
+  user: ""
+  db: ""
   image:
     repository: postgres
     # Override with the exact verified minor at deploy time (e.g. "18.7")

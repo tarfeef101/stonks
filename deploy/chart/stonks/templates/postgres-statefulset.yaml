@@ -27,16 +27,12 @@ spec:
             - name: postgres
               containerPort: 5432
           env:
+            # 0.1.3+: user/db are non-secret chart values; only the password
+            # comes from the Secret.
             - name: POSTGRES_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.existingSecret }}
-                  key: POSTGRES_USER
+              value: {{ required "postgres.user is required" .Values.postgres.user | quote }}
             - name: POSTGRES_DB
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.secrets.existingSecret }}
-                  key: POSTGRES_DB
+              value: {{ required "postgres.db is required" .Values.postgres.db | quote }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:

@@ -25,38 +25,57 @@ all backendRefs are same-namespace (no ReferenceGrants needed).
 
 ## Prerequisites
 
+Since 0.1.3 the contract splits: the Secret carries **only genuinely
+secret values** (keys, passwords, DSNs); everything else is a non-secret
+chart value.
+
 1. **Secret** `stonks-secrets` (name configurable via
    `secrets.existingSecret`) in the release namespace, created by
-   Terraform from SSM — never by this chart. Key contract:
+   Terraform — never by this chart. Key contract:
 
    | Key | Required | Purpose |
    |---|---|---|
    | `KEK` | yes | 64-hex key-encryption key |
-   | `DATABASE_URL` | yes | pgx DSN for the app DB |
-   | `OIDC_ISSUER` | yes | Auth0 issuer URL |
-   | `OIDC_CLIENT_ID` | yes | first-party SPA client |
-   | `POSTGRES_USER` / `POSTGRES_DB` / `POSTGRES_PASSWORD` | yes | postgres StatefulSet |
-   | `OIDC_AUDIENCE` | yes* | required by the backend at boot — `authn.New` fails fast on an empty audience; the chart renders this ref `optional: true`, so a missing key does not block pod start, but the backend then crash-loops |
-   | `OIDC_CLIENT_SECRET`, `OIDC_DISCOVERY_URL` | no | empty = graceful (PKCE public client; discovery defaults to `OIDC_ISSUER`) |
+   | `DATABASE_URL` | yes | pgx DSN for the app DB (carries the DB password) |
+   | `POSTGRES_PASSWORD` | yes | postgres StatefulSet |
+   | `OIDC_CLIENT_SECRET` | no | empty = graceful (PKCE public client) |
    | `NR_LICENSE_KEY` | no | empty = no telemetry |
-   | `NR_APPLICATION_ID` | no | empty = no telemetry — the browser agent needs both NR values |
-   | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` / `SMTP_TLS_POLICY` | no | empty = mail off |
-   | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | no | empty = LLM off |
+   | `SMTP_PASS` | no | empty = mail off |
+   | `LLM_API_KEY` | no | empty = LLM off |
 
    Missing **required** keys fail pod startup (no `optional:` flag on
    those refs). Optional keys render empty when absent, which the app
-   treats as "feature disabled" — with one exception: `OIDC_AUDIENCE`
-   (the `*` above) renders `optional: true` but is required by the
-   backend at boot. The frontend Deployment consumes
-   `OIDC_ISSUER` (required — its entrypoint renders the runtime security
-   headers/CSP from it) and the two NR keys (optional — they gate the NR
-   browser agent in that CSP) at container start, from the same secret.
+   treats as "feature disabled" (it reads `os.Getenv` — a missing
+   variable IS the empty string). The frontend Deployment additionally
+   consumes `NR_LICENSE_KEY` from the same secret (optional — it gates
+   the NR browser agent in the runtime CSP).
 
-2. **Image tags**: `images.backend.tag` / `images.frontend.tag` MUST be
+2. **Required non-secret values** — the chart fails the RENDER when any
+   is empty (fail fast in CI, not in a crash-looping pod):
+
+   | Value | Purpose |
+   |---|---|
+   | `oidc.issuer` | Auth0 issuer URL (e.g. `https://<tenant>/`) |
+   | `oidc.clientId` | first-party SPA client ID |
+   | `oidc.audience` | resource-server identifier the backend enforces at boot |
+   | `postgres.user` | postgres DB user (must match `DATABASE_URL`) |
+   | `postgres.db` | postgres database name (must match `DATABASE_URL`) |
+
+3. **Optional non-secret values** (empty = feature disabled, or a
+   sensible default):
+
+   | Value | Default when empty |
+   |---|---|
+   | `oidc.discoveryUrl` | discovery runs against `oidc.issuer` (one-horizon IdPs like Auth0) |
+   | `newrelic.applicationId` | no telemetry (the browser agent also needs the `NR_LICENSE_KEY` secret) |
+   | `smtp.host` / `smtp.port` / `smtp.user` / `smtp.from` / `smtp.tlsPolicy` | mail off |
+   | `llm.baseUrl` / `llm.model` | LLM off |
+
+4. **Image tags**: `images.backend.tag` / `images.frontend.tag` MUST be
    overridden with the git short SHA the images were pushed from — the
    default (`latest`) is a sentinel that never exists in the registry.
 
-3. **Gateway API objects** in ns `envoy`: Gateway `global` (section
+5. **Gateway API objects** in ns `envoy`: Gateway `global` (section
    `http`) and ListenerSet `tareef-tech` (section `https`), with a
    terminating certificate covering `stonks.tareef.tech`.
 
