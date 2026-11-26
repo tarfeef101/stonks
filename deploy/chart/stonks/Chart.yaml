@@ -12,6 +12,7 @@ description: >-
 type: application
 # 0.1.0 (2026-11-25) failed server-side validation: requestRedirect.path.type
 # "Preserve" is not a Gateway API value (see httproute-redirect.yaml). 0.1.1
-# is the first installable revision.
-version: 0.1.1
+# is the first installable revision; 0.1.2 (2026-11-26) fixes the HTTPS
+# parentRef kind (Gateway -> ListenerSet, see values.yaml ingress).
+version: 0.1.2
 appVersion: "0.1.0"

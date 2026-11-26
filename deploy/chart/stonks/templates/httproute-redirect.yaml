@@ -15,6 +15,7 @@ spec:
   parentRefs:
     - name: {{ .Values.ingress.httpParent.name }}
       namespace: {{ .Values.ingress.httpParent.namespace }}
+      kind: {{ .Values.ingress.httpParent.kind }}
       sectionName: {{ .Values.ingress.httpParent.sectionName }}
   rules:
     - matches:

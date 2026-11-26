@@ -86,7 +86,14 @@ ingress:
     name: global
     namespace: envoy
     sectionName: http
+    kind: Gateway
   httpsParent:
     name: tareef-tech
     namespace: envoy
     sectionName: https
+    # `tareef-tech` is a ListenerSet (the operator migrated it from a
+    # Gateway to a ListenerSet on 2026-11-16). A Gateway API parentRef
+    # defaults to kind: Gateway, which does NOT resolve to a ListenerSet:
+    # the route gets no status at all and no routes are programmed (the
+    # TLS edge then 404s every path). kind must name the actual object.
+    kind: ListenerSet

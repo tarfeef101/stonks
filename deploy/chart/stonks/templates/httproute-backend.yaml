@@ -15,6 +15,10 @@ spec:
   parentRefs:
     - name: {{ .Values.ingress.httpsParent.name }}
       namespace: {{ .Values.ingress.httpsParent.namespace }}
+      # kind MUST be ListenerSet here (see values.yaml): the API default
+      # (Gateway) does not resolve to a ListenerSet, the route then gets
+      # no status and is never programmed.
+      kind: {{ .Values.ingress.httpsParent.kind }}
       sectionName: {{ .Values.ingress.httpsParent.sectionName }}
   rules:
     - matches:
