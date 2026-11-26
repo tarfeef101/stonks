@@ -141,7 +141,7 @@ func newLimitsTest(t *testing.T, p *statePlans) (http.Handler, string) {
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		false,
 		nil, nil, nil, nil, nil, nil,
-		p)
+		p, PublicConfig{})
 	token := mintIdentityToken(t, key, "limits-sub", "limits@localhost", "Limits", "limitsuser")
 	return h, token
 }

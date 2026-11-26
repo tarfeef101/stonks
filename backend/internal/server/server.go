@@ -26,6 +26,48 @@ import (
 // 1.3) is enforced for exactly this prefix and everything under it.
 const apiPrefix = "/api"
 
+// publicConfigPath is the single unauthenticated route under /api (D-036):
+// it serves deploy-time, public-by-design configuration to the SPA, which
+// fetches it same-origin at startup instead of baking values into the
+// bundle at build time.
+const publicConfigPath = "/api/v1/public-config"
+
+// PublicConfig is the deploy-time, public-by-design configuration served
+// at GET /api/v1/public-config (D-036). Only values that are public by
+// design belong here (OIDC issuer/client id/audience travel in public
+// browser requests; New Relic browser keys are public by design) — never
+// secrets. The SPA omits anything absent; empty fields are omitted from
+// the response.
+type PublicConfig struct {
+	OIDCIssuer      string
+	OIDCClientID    string
+	OIDCAudience    string // "" = omitted from the response
+	NRLicenseKey    string // "" = New Relic agent off
+	NRApplicationID string // "" = New Relic agent off
+}
+
+// publicConfigOIDC / publicConfigNewRelic are the sections of the
+// public-config response; empty values are omitted by their omitempty
+// tags.
+type publicConfigOIDC struct {
+	Issuer   string `json:"issuer"`
+	ClientID string `json:"client_id"`
+	Audience string `json:"audience,omitempty"`
+}
+
+type publicConfigNewRelic struct {
+	LicenseKey    string `json:"license_key,omitempty"`
+	ApplicationID string `json:"application_id,omitempty"`
+}
+
+// publicConfigResponse is the JSON body of GET /api/v1/public-config
+// (D-036). The sections are pointers with omitempty so an empty section
+// disappears from the response entirely.
+type publicConfigResponse struct {
+	OIDC     *publicConfigOIDC     `json:"oidc,omitempty"`
+	NewRelic *publicConfigNewRelic `json:"newrelic,omitempty"`
+}
+
 // prefixAuth returns middleware that requires a valid access token (via v)
 // for requests whose path is prefix or lives under prefix/, and passes all
 // other requests through untouched. It is installed on the root router —
@@ -33,11 +75,23 @@ const apiPrefix = "/api"
 // regardless of route matching: a subrouter answers 404 via its own
 // NotFoundHandler for paths with no matching route (verified empirically
 // against chi v5.5.0 in 1.3b, D-023), which would mask the auth failure.
-func prefixAuth(prefix string, v *authn.Verifier) func(http.Handler) http.Handler {
+// publicPaths are exact-path allow-listed: requests whose path equals one
+// of them skip token verification entirely (e.g. the public-config route,
+// D-036). Every other path at or under the prefix still requires a valid
+// token — the allow-list is exact-match only, never a prefix match.
+func prefixAuth(prefix string, v *authn.Verifier, publicPaths ...string) func(http.Handler) http.Handler {
+	public := make(map[string]struct{}, len(publicPaths))
+	for _, p := range publicPaths {
+		public[p] = struct{}{}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p := r.URL.Path
 			if p != prefix && !strings.HasPrefix(p, prefix+"/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if _, ok := public[p]; ok {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -121,6 +175,7 @@ type handler struct {
 	users         SavingsUserStore
 	snapshots     SnapshotStore
 	plans         PlanStore
+	publicCfg     PublicConfig
 	m             *httpMetrics
 }
 
@@ -179,8 +234,11 @@ type handler struct {
 // mailer
 // (may be nil = no email; the settings routes then skip the verification
 // send) delivers the transactional emails (step 8.1); mailEnabled
-// reflects it in the settings envelope (mail_enabled).
-func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore, fx FX, users SavingsUserStore, snapshots SnapshotStore, plans PlanStore) http.Handler {
+// reflects it in the settings envelope (mail_enabled). publicConfig
+// holds the deploy-time public-by-design values served by
+// GET /api/v1/public-config (D-036); the zero value omits every section
+// from the response.
+func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Bootstrap, settings SettingsStore, accounts AccountStore, categories CategoryStore, transactions TransactionStore, budgets BudgetStore, notifications NotificationStore, schemas SchemaStore, imports ImportStore, jobs *repo.CategoriseJobStore, review ReviewStore, reprompt *Reprompter, llmCreds *LLMCredentials, dashboards DashboardStore, widgets DashboardWidgetStore, savedViews SavedViewStore, mortgages MortgageStore, mailer mail.Sender, mailEnabled bool, institutions InstitutionStore, fiCredentials FICredentialStore, offsets OffsetStore, fx FX, users SavingsUserStore, snapshots SnapshotStore, plans PlanStore, publicConfig PublicConfig) http.Handler {
 	if auth == nil {
 		panic("server.New: auth verifier is required (step 1.3)")
 	}
@@ -213,6 +271,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 		users:         users,
 		snapshots:     snapshots,
 		plans:         plans,
+		publicCfg:     publicConfig,
 		m:             newHTTPMetrics(),
 	}
 
@@ -233,7 +292,7 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 	// token. Enforced on the root router as a prefix middleware (not on the
 	// /api subrouter) — see prefixAuth for why subrouter scoping would let
 	// 404s mask 401s.
-	r.Use(prefixAuth(apiPrefix, auth))
+	r.Use(prefixAuth(apiPrefix, auth, publicConfigPath))
 
 	r.Get("/healthz", h.healthz)
 	r.Get("/readyz", h.readyz)
@@ -244,6 +303,9 @@ func New(ready Readiness, info BuildInfo, auth *authn.Verifier, bootstrap *Boots
 	// Business API routes (step 1.3+). Auth is enforced by the prefix
 	// middleware above; this group holds the concrete routes.
 	r.Route(apiPrefix, func(r chi.Router) {
+		// Public deploy-time config (D-036): unauthenticated by design —
+		// allow-listed in prefixAuth above; public-by-design values only.
+		r.Get("/v1/public-config", h.publicConfig)
 		r.Get("/v1/me", h.me)
 		// User settings (step 1.4a). The users-row settings columns are
 		// the onboarding state; PATCH carries the one-way `onboarded`
@@ -476,6 +538,33 @@ func (h *handler) me(w http.ResponseWriter, r *http.Request) {
 		Email       string `json:"email"`
 		DisplayName string `json:"display_name"`
 	}{c.row.Sub, c.row.Email, c.row.DisplayName})
+}
+
+// publicConfig serves the deploy-time public configuration (D-036): the
+// SPA fetches it unauthenticated at startup instead of carrying build
+// time values. Sections (and keys) are omitted when empty, so the SPA
+// can treat absence as "feature off". Cache-Control is no-store because
+// the values change on deploy — a stale copy from any cache would break
+// sign-in with the wrong issuer or client id.
+func (h *handler) publicConfig(w http.ResponseWriter, _ *http.Request) {
+	body := publicConfigResponse{}
+	if h.publicCfg.OIDCIssuer != "" {
+		body.OIDC = &publicConfigOIDC{
+			Issuer:   h.publicCfg.OIDCIssuer,
+			ClientID: h.publicCfg.OIDCClientID,
+			Audience: h.publicCfg.OIDCAudience,
+		}
+	}
+	if h.publicCfg.NRLicenseKey != "" || h.publicCfg.NRApplicationID != "" {
+		body.NewRelic = &publicConfigNewRelic{
+			LicenseKey:    h.publicCfg.NRLicenseKey,
+			ApplicationID: h.publicCfg.NRApplicationID,
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (h *handler) metrics(next http.Handler) http.Handler {

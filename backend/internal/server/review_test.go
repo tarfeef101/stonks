@@ -268,7 +268,7 @@ func newReviewServer(t *testing.T, store ReviewStore, rep *Reprompter) (http.Han
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, nil, nil, nil, store, rep, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{}), key
 }
 
 // newReviewServerNotifs is newReviewServer with the notification store
@@ -282,7 +282,7 @@ func newReviewServerNotifs(t *testing.T, store ReviewStore, notifs NotificationS
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, notifs, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, notifs, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{}), key
 }
 
 // reviewHdr is the Authorization header for a fresh identity token on

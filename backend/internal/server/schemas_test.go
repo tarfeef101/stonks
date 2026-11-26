@@ -103,7 +103,7 @@ func newSchemasServer(t *testing.T, store SchemaStore) (http.Handler, jwk.Key) {
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, nil, nil, nil, nil, nil, store, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{}), key
 }
 
 // TestImportSchemasList covers the list contract (0018): the caller's
@@ -191,7 +191,7 @@ func TestImportSchemasErrors(t *testing.T) {
 func TestImportSchemasAuth(t *testing.T) {
 	t.Run("missing and garbage tokens are 401", func(t *testing.T) {
 		// testAuth verifies against a nil key set: every token fails.
-		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, &memSchemaStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, testAuth(), nil, nil, nil, nil, nil, nil, nil, &memSchemaStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{})
 		if code, _ := doReq(t, h, http.MethodGet, "/api/v1/import-schemas", "", nil); code != http.StatusUnauthorized {
 			t.Errorf("no token: status = %d, want 401", code)
 		}

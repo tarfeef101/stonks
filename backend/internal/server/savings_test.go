@@ -182,7 +182,7 @@ func newSavingsTest(t *testing.T, users *fakeUsers) (http.Handler, string) {
 			"a-chk":  {{Balance: 99900}},
 		},
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, txns, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, users, snaps, fakePlans{})
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, nil, txns, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, users, snaps, fakePlans{}, PublicConfig{})
 	token := mintIdentityToken(t, key, "savings-sub", "savings@localhost", "Savings", "savingsuser")
 	return h, token
 }

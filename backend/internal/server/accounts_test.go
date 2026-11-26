@@ -45,7 +45,7 @@ func newCrudServer(t *testing.T, accounts AccountStore, categories CategoryStore
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, categories, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil), key
+	return New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accounts, categories, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{}), key
 }
 
 // authHdr is the Authorization header for a minted access token.
@@ -643,7 +643,7 @@ func TestAccountsAuthAndConfig(t *testing.T) {
 	})
 	t.Run("nil bootstrap", func(t *testing.T) {
 		key := mintKey(t)
-		h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), nil, nil, &memAccountStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil)
+		h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), nil, nil, &memAccountStore{}, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{})
 		token := mintIdentityToken(t, key, "nb-sub", "nb@localhost", "N", "nb")
 		code, body := doReq(t, h, http.MethodGet, "/api/v1/accounts", "", authHdr(token))
 		if code != http.StatusServiceUnavailable {

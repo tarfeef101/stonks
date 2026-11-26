@@ -72,6 +72,12 @@ type Config struct {
 	// NRLicenseKey enables the New Relic agent; empty = agent no-ops.
 	NRLicenseKey string
 
+	// NRApplicationID identifies this New Relic application (the agent's
+	// `browser_application_id`); empty = the field is omitted from the
+	// public-config response. Public by design (it ships in browser
+	// traffic), not a secret.
+	NRApplicationID string
+
 	// KEK wraps per-user DEKs: 32 bytes, hex-encoded (64 chars).
 	KEK string
 
@@ -94,6 +100,7 @@ func load(getenv func(string) string) (*Config, error) {
 		OIDCClientSecret: getenv("OIDC_CLIENT_SECRET"),
 		OIDCDiscoveryURL: getenv("OIDC_DISCOVERY_URL"),
 		NRLicenseKey:     getenv("NR_LICENSE_KEY"),
+		NRApplicationID:  getenv("NR_APPLICATION_ID"),
 		KEK:              getenv("KEK"),
 		SMTP: SMTP{
 			Host:      getenv("SMTP_HOST"),

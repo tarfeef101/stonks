@@ -157,7 +157,7 @@ func newSnapsTest(t *testing.T, accts *snapAccts, snaps *snapStoreFake) (http.Ha
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, snaps, nil)
+	h := New(fakeReady{}, BuildInfo{}, liveAuth(t, key), b, nil, accts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, snaps, nil, PublicConfig{})
 	token := mintIdentityToken(t, key, "snaps-sub", "snaps@localhost", "Snaps", "snapsuser")
 	return h, token
 }

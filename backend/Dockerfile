@@ -30,6 +30,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
  && cp /go/bin/goose /out/goose
 
 FROM alpine:3.23
+LABEL org.opencontainers.image.source=https://github.com/tarfeef101/stonks
 RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -g 10001 ftrk \
  && adduser -D -H -u 10001 -G ftrk ftrk

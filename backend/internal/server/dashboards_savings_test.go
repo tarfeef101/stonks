@@ -33,7 +33,7 @@ func newSavingsDashServer(t *testing.T, accts AccountStore, dash DashboardStore,
 	return New(
 		fakeReady{}, BuildInfo{}, liveAuth(t, key), b,
 		nil, accts, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-		dash, wid, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil,
+		dash, wid, nil, nil, nil, false, nil, nil, nil, nil, nil, nil, nil, PublicConfig{},
 	), key
 }
 
