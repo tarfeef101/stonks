@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stonks.labels" (dict "root" . "component" "backend") | nindent 4 }}
+spec:
+  selector:
+    {{- include "stonks.selectorLabels" (dict "root" . "component" "backend") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

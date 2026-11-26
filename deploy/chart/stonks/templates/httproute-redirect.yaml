@@ -1,0 +1,31 @@
+# http:// -> https:// redirect on the public HTTP edge: Gateway `global`,
+# section `http`, ns `envoy` (pre-existing, operator-owned). The redirect
+# is absolute: explicit scheme, hostname and port 16443 (the cluster's
+# public HTTPS NodePort). Path is preserved, so /api/foo -> https://.../api/foo.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}-redirect
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stonks.labels" (dict "root" . "component" "ingress") | nindent 4 }}
+spec:
+  hostnames:
+    - {{ .Values.ingress.hostname }}
+  parentRefs:
+    - name: {{ .Values.ingress.httpParent.name }}
+      namespace: {{ .Values.ingress.httpParent.namespace }}
+      sectionName: {{ .Values.ingress.httpParent.sectionName }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            hostname: {{ .Values.ingress.hostname }}
+            port: {{ .Values.ingress.redirectPort }}
+            path:
+              type: Preserve

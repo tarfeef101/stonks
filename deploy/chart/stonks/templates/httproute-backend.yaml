@@ -1,0 +1,33 @@
+# Main HTTPS route: ListenerSet `tareef-tech`, section `https`, ns `envoy`
+# (pre-existing, operator-owned). Rule order matters: /api first, then the
+# SPA catch-all. /metrics is deliberately NOT exposed here (in-cluster NR
+# scrape only, plan §10.4).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stonks.labels" (dict "root" . "component" "ingress") | nindent 4 }}
+spec:
+  hostnames:
+    - {{ .Values.ingress.hostname }}
+  parentRefs:
+    - name: {{ .Values.ingress.httpsParent.name }}
+      namespace: {{ .Values.ingress.httpsParent.namespace }}
+      sectionName: {{ .Values.ingress.httpsParent.sectionName }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: {{ .Release.Name }}-backend
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ .Release.Name }}-frontend
+          port: 8080

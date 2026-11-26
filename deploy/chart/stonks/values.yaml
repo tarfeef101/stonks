@@ -1,0 +1,92 @@
+# stonks — chart values (plan §10.2; D-033/D-035).
+#
+# PUBLIC chart: nothing below may ever carry a secret VALUE. Secrets are
+# consumed by name only (secrets.existingSecret, created by Terraform from
+# SSM before install — the chart never creates it).
+
+images:
+  # The `latest` defaults are SENTINELS: no such tag is ever pushed.
+  # A real deploy MUST override both with the git short SHA the images
+  # were built/pushed from (make images-push).
+  backend:
+    repository: ghcr.io/tarfeef101/stonks-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: ghcr.io/tarfeef101/stonks-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# Pre-existing Secret in the release namespace — key table in README.md.
+secrets:
+  existingSecret: stonks-secrets
+
+replicas:
+  backend: 2
+  frontend: 2
+  worker: 1
+
+resources:
+  backend:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  worker:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+  frontend:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# HPA for the backend (always rendered; metrics-server is installed).
+autoscaling:
+  backend:
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+
+postgres:
+  image:
+    repository: postgres
+    # Override with the exact verified minor at deploy time (e.g. "18.7")
+    # and record it in docs/OPERATOR.md (plan §10.1).
+    tag: "18"
+  # Postgres >= 18 keeps PGDATA at /var/lib/postgresql/18/docker INSIDE the
+  # volume — the PVC MUST be mounted at /var/lib/postgresql, NOT at
+  # /var/lib/postgresql/data (that mount breaks initdb on v18+).
+  dataDir: /var/lib/postgresql
+  storage:
+    size: 20Gi
+    storageClass: longhorn
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 2Gi
+
+# Edge wiring (D-033): references PRE-EXISTING gateway-api objects in ns
+# `envoy` (operator-owned; this chart creates nothing there).
+ingress:
+  hostname: stonks.tareef.tech
+  redirectPort: 16443
+  httpParent:
+    name: global
+    namespace: envoy
+    sectionName: http
+  httpsParent:
+    name: tareef-tech
+    namespace: envoy
+    sectionName: https

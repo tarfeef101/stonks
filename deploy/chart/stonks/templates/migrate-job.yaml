@@ -1,0 +1,43 @@
+# Migration hook Job (D-035): runs `goose up` from the migrations baked
+# into the backend image. post-install/post-upgrade, NOT pre: on first
+# install the main manifests (postgres) only apply after pre-hooks run, so
+# the database cannot exist yet for a pre-hook. Post-hooks keep
+# helm_release automation correct, and the backend /readyz keeps traffic
+# off until the schema is current.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stonks.labels" (dict "root" . "component" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "stonks.labels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: "{{ .Values.images.backend.repository }}:{{ .Values.images.backend.tag }}"
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              # Retry loop: on first install postgres may still be
+              # initializing. 60 attempts x 5s ~= 5 min, inside
+              # activeDeadlineSeconds.
+              for _ in $(seq 1 60); do
+                goose -dir /migrations postgres "$DATABASE_URL" up && exit 0
+                sleep 5
+              done
+              exit 1
+          env:
+            {{- include "stonks.appEnv" . | nindent 12 }}

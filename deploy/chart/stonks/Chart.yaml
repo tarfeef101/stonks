@@ -1,0 +1,14 @@
+# stonks — production Helm chart (plan §10.2, D-033/D-035).
+#
+# `name` MUST stay `stonks-chart`: helm push cannot rename a chart, and the
+# OCI package is ghcr.io/tarfeef101/stonks-chart, consumed by the Terraform
+# helm_release (infra/).
+apiVersion: v2
+name: stonks-chart
+description: >-
+  Personal Finance Tracker production stack: backend API + worker, frontend
+  SPA, Postgres, migration hook Job, and the two HTTPRoutes for
+  stonks.tareef.tech. All secrets are consumed by name, never carried.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

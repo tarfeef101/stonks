@@ -1,0 +1,33 @@
+# Worker: same image as the backend, different entrypoint. It has NO HTTP
+# listener, so no ports, no probes, and no Service of its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stonks.labels" (dict "root" . "component" "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.worker }}
+  selector:
+    matchLabels:
+      {{- include "stonks.selectorLabels" (dict "root" . "component" "worker") | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "stonks.labels" (dict "root" . "component" "worker") | nindent 8 }}
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.images.backend.repository }}:{{ .Values.images.backend.tag }}"
+          imagePullPolicy: {{ .Values.images.backend.pullPolicy }}
+          command: ["worker"]
+          env:
+            {{- include "stonks.appEnv" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
