@@ -191,7 +191,7 @@ helm-template: ## Render deploy/chart/stonks to stdout (no cluster needed)
 
 .PHONY: chart-push
 chart-push: ## Package the chart and push to oci://$(REGISTRY)/stonks-chart — OPERATOR-GATED
-	docker run --rm -v $(ROOT):/w -w /w $(HELM_IMG) sh -c '$(HELM_SETUP) && /tmp/linux-amd64/helm package deploy/chart/stonks -d /tmp/charts && /tmp/linux-amd64/helm push /tmp/charts/stonks-chart-*.tgz oci://$(REGISTRY)/'
+	docker run --rm -v $(ROOT):/w -w /w -v $(HOME)/.docker:/root/.docker:ro $(HELM_IMG) sh -c '$(HELM_SETUP) && /tmp/linux-amd64/helm package deploy/chart/stonks -d /tmp/charts && /tmp/linux-amd64/helm push /tmp/charts/stonks-chart-*.tgz oci://$(REGISTRY)/'
 
 # ---------- terraform (templates only — never applied) ----------
 # `tf-validate` runs `init` per directory; the resulting .terraform.lock.hcl
