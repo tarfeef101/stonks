@@ -145,10 +145,12 @@ claim assertions — 16 checks, all passing. The click-through equivalent:
    issuer shows the callback page's "Sign-in failed" state (with a
    **Go home** button) instead of redirecting.
 
-Env gotcha: `PUBLIC_OIDC_*` are read by the vite dev server at boot (and
-baked into production builds at build time). After changing them, do
-`make dev-down && make dev` — a bare `docker compose restart` does not
-re-read `.env`.
+Env gotcha: the SPA carries **no** `PUBLIC_*` build args (D-036) — it
+reads its OIDC settings at runtime from the backend's
+`GET /api/v1/public-config`, and the vite dev server proxies `/api` to
+the backend, so the dev source of truth is the backend's `OIDC_*` vars in
+`.env`. After changing them, do `make dev-down && make dev` — a bare
+`docker compose restart` does not re-read `.env`.
 
 ## Keycloak bootstrap semantics (verified 2026-11-03 on 26.8.1)
 
@@ -193,7 +195,12 @@ image): `npm run dev` in the container, source bind-mounted, HMR on.
 `/api/*` requests from `http://localhost:18082` are proxied by vite to the
 backend (target overridable via `VITE_API_PROXY_TARGET`, default
 `http://localhost:18080` inside the compose network). The nginx image from
-step 0.3 is the production serving path and is not used in dev.
+step 0.3 is the production serving path and is not used in dev. It takes
+**zero build args** (D-036): the build bakes in a CSP *template*, and
+`frontend/nginx/entrypoint.sh` renders the security headers from the
+container env (`OIDC_ISSUER` required — the container exits 2 when it is
+missing) into `/tmp/nginx/headers.conf` at container start; the SPA then
+fetches its settings same-origin from `GET /api/v1/public-config`.
 
 ## Helm chart (production deploy)
 
@@ -219,6 +226,11 @@ make chart-push      # package + push oci://ghcr.io/tarfeef101/stonks-chart
   default `stonks-secrets`, created by Terraform from SSM). Secret values
   never enter helm values — they would land in the release Secret in etcd
   (D-033). Key contract: `deploy/chart/stonks/README.md`.
+- The frontend Deployment consumes `OIDC_ISSUER` (required — its
+  entrypoint renders the CSP/security headers from it and exits 2 when it
+  is missing) plus the two NR keys (optional) from the same Secret
+  (D-036); the backend's `GET /api/v1/public-config` then serves the SPA
+  its OIDC settings at runtime.
 - `images.*.tag` defaults to `latest`, a **sentinel** that never exists in
   the registry — Terraform MUST override it with the git short SHA the
   images were pushed from.

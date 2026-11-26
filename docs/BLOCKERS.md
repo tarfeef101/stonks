@@ -33,11 +33,12 @@ independent reasons:
 **Resolution (D-018):** the frontend uses `oidc-client-ts` 3.5.0 (sole dep
 `jwt-decode ^4.0.0`) behind the same wrapper API — plain OIDC discovery,
 issuer-agnostic, PKCE S256 code flow, session persistence via
-`WebStorageStateStore`. The env var names are issuer-agnostic
-(`PUBLIC_OIDC_ISSUER` / `PUBLIC_OIDC_CLIENT_ID` /
-`PUBLIC_OIDC_AUDIENCE` — renamed from `PUBLIC_AUTH0_*` by D-030), so
-switching to a real Auth0 tenant later is an env-only change: Auth0
-serves the same `.well-known` discovery document and the same flow.
+`WebStorageStateStore`. The SDK settings are issuer-agnostic (originally
+the `PUBLIC_AUTH0_*` env, renamed to `PUBLIC_OIDC_*` by D-030, and since
+round 64 / D-036 served to the browser at RUNTIME via the backend's
+`GET /api/v1/public-config` instead of build-time env), so switching to a
+real Auth0 tenant later is still an env-only change: Auth0 serves the
+same `.well-known` discovery document and the same flow.
 
 **Verification:** `scripts/verify.sh oidc` (scripted PKCE S256 E2E —
 discovery, authorize, login form, state round-trip, token exchange,
