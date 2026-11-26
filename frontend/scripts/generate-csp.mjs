@@ -19,8 +19,9 @@
 //   __CONNECT_EXTRA__   ' https://bam.nr-data.net' when the deployment
 //                       sets NR_LICENSE_KEY (NR browser agent on),
 //                       empty otherwise — the marker sits DIRECTLY after
-//                       'self', so an empty render yields a clean
-//                       "connect-src 'self'" (no trailing space).
+//                       'self', so its empty render leaves no stray space;
+//                       __ISSUER_ORIGIN__ (always rendered: OIDC_ISSUER is
+//                       required) follows it in the connect-src directive.
 //
 // Env:
 //   CSP_INDEX          built index.html to hash (default build/index.html)
@@ -61,8 +62,11 @@ const csp = [
 	// the body div, and Tailwind's output is <link>-based anyway.
 	"style-src 'self' 'unsafe-inline'",
 	"img-src 'self'",
-	// __CONNECT_EXTRA__ is rendered at container start (see header).
-	"connect-src 'self'__CONNECT_EXTRA__",
+	// Both markers are rendered at container start (see header). The
+	// order matters: __CONNECT_EXTRA__ (possibly empty) stays directly
+	// after 'self', and __ISSUER_ORIGIN__ (always non-empty) comes last,
+	// so the render is space-exact with or without the NR endpoint.
+	"connect-src 'self'__CONNECT_EXTRA__ __ISSUER_ORIGIN__",
 	"object-src 'none'",
 	// 'self' (the silent-renew iframe lands on /auth/callback after the
 	// issuer's 302) plus the issuer origin (the iframe's first
